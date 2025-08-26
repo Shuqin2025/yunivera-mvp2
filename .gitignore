@@ -1,0 +1,16 @@
+# dependencies
+node_modules/
+
+# build outputs
+dist/
+build/
+
+# env
+.env
+.env.*
+!.env.example
+
+# misc
+.DS_Store
+.vscode/
+*.log
