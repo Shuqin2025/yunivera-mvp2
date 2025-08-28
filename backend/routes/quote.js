@@ -1,3 +1,4 @@
+// backend/routes/quote.js
 import express from 'express'
 import fs from 'fs'
 import path from 'path'
@@ -15,9 +16,9 @@ export default function createRoutes(filesDir) {
     if (!Array.isArray(rows)) return []
     return rows.map((r, i) => {
       const name = String(r?.name ?? '').trim()
-      const sku = String(r?.sku ?? '').trim()
+      const sku  = String(r?.sku  ?? '').trim()
       const price = Number(String(r?.price ?? '0').replace(',', '.')) || 0
-      const moq = Number(r?.moq ?? 0) || 0
+      const moq   = Number(r?.moq ?? 0) || 0
       let params = r?.params ?? {}
       if (typeof params === 'string') {
         try { params = JSON.parse(params) } catch { params = {} }
@@ -32,9 +33,28 @@ export default function createRoutes(filesDir) {
     return `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}_${pad2(d.getHours())}${pad2(d.getMinutes())}${pad2(d.getSeconds())}`
   }
 
+  // 在三个常见位置查找中文字体（NotoSansSC-Regular.ttf）
+  const findCJKFont = () => {
+    const candidates = [
+      path.resolve(filesDir, '..', 'fonts', 'NotoSansSC-Regular.ttf'),
+      path.resolve(process.cwd(), 'backend', 'fonts', 'NotoSansSC-Regular.ttf'),
+      path.resolve(process.cwd(), 'fonts', 'NotoSansSC-Regular.ttf'),
+    ]
+    for (const p of candidates) {
+      if (fs.existsSync(p)) return p
+    }
+    return null
+  }
+
   // ========== 健康检查 ==========
   router.get('/health', (_req, res) => {
     res.json({ ok: true, service: 'quote', ts: Date.now() })
+  })
+
+  // （可选）调试：查看后端是否能找到字体
+  router.get('/debug/font', (_req, res) => {
+    const p = findCJKFont()
+    res.json({ ok: true, fontPath: p, exists: !!p })
   })
 
   // ========== 核心报价逻辑（供两个路径复用） ==========
@@ -87,24 +107,33 @@ export default function createRoutes(filesDir) {
 
       const filename = `quote_${tsName()}.pdf`
       const absPath = path.join(filesDir, filename)
-      const relUrl = `/files/${filename}`
+      const relUrl  = `/files/${filename}`
 
       // 生成 PDF
       const doc = new PDFDocument({ margin: 40 })
       const stream = fs.createWriteStream(absPath)
       doc.pipe(stream)
 
-      // 标题
+      // ★ 关键：加载中文字体（若找到）
+      const fontPath = findCJKFont()
+      if (fontPath) {
+        doc.font(fontPath)
+      } else {
+        console.warn('[pdf] CJK font not found. Chinese text may be garbled.')
+      }
+
+      // 标题与信息
       doc.fontSize(20).text(title, { align: 'center' })
       doc.moveDown(0.5)
       doc.fontSize(10).text(`Mode: ${mode}   Lang: ${lang}   Rows: ${data.length}`, { align: 'center' })
       doc.moveDown(1)
 
-      // 简易表格头
+      // 简易表头
       const headers = ['#', 'Name', 'SKU', 'Price', 'MOQ', 'Params']
       const colW = [30, 160, 100, 70, 60, 170]
       const startX = doc.x
       let y = doc.y
+
       doc.fontSize(11).fillColor('#000')
       headers.forEach((h, i) => {
         const off = colW.slice(0, i).reduce((a, b) => a + b, 0)
