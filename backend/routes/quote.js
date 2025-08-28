@@ -1,67 +1,38 @@
+// backend/routes/quote.js
 import express from 'express';
 import PDFDocument from 'pdfkit';
-import fs from 'fs';
-import path from 'path';
-import { fileURLToPath } from 'url';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const router = express.Router();
 
-export default function routes(filesDir) {
-  const router = express.Router();
+/**
+ * 健康检查
+ * GET https://<your-backend>/v1/api/health
+ * 响应: { ok: true, message: 'OK' }
+ */
+router.get('/health', (req, res) => {
+  res.json({ ok: true, message: 'OK' });
+});
 
-  router.get('/ping', (req, res) => res.send('ok'));
+/**
+ * 生成 PDF（保持与现有前端测试的兼容）
+ * POST https://<your-backend>/v1/api/pdf
+ * body: { title?: string, content?: string }
+ * 响应: application/pdf (attachment: quote.pdf)
+ */
+router.post('/pdf', async (req, res) => {
+  const { title = '测试报价单', content = '这是由后端 /v1/api/pdf 生成的 PDF。' } = req.body || {};
 
-  router.post('/quote/export-pdf', (req, res) => {
-    try {
-      const { title = '示例报价', items = [] } = req.body || {};
+  res.setHeader('Content-Type', 'application/pdf');
+  res.setHeader('Content-Disposition', 'attachment; filename="quote.pdf"');
 
-      const doc = new PDFDocument({ size: 'A4', margin: 50 });
+  const doc = new PDFDocument({ size: 'A4', margin: 50 });
+  doc.pipe(res);
 
-      // 输出文件
-      const fileName = `quote_${Date.now()}.pdf`;
-      const outPath = path.join(filesDir, fileName);
-      const stream = fs.createWriteStream(outPath);
-      doc.pipe(stream);
+  doc.fontSize(20).text(title, { align: 'center' });
+  doc.moveDown();
+  doc.fontSize(12).text(content);
 
-      // 关键：用绝对路径载入中文字体，并在写任何文字前切换到它
-      const fontPath = path.join(__dirname, '..', 'fonts', 'NotoSansSC-Regular.ttf');
-      if (fs.existsSync(fontPath)) {
-        doc.registerFont('noto', fontPath);
-        doc.font('noto'); // 必须在任何 doc.text 之前
-        console.log('[mvp2] using font:', fontPath);
-      } else {
-        console.warn('[mvp2] font not found:', fontPath);
-      }
+  doc.end();
+});
 
-      // 标题
-      doc.fontSize(16).text(title);
-      doc.moveDown();
-
-      // 列表
-      items.forEach((it, idx) => {
-        doc.fontSize(12).text(`${idx + 1}. ${it.name || ''}`);
-        if (it.desc) doc.text(`描述: ${it.desc}`);
-        if (it.price !== undefined) doc.text(`价格: ${it.price}`);
-        if (it.url) doc.text(`链接: ${it.url}`, { link: it.url, underline: true });
-        doc.moveDown(0.8);
-      });
-
-      doc.end();
-
-      stream.on('finish', () => {
-        const host = `${req.protocol}://${req.get('host')}`;
-        res.json({ pdf: `${host}/files/${fileName}` });
-      });
-      stream.on('error', (e) => {
-        console.error(e);
-        res.status(500).json({ error: 'export_failed' });
-      });
-    } catch (e) {
-      console.error(e);
-      res.status(500).json({ error: 'server_error' });
-    }
-  });
-
-  return router;
-}
+export default router;
