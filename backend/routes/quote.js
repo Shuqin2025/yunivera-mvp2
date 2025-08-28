@@ -4,6 +4,8 @@ import fs from 'fs'
 import path from 'path'
 import PDFDocument from 'pdfkit'
 
+const VERSION = 'quote-v3-hf-ellipsis' // ← 用来确认是否部署成功
+
 export default function createRoutes(filesDir) {
   const router = express.Router()
 
@@ -22,9 +24,7 @@ export default function createRoutes(filesDir) {
       const price = Number(String(r?.price ?? '0').replace(',', '.')) || 0
       const moq   = Number(r?.moq ?? 0) || 0
       let params  = r?.params ?? {}
-      if (typeof params === 'string') {
-        try { params = JSON.parse(params) } catch { params = {} }
-      }
+      if (typeof params === 'string') { try { params = JSON.parse(params) } catch { params = {} } }
       return { idx: i + 1, name, sku, price, moq, params }
     })
   }
@@ -40,14 +40,9 @@ export default function createRoutes(filesDir) {
   }
 
   const loadLogoBuffer = (company = {}) => {
-    // 1) dataURL
     if (company.logoDataURL && company.logoDataURL.startsWith('data:image')) {
-      try {
-        const b64 = company.logoDataURL.split(',')[1]
-        return Buffer.from(b64, 'base64')
-      } catch {}
+      try { return Buffer.from(company.logoDataURL.split(',')[1], 'base64') } catch {}
     }
-    // 2) 路径（绝对/相对）
     const tryPaths = []
     if (company.logoPath) tryPaths.push(company.logoPath)
     tryPaths.push(
@@ -55,11 +50,7 @@ export default function createRoutes(filesDir) {
       path.resolve(process.cwd(), 'backend', 'public', 'logo.png'),
       path.resolve(process.cwd(), 'backend', 'logo.png'),
     )
-    for (const p of tryPaths) {
-      try {
-        if (fs.existsSync(p)) return fs.readFileSync(p)
-      } catch {}
-    }
+    for (const p of tryPaths) { try { if (fs.existsSync(p)) return fs.readFileSync(p) } catch {} }
     return null
   }
 
@@ -81,6 +72,23 @@ export default function createRoutes(filesDir) {
     return parts.join('；') || '-'
   }
 
+  // 手工单行省略：根据当前字体/字号测宽，超出则裁切并加 …
+  const singleLineEllipsis = (doc, text, maxWidth) => {
+    if (!text) return ''
+    let t = String(text)
+    const w = doc.widthOfString(t)
+    if (w <= maxWidth) return t
+    const ell = '…'
+    let lo = 0, hi = t.length
+    while (lo < hi) {
+      const mid = Math.floor((lo + hi) / 2)
+      const s = t.slice(0, mid) + ell
+      if (doc.widthOfString(s) <= maxWidth) lo = mid + 1
+      else hi = mid
+    }
+    return t.slice(0, Math.max(0, lo - 1)) + ell
+  }
+
   const i18n = {
     title: (lang) => lang === 'de' ? 'Angebot' : lang === 'en' ? 'Quotation' : '报价单',
     subtotal: (lang, total) =>
@@ -92,21 +100,21 @@ export default function createRoutes(filesDir) {
       : lang === 'en' ? 'Note: Please verify battery capacity and LED count.'
       : '提示：请核对电池容量与LED数量。',
     headers: (lang) =>
-      lang === 'de'
-        ? ['#', 'Name', 'SKU', 'Preis', 'MOQ', 'Parameter']
-        : lang === 'en'
-        ? ['#', 'Name', 'SKU', 'Price', 'MOQ', 'Params']
-        : ['#', '名称', 'SKU', '价格', 'MOQ', '参数'],
+      lang === 'de' ? ['#', 'Name', 'SKU', 'Preis', 'MOQ', 'Parameter']
+      : lang === 'en' ? ['#', 'Name', 'SKU', 'Price', 'MOQ', 'Params']
+      : ['#', '名称', 'SKU', '价格', 'MOQ', '参数'],
   }
 
   // ============ Health / Debug ============
   router.get('/health', (_req, res) => {
-    res.json({ ok: true, service: 'quote', ts: Date.now() })
+    res.json({ ok: true, service: 'quote', version: VERSION, ts: Date.now() })
   })
-
   router.get('/debug/font', (_req, res) => {
     const p = findCJKFont()
-    res.json({ ok: true, fontPath: p, exists: !!p })
+    res.json({ ok: true, fontPath: p, exists: !!p, version: VERSION })
+  })
+  router.get('/debug/version', (_req, res) => {
+    res.json({ ok: true, version: VERSION })
   })
 
   // ============ Quote ============
@@ -133,54 +141,43 @@ export default function createRoutes(filesDir) {
             : `推荐语：请核对电池 ${r.params?.battery ?? 'N/A'} 与 ${r.params?.leds ?? '?'} 颗LED。`
       }))
 
-      res.json({ ok: true, data, summary, recommendations })
+      res.json({ ok: true, data, summary, recommendations, version: VERSION })
     } catch (err) {
       console.error('[quote] error:', err)
-      res.status(500).json({ ok: false, error: 'INTERNAL_ERROR' })
+      res.status(500).json({ ok: false, error: 'INTERNAL_ERROR', version: VERSION })
     }
   }
   router.post('/quote', handleQuote)
   router.post('/quote/generate', handleQuote)
 
-  // ============ Header / Footer 绘制 ============
+  // ============ Header / Footer ============
   const drawHeader = (doc, opts) => {
-    const {
-      fontPath, company = {}, lang = 'zh',
-      pageWidth = doc.page.width, margin = doc.page.margins.left
-    } = opts
-
-    // 左：Logo；右：公司名称/信息
+    const { fontPath, company = {} } = opts
+    const margin = doc.page.margins.left
+    const pageWidth = doc.page.width
     let topY = margin - 10
     const colLeftX = margin
-    const colRightX = pageWidth - margin - 330 // 右侧文本列宽约 330
+    const colRightX = pageWidth - margin - 330
 
-    // 尝试画 Logo（高不超过 42）
     if (company._logoBuffer) {
-      try {
-        doc.image(company._logoBuffer, colLeftX, topY, { fit: [140, 42], align: 'left', valign: 'center' })
-      } catch (e) { console.warn('[pdf] draw logo failed:', e.message) }
+      try { doc.image(company._logoBuffer, colLeftX, topY, { fit: [140, 42] }) } catch {}
     }
-
-    // 公司文字信息
-    const name = company.name || 'Your Company'
-    const addr = company.address || ''
-    const phone= company.phone || ''
-    const email= company.email || ''
-    const web  = company.website || ''
+    const name  = company.name    || 'Your Company'
+    const addr  = company.address || ''
+    const phone = company.phone   || ''
+    const email = company.email   || ''
+    const web   = company.website || ''
 
     doc.font(fontPath || 'Helvetica-Bold').fontSize(14)
        .text(name, colRightX, topY, { width: 330, align: 'right' })
     doc.font(fontPath || 'Helvetica').fontSize(9).fillColor('#666')
     const lines = [addr, phone, email, web].filter(Boolean)
-    if (lines.length) {
-      doc.text(lines.join('  |  '), colRightX, topY + 18, { width: 330, align: 'right' })
-    }
+    if (lines.length) doc.text(lines.join('  |  '), colRightX, topY + 18, { width: 330, align: 'right' })
     doc.fillColor('#000')
 
-    // 下划线
     const y = topY + 48
     doc.moveTo(margin, y).lineTo(pageWidth - margin, y).strokeColor('#999').stroke()
-    doc.y = y + 10 // 内容起始 y
+    doc.y = y + 10
   }
 
   const drawFooter = (doc, opts) => {
@@ -190,10 +187,7 @@ export default function createRoutes(filesDir) {
     const pageHeight = doc.page.height
     const y = pageHeight - margin + 5
 
-    // 上细线
     doc.moveTo(margin, y - 10).lineTo(pageWidth - margin, y - 10).strokeColor('#eee').stroke()
-
-    // 左：时间 & 网站；右：页码
     const now = new Date()
     const stamp = `${now.getFullYear()}-${pad2(now.getMonth()+1)}-${pad2(now.getDate())} ${pad2(now.getHours())}:${pad2(now.getMinutes())}`
     const leftText = [stamp, (company.website || '')].filter(Boolean).join('  |  ')
@@ -205,10 +199,7 @@ export default function createRoutes(filesDir) {
   const hookHeaderFooter = (doc, opts) => {
     drawHeader(doc, opts)
     drawFooter(doc, opts)
-    doc.on('pageAdded', () => {
-      drawHeader(doc, opts)
-      drawFooter(doc, opts)
-    })
+    doc.on('pageAdded', () => { drawHeader(doc, opts); drawFooter(doc, opts) })
   }
 
   // ============ PDF ============
@@ -223,20 +214,18 @@ export default function createRoutes(filesDir) {
       const absPath  = path.join(filesDir, filename)
       const relUrl   = `/files/${filename}`
 
-      const doc = new PDFDocument({ margin: 52 }) // 给页眉/脚多一点空间
+      const doc = new PDFDocument({ margin: 52 })
       const stream = fs.createWriteStream(absPath)
       doc.pipe(stream)
 
-      // 字体 & Logo
       const fontPath = findCJKFont()
       if (fontPath) doc.font(fontPath)
-      else console.warn('[pdf] CJK font not found. Chinese text may be garbled.')
+      else console.warn('[pdf] CJK font not found.')
       company._logoBuffer = loadLogoBuffer(company)
 
-      // Header/Footer
       hookHeaderFooter(doc, { fontPath, company, lang })
 
-      // 标题区（在 header 下方）
+      // 标题 + meta
       doc.moveDown(0.5)
       doc.fontSize(18).text(title || i18n.title(lang), { align: 'center' })
       doc.moveDown(0.5)
@@ -263,20 +252,22 @@ export default function createRoutes(filesDir) {
       doc.moveTo(startX, y).lineTo(startX + colW.reduce((a,b)=>a+b,0), y).strokeColor('#999').stroke()
       doc.moveDown(0.3)
 
-      // 表体
+      // 表体（单行省略）
       const baseFont = fontPath || 'Helvetica'
       const monoFont = 'Courier'
       data.forEach(r => {
-        const paramText = formatParams(r.params, lang)
+        const nameTx  = singleLineEllipsis(doc, String(r.name || ''), colW[1])
+        const skuTx   = singleLineEllipsis(doc, String(r.sku  || ''), colW[2])
+        const paramsTx= singleLineEllipsis(doc, formatParams(r.params, lang), colW[5])
+
         let off = 0
         doc.font(baseFont).fontSize(10).fillColor('#000')
-
-        doc.text(String(r.idx), startX + off, doc.y, { width: colW[0], lineBreak:false, continued:true }) ; off+=colW[0]
-        doc.text(String(r.name || ''), startX + off, doc.y, { width: colW[1], lineBreak:false, ellipsis:true, continued:true }) ; off+=colW[1]
-        doc.text(String(r.sku || ''),  startX + off, doc.y, { width: colW[2], lineBreak:false, ellipsis:true, continued:true }) ; off+=colW[2]
-        doc.text(r.price.toFixed(2),    startX + off, doc.y, { width: colW[3], align:'right', lineBreak:false, continued:true }) ; off+=colW[3]
-        doc.text(String(r.moq || 0),    startX + off, doc.y, { width: colW[4], align:'right', lineBreak:false, continued:true }) ; off+=colW[4]
-        doc.font(monoFont).text(paramText, startX + off, doc.y, { width: colW[5], lineBreak:false, ellipsis:true, continued:false })
+        doc.text(String(r.idx), startX + off, doc.y, { width: colW[0], lineBreak:false, continued:true }); off+=colW[0]
+        doc.text(nameTx,       startX + off, doc.y, { width: colW[1], lineBreak:false, continued:true });  off+=colW[1]
+        doc.text(skuTx,        startX + off, doc.y, { width: colW[2], lineBreak:false, continued:true });  off+=colW[2]
+        doc.text(r.price.toFixed(2), startX + off, doc.y, { width: colW[3], align:'right', lineBreak:false, continued:true }); off+=colW[3]
+        doc.text(String(r.moq || 0), startX + off, doc.y, { width: colW[4], align:'right', lineBreak:false, continued:true });   off+=colW[4]
+        doc.font(monoFont).text(paramsTx, startX + off, doc.y, { width: colW[5], lineBreak:false, continued:false })
         doc.font(baseFont)
         doc.moveDown(0.3)
       })
@@ -290,15 +281,11 @@ export default function createRoutes(filesDir) {
       doc.fillColor('#000')
 
       doc.end()
-
-      stream.on('finish', () => res.json({ ok: true, fileUrl: relUrl, filename }))
-      stream.on('error', (e) => {
-        console.error('[pdf] stream error:', e)
-        res.status(500).json({ ok: false, error: 'PDF_STREAM_ERROR' })
-      })
+      stream.on('finish', () => res.json({ ok: true, fileUrl: relUrl, filename, version: VERSION }))
+      stream.on('error',  (e) => res.status(500).json({ ok: false, error: 'PDF_STREAM_ERROR', version: VERSION }))
     } catch (err) {
       console.error('[pdf] error:', err)
-      res.status(500).json({ ok: false, error: 'INTERNAL_ERROR' })
+      res.status(500).json({ ok: false, error: 'INTERNAL_ERROR', version: VERSION })
     }
   })
 
