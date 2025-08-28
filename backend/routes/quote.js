@@ -1,58 +1,97 @@
 // backend/routes/quote.js
-import { Router } from 'express';
+import express from 'express';
 
 /**
- * 创建路由。保持与 server.js 中 app.use('/v1/api', routes(filesDir)) 的调用方式兼容。
- * @param {string} filesDir - 传入的文件目录路径（本文件中暂时不使用，但保留以兼容调用签名）
- * @returns {import('express').Router}
+ * 路由工厂
+ * @param {string} filesDir - 后端 /files 静态目录的绝对路径（来自 server.js 传入）
+ * @returns {express.Router}
  */
 export default function createRoutes(filesDir) {
-  const router = Router();
+  const router = express.Router();
 
-  // 健康检查：GET /v1/api/health
+  // --- 工具函数：简单校验 ---
+  const normalizeRows = (rows) => {
+    if (!Array.isArray(rows)) return [];
+    return rows.map((r, i) => {
+      const name = String(r?.name || '').trim();
+      const sku  = String(r?.sku  || '').trim();
+      // 价格用英文小数点
+      const price = Number(String(r?.price || '0').replace(',', '.')) || 0;
+      const moq   = Number(r?.moq || 0) || 0;
+      // params 允许是对象或字符串
+      let params = r?.params ?? {};
+      if (typeof params === 'string') {
+        try { params = JSON.parse(params); } catch { params = {}; }
+      }
+      return { idx: i, name, sku, price, moq, params };
+    });
+  };
+
+  // --- 健康检查 ---
   router.get('/health', (req, res) => {
-    res.json({ ok: true, message: 'OK' });
+    res.json({ ok: true, service: 'quote', ts: Date.now() });
   });
 
-  /**
-   * 生成报价/推荐语的接口（占位实现）
-   * 前端如果发送 JSON：{ rows: [...], lang: 'zh', mode: 'A' }，这里直接回传。
-   * 如需真实逻辑，再把计算填进去即可。
-   */
-  router.post('/quote', async (req, res) => {
+  // --- 核心处理逻辑（供 /quote 与 /quote/generate 复用） ---
+  const handleQuote = async (req, res) => {
     try {
       const { rows = [], lang = 'zh', mode = 'A' } = req.body || {};
-      // TODO: 在这里做真实的报价与推荐语计算
-      res.json({
+      const data = normalizeRows(rows);
+
+      if (!data.length) {
+        return res.status(400).json({ ok: false, error: 'ROWS_REQUIRED' });
+      }
+
+      // 这里写你的业务逻辑：结构化报价、推荐语等
+      // 为了先跑通，我们返回一个示例结果
+      const summary = {
+        count: data.length,
+        currency: 'USD',
+        mode,
+        lang,
+        total: data.reduce((s, r) => s + r.price * Math.max(1, r.moq || 1), 0),
+      };
+
+      const recommendations = data.map(r => ({
+        sku: r.sku,
+        text:
+          lang === 'de'
+            ? `Empfehlung: Prüfe Batterie ${r.params?.battery ?? 'N/A'} und ${r.params?.leds ?? '?'} LEDs.`
+            : lang === 'en'
+            ? `Recommendation: Check battery ${r.params?.battery ?? 'N/A'} and ${r.params?.leds ?? '?'} LEDs.`
+            : `推荐语：请核对电池 ${r.params?.battery ?? 'N/A'} 与 ${r.params?.leds ?? '?'} 颗LED。`
+      }));
+
+      return res.json({
         ok: true,
-        data: {
-          mode,
-          lang,
-          rows,
-          tips: '这是占位响应：在此处实现真实的报价与推荐语逻辑。',
-        },
+        data,
+        summary,
+        recommendations,
       });
     } catch (err) {
       console.error('[quote] error:', err);
-      res.status(500).json({ ok: false, error: 'INTERNAL_ERROR' });
+      return res.status(500).json({ ok: false, error: 'INTERNAL_ERROR' });
     }
-  });
+  };
 
-  /**
-   * 如果你的前端还有调用 /v1/api/pdf，这里给个占位实现，避免 404。
-   * 之后你可以改成真实的 PDF 生成。
-   */
+  // --- 主路径 ---
+  router.post('/quote', handleQuote);
+  // --- 兼容旧前端：/quote/generate 作为别名 ---
+  router.post('/quote/generate', handleQuote);
+
+  // --- 预留 PDF 接口（占位实现，先返回 JSON，后续接入真正PDF生成） ---
   router.post('/pdf', async (req, res) => {
     try {
-      const { title = '报价单', content = '内容占位' } = req.body || {};
-      res.json({
+      const { title = '报价单', content = '' } = req.body || {};
+      return res.json({
         ok: true,
-        message: 'PDF 占位接口：这里未真正生成 PDF，仅回显请求数据。',
+        message: 'PDF endpoint placeholder',
+        hint: '接入真正的 PDF 生成后，返回 /files/<filename>.pdf 的可下载URL',
         echo: { title, content },
       });
     } catch (err) {
       console.error('[pdf] error:', err);
-      res.status(500).json({ ok: false, error: 'INTERNAL_ERROR' });
+      return res.status(500).json({ ok: false, error: 'INTERNAL_ERROR' });
     }
   });
 
