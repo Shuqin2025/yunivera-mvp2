@@ -1,5 +1,7 @@
 import React, { useState } from 'react'
-const API = import.meta.env.VITE_API_BASE || 'http://localhost:5188'
+
+// 改成 VITE_API_URL，不再 fallback 到 localhost
+const API = import.meta.env.VITE_API_URL
 
 function emptyRow(){ return { name:'', sku:'', price:0, moq:0, params:'' } }
 
