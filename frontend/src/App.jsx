@@ -126,9 +126,9 @@ export default function App() {
         throw new Error(msg)
       }
       if (data?.fileUrl) {
-        // 后端返回的是 /files/xxx.pdf，相对路径，拼接 API_BASE 的 host
-        const baseUrl = API_BASE.replace(/\/v1\/api\/?$/, '')
-        window.open(`${baseUrl}${data.fileUrl}`, '_blank')
+        // 后端返回 /files/xxx.pdf（相对路径），这里去掉 API_BASE 的 /v1/api 再拼
+        const baseHost = API_BASE.replace(/\/v1\/api\/?$/, '')
+        window.open(`${baseHost}${data.fileUrl}`, '_blank')
       } else {
         alert('已生成，但未返回文件地址')
       }
@@ -157,7 +157,7 @@ export default function App() {
       const data = await res.json()
       setScrapeData(data)
 
-      // 预览（有 preview 就塞进 iframe）
+      // 预览：后端返回 preview（精简 HTML），配合 <base> 让相对路径可解析
       if (data?.preview && iframeRef.current) {
         iframeRef.current.srcdoc = `<base href="${data.url}">${data.preview}`
       } else if (iframeRef.current) {
@@ -171,44 +171,47 @@ export default function App() {
     }
   }
 
-  // ==== 一键回填 ====
+  // ==== 一键回填（含 name/sku/price/moq/params） ====
   const fillToRow = (targetIndex = 0, createIfMissing = true) => {
     if (!scrapeData) {
       alert('请先抓取成功后再回填')
       return
     }
-    // 确保目标行存在
     let next = rows.slice()
     if (targetIndex >= next.length) {
       if (!createIfMissing) {
         alert('不存在可回填的行，请先新增一行')
         return
       }
-      // 自动补足到 targetIndex
       while (next.length <= targetIndex) {
         next.push({ name: '', sku: '', price: '', moq: '', params: '' })
       }
     }
 
-    const { title, description, h1 = [], url } = scrapeData
+    const { title, description, h1 = [], url, sku, price, currency, moq } = scrapeData
     const paramsObj = {
       h1,
       description: description || '',
-      source: url || rawUrl || '',
+      source: url || '',
+      currency: currency || null,
     }
-    const prettyParams = JSON.stringify(paramsObj, null, 0) // 紧凑些，便于后端解析
+    const prettyParams = JSON.stringify(paramsObj)
 
     next[targetIndex] = {
       ...next[targetIndex],
       name: title || next[targetIndex].name,
-      // sku、price、moq 不动，由用户补
+      sku: sku || next[targetIndex].sku,
+      price: (price != null ? String(price) : next[targetIndex].price),
+      moq: (moq != null ? String(moq) : next[targetIndex].moq),
       params: prettyParams,
     }
 
     setRows(next)
     alert(
       `已回填到第 ${targetIndex + 1} 行：\n` +
-        `name="${title || ''}"\nparams=${prettyParams}`
+        `name="${title || ''}"\n` +
+        `sku=${sku ?? '(无)'}  price=${price ?? '(无)'}  moq=${moq ?? '(无)'}\n` +
+        `params=${prettyParams}`
     )
   }
 
@@ -344,7 +347,10 @@ export default function App() {
           <div style={{ marginBottom: 8 }}>
             <b>Title：</b>{scrapeData.title || '(无)'}　　
             <b>描述：</b>{scrapeData.description || '(无)'}　　
-            <b>H1：</b>{(scrapeData.h1 || []).join(' / ') || '(无)'}
+            <b>H1：</b>{(scrapeData.h1 || []).join(' / ') || '(无)'}　　
+            <b>SKU：</b>{scrapeData.sku ?? '(无)'}　　
+            <b>Price：</b>{scrapeData.price ?? '(无)'} {scrapeData.currency ?? ''}
+            <b style={{marginLeft: 12}}>MOQ：</b>{scrapeData.moq ?? '(无)'}
           </div>
           <div style={{ display: 'flex', gap: 16 }}>
             <iframe
