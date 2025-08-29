@@ -1,1 +1,48 @@
-<!doctype html><html><head><meta charset='utf-8'/><meta name='viewport' content='width=device-width,initial-scale=1'/><title>MVP2 Quote</title></head><body><div id='root'></div><script type='module' src='/src/main.jsx'></script></body></html>
+<!DOCTYPE html>
+<html lang="zh">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MVP2 Quote & Recommend</title>
+    <style>
+      body { font-family: sans-serif; margin: 1em; }
+      #scrape-box { margin-top: 2em; padding: 1em; border: 1px solid #ccc; }
+      #scrape-box input { width: 60%; padding: 4px; }
+      #scrape-result { margin-top: 1em; white-space: pre-wrap; font-size: 0.9em; background: #f8f8f8; padding: 0.5em; border: 1px solid #ddd; }
+    </style>
+  </head>
+  <body>
+    <!-- React App 挂载点 -->
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+
+    <!-- 抓取 Demo UI -->
+    <div id="scrape-box">
+      <h3>网页抓取 Demo (/v1/api/scrape)</h3>
+      <input id="scrape-url" type="text" value="https://example.com" />
+      <button id="scrape-btn">抓取</button>
+      <div id="scrape-result"></div>
+    </div>
+
+    <script>
+      const API = import.meta.env.VITE_API_BASE;
+
+      document.getElementById('scrape-btn').addEventListener('click', async () => {
+        const rawUrl = document.getElementById('scrape-url').value;
+        const out = document.getElementById('scrape-result');
+        out.textContent = '⏳ 抓取中...';
+
+        try {
+          const res = await fetch(`${API}/scrape?url=${encodeURIComponent(rawUrl)}`);
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          const data = await res.json();
+          out.textContent =
+            `Title: ${data.title}\n描述: ${data.description || '(无)'}\nH1: ${data.h1?.join(' | ') || '(无)'}\n\n完整数据:\n` +
+            JSON.stringify(data, null, 2);
+        } catch (e) {
+          out.textContent = '❌ 抓取失败: ' + e.message;
+        }
+      });
+    </script>
+  </body>
+</html>
