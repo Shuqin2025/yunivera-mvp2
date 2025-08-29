@@ -1,11 +1,11 @@
 import React, { useState, useRef } from 'react'
 
-// 优先读取环境变量 VITE_API_URL，未配置时回退到后端线上域名
-const API =
+// 统一后端基址：优先 .env 的 VITE_API_BASE（应含 /v1/api），否则回退到线上
+const API_BASE =
   (typeof import.meta !== 'undefined' &&
     import.meta.env &&
-    import.meta.env.VITE_API_URL) ||
-  'https://yunivera-mvp2.onrender.com'
+    import.meta.env.VITE_API_BASE) ||
+  'https://yunivera-mvp2.onrender.com/v1/api'
 
 export default function App() {
   // ==== 报价 & 推荐语 ====
@@ -18,7 +18,7 @@ export default function App() {
       params: '{"battery":"1200mAh","leds":30}',
     },
   ])
-  const [template, setTemplate] = useState('A') // mode: 'A' | 'B' | 'C'
+  const [template, setTemplate] = useState('A') // 'A' | 'B' | 'C'
   const [lang, setLang] = useState('zh')
   const [busy, setBusy] = useState(false)
 
@@ -76,7 +76,7 @@ export default function App() {
     }
     setBusy(true)
     try {
-      const res = await fetch(`${API}/v1/api/quote/generate`, {
+      const res = await fetch(`${API_BASE}/quote/generate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -110,7 +110,7 @@ export default function App() {
     }
     setBusy(true)
     try {
-      const res = await fetch(`${API}/v1/api/pdf`, {
+      const res = await fetch(`${API_BASE}/pdf`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ title: '报价单', ...payload }),
@@ -126,7 +126,9 @@ export default function App() {
         throw new Error(msg)
       }
       if (data?.fileUrl) {
-        window.open(`${API}${data.fileUrl}`, '_blank')
+        // 后端返回的是 /files/xxx.pdf，相对路径，拼接 API_BASE 的 host
+        const baseUrl = API_BASE.replace(/\/v1\/api\/?$/, '')
+        window.open(`${baseUrl}${data.fileUrl}`, '_blank')
       } else {
         alert('已生成，但未返回文件地址')
       }
@@ -141,26 +143,78 @@ export default function App() {
   // ==== 网页抓取 Demo（/v1/api/scrape） ====
   const [rawUrl, setRawUrl] = useState('https://example.com')
   const [scrapeData, setScrapeData] = useState(null)
+  const [scrapeLoading, setScrapeLoading] = useState(false)
   const iframeRef = useRef(null)
 
-  const scrapeUrl = async () => {
+  const doScrape = async () => {
     if (!rawUrl.trim()) return alert('请先输入 URL')
+    setScrapeLoading(true)
     setScrapeData(null)
     try {
-      const url = `${API}/v1/api/scrape?url=${encodeURIComponent(rawUrl)}`
+      const url = `${API_BASE}/scrape?url=${encodeURIComponent(rawUrl)}`
       const res = await fetch(url, { method: 'GET', cache: 'no-store' })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json()
       setScrapeData(data)
 
-      // 预览（如果返回了 preview，就塞进 <iframe srcdoc>）
+      // 预览（有 preview 就塞进 iframe）
       if (data?.preview && iframeRef.current) {
-        iframeRef.current.srcdoc = data.preview
+        iframeRef.current.srcdoc = `<base href="${data.url}">${data.preview}`
+      } else if (iframeRef.current) {
+        iframeRef.current.removeAttribute('srcdoc')
       }
     } catch (e) {
       console.error('SCRAPE ERR:', e)
       alert('抓取失败：' + e.message)
+    } finally {
+      setScrapeLoading(false)
     }
+  }
+
+  // ==== 一键回填 ====
+  const fillToRow = (targetIndex = 0, createIfMissing = true) => {
+    if (!scrapeData) {
+      alert('请先抓取成功后再回填')
+      return
+    }
+    // 确保目标行存在
+    let next = rows.slice()
+    if (targetIndex >= next.length) {
+      if (!createIfMissing) {
+        alert('不存在可回填的行，请先新增一行')
+        return
+      }
+      // 自动补足到 targetIndex
+      while (next.length <= targetIndex) {
+        next.push({ name: '', sku: '', price: '', moq: '', params: '' })
+      }
+    }
+
+    const { title, description, h1 = [], url } = scrapeData
+    const paramsObj = {
+      h1,
+      description: description || '',
+      source: url || rawUrl || '',
+    }
+    const prettyParams = JSON.stringify(paramsObj, null, 0) // 紧凑些，便于后端解析
+
+    next[targetIndex] = {
+      ...next[targetIndex],
+      name: title || next[targetIndex].name,
+      // sku、price、moq 不动，由用户补
+      params: prettyParams,
+    }
+
+    setRows(next)
+    alert(
+      `已回填到第 ${targetIndex + 1} 行：\n` +
+        `name="${title || ''}"\nparams=${prettyParams}`
+    )
+  }
+
+  const fillNewRow = () => {
+    // 在表尾新加一行并回填
+    fillToRow(rows.length, true)
   }
 
   return (
@@ -198,12 +252,12 @@ export default function App() {
       <table border="1" cellPadding="6" style={{ width: '100%' }}>
         <thead>
           <tr>
-            <th>Name</th>
-            <th>SKU</th>
-            <th>Price</th>
-            <th>MOQ</th>
+            <th style={{width: '28%'}}>Name</th>
+            <th style={{width: '14%'}}>SKU</th>
+            <th style={{width: '14%'}}>Price</th>
+            <th style={{width: '14%'}}>MOQ</th>
             <th>Params(JSON)</th>
-            <th>操作</th>
+            <th style={{width: 80}}>操作</th>
           </tr>
         </thead>
         <tbody>
@@ -242,6 +296,7 @@ export default function App() {
                   style={{ width: '100%' }}
                   value={r.params}
                   onChange={(e) => onChange(i, 'params', e.target.value)}
+                  placeholder='例如 {"battery":"1200mAh"} 或由“回填”按钮自动生成'
                 />
               </td>
               <td>
@@ -260,24 +315,32 @@ export default function App() {
         <button style={{ marginLeft: 8 }} onClick={generatePdf} disabled={busy}>
           {busy ? '生成中…' : '生成 PDF'}
         </button>
-        <div style={{ marginTop: 8, color: '#777' }}>API = {API}</div>
+        <div style={{ marginTop: 8, color: '#777' }}>API_BASE = {API_BASE}</div>
       </div>
 
       {/* ====== 抓取区域 ====== */}
       <hr style={{ margin: '24px 0' }} />
-      <h3>网页抓取 Demo（/v1/api/scrape）</h3>
-      <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+      <h3>网页抓取 Demo（/scrape）</h3>
+      <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginBottom: 8 }}>
         <input
           style={{ width: 420 }}
           placeholder="输入要抓取的 URL，例如 https://example.com"
           value={rawUrl}
           onChange={(e) => setRawUrl(e.target.value)}
         />
-        <button onClick={scrapeUrl}>抓取</button>
+        <button onClick={doScrape} disabled={scrapeLoading}>
+          {scrapeLoading ? '抓取中…' : '抓取'}
+        </button>
+        <button onClick={() => fillToRow(0, true)} disabled={!scrapeData}>
+          回填到第一行
+        </button>
+        <button onClick={fillNewRow} disabled={!scrapeData}>
+          新建一行并回填
+        </button>
       </div>
 
       {scrapeData && (
-        <div style={{ marginTop: 12 }}>
+        <div style={{ marginTop: 8 }}>
           <div style={{ marginBottom: 8 }}>
             <b>Title：</b>{scrapeData.title || '(无)'}　　
             <b>描述：</b>{scrapeData.description || '(无)'}　　
