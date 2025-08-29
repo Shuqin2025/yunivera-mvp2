@@ -1,6 +1,6 @@
-import React, { useState } from 'react'
+import React, { useState, useRef } from 'react'
 
-// 优先使用环境变量，否则回退到后端线上域名（确保这里是“后端”的域名）
+// 优先读取环境变量 VITE_API_URL，未配置时回退到后端线上域名
 const API =
   (typeof import.meta !== 'undefined' &&
     import.meta.env &&
@@ -8,6 +8,7 @@ const API =
   'https://yunivera-mvp2.onrender.com'
 
 export default function App() {
+  // ==== 报价 & 推荐语 ====
   const [rows, setRows] = useState([
     {
       name: 'Solar Wall Lamp',
@@ -17,7 +18,7 @@ export default function App() {
       params: '{"battery":"1200mAh","leds":30}',
     },
   ])
-  const [template, setTemplate] = useState('A') // 对应后端的 mode
+  const [template, setTemplate] = useState('A') // mode: 'A' | 'B' | 'C'
   const [lang, setLang] = useState('zh')
   const [busy, setBusy] = useState(false)
 
@@ -26,10 +27,8 @@ export default function App() {
     next[idx] = { ...next[idx], [key]: v }
     setRows(next)
   }
-
   const addRow = () =>
     setRows([...rows, { name: '', sku: '', price: '', moq: '', params: '' }])
-
   const delRow = (i) => setRows(rows.filter((_, idx) => idx !== i))
 
   const parseJSONSafe = (str) => {
@@ -40,18 +39,15 @@ export default function App() {
       return {}
     }
   }
-
   const toFloat = (v) => {
     const s = String(v ?? '').trim().replace(',', '.')
     const n = parseFloat(s)
     return Number.isFinite(n) ? n : 0
   }
-
   const toInt = (v) => {
     const n = parseInt(String(v ?? '').trim(), 10)
     return Number.isFinite(n) ? n : 0
   }
-
   const buildPayload = () => {
     const rowsPayload = rows
       .map((r) => ({
@@ -61,7 +57,6 @@ export default function App() {
         moq: toInt(r.moq),
         params: parseJSONSafe(r.params),
       }))
-      // 过滤“全空”行
       .filter(
         (r) =>
           r.name ||
@@ -70,7 +65,6 @@ export default function App() {
           r.moq ||
           Object.keys(r.params || {}).length
       )
-
     return { lang, mode: template, rows: rowsPayload }
   }
 
@@ -100,7 +94,6 @@ export default function App() {
       const data = await res.json()
       alert('生成成功！\n\n' + JSON.stringify(data, null, 2))
     } catch (e) {
-      // 关键：不要留下“console.error(”半句
       console.error('generate failed:', e)
       alert('生成失败：' + e.message)
     } finally {
@@ -108,7 +101,7 @@ export default function App() {
     }
   }
 
-  // 预留 PDF 按钮（后端打通后即可使用，不影响构建）
+  // ==== PDF 生成 ====
   const generatePdf = async () => {
     const payload = buildPayload()
     if (!payload.rows.length) {
@@ -145,11 +138,37 @@ export default function App() {
     }
   }
 
+  // ==== 网页抓取 Demo（/v1/api/scrape） ====
+  const [rawUrl, setRawUrl] = useState('https://example.com')
+  const [scrapeData, setScrapeData] = useState(null)
+  const iframeRef = useRef(null)
+
+  const scrapeUrl = async () => {
+    if (!rawUrl.trim()) return alert('请先输入 URL')
+    setScrapeData(null)
+    try {
+      const url = `${API}/v1/api/scrape?url=${encodeURIComponent(rawUrl)}`
+      const res = await fetch(url, { method: 'GET', cache: 'no-store' })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const data = await res.json()
+      setScrapeData(data)
+
+      // 预览（如果返回了 preview，就塞进 <iframe srcdoc>）
+      if (data?.preview && iframeRef.current) {
+        iframeRef.current.srcdoc = data.preview
+      }
+    } catch (e) {
+      console.error('SCRAPE ERR:', e)
+      alert('抓取失败：' + e.message)
+    }
+  }
+
   return (
-    <div style={{ padding: 16, fontFamily: 'system-ui, sans-serif' }}>
+    <div style={{ padding: 16, fontFamily: 'system-ui, sans-serif', maxWidth: 1200 }}>
       <h2>结构化报价 + 自动推荐语（MVP2）</h2>
 
-      <div style={{ marginBottom: 8 }}>
+      {/* ====== 报价区域 ====== */}
+      <div style={{ marginBottom: 12 }}>
         模板：
         {['A', 'B', 'C'].map((t) => (
           <label key={t} style={{ marginLeft: 8 }}>
@@ -176,7 +195,7 @@ export default function App() {
         ))}
       </div>
 
-      <table border="1" cellPadding="6" style={{ width: '100%', maxWidth: 1200 }}>
+      <table border="1" cellPadding="6" style={{ width: '100%' }}>
         <thead>
           <tr>
             <th>Name</th>
@@ -235,22 +254,56 @@ export default function App() {
 
       <div style={{ marginTop: 8 }}>
         <button onClick={addRow}>新增一行</button>
-        <button
-          style={{ marginLeft: 8 }}
-          onClick={generate}
-          disabled={busy}
-        >
+        <button style={{ marginLeft: 8 }} onClick={generate} disabled={busy}>
           {busy ? '生成中…' : '生成报价 & 推荐语'}
         </button>
-        <button
-          style={{ marginLeft: 8 }}
-          onClick={generatePdf}
-          disabled={busy}
-        >
+        <button style={{ marginLeft: 8 }} onClick={generatePdf} disabled={busy}>
           {busy ? '生成中…' : '生成 PDF'}
         </button>
         <div style={{ marginTop: 8, color: '#777' }}>API = {API}</div>
       </div>
+
+      {/* ====== 抓取区域 ====== */}
+      <hr style={{ margin: '24px 0' }} />
+      <h3>网页抓取 Demo（/v1/api/scrape）</h3>
+      <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+        <input
+          style={{ width: 420 }}
+          placeholder="输入要抓取的 URL，例如 https://example.com"
+          value={rawUrl}
+          onChange={(e) => setRawUrl(e.target.value)}
+        />
+        <button onClick={scrapeUrl}>抓取</button>
+      </div>
+
+      {scrapeData && (
+        <div style={{ marginTop: 12 }}>
+          <div style={{ marginBottom: 8 }}>
+            <b>Title：</b>{scrapeData.title || '(无)'}　　
+            <b>描述：</b>{scrapeData.description || '(无)'}　　
+            <b>H1：</b>{(scrapeData.h1 || []).join(' / ') || '(无)'}
+          </div>
+          <div style={{ display: 'flex', gap: 16 }}>
+            <iframe
+              ref={iframeRef}
+              title="preview"
+              style={{ width: 600, height: 420, border: '1px solid #ddd' }}
+            />
+            <pre
+              style={{
+                flex: 1,
+                minHeight: 420,
+                padding: 12,
+                background: '#f7f7f7',
+                borderRadius: 6,
+                overflow: 'auto',
+              }}
+            >
+              {JSON.stringify(scrapeData, null, 2)}
+            </pre>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
