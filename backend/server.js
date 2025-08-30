@@ -6,8 +6,11 @@ import { fileURLToPath } from 'url'
 import path from 'path'
 import fs from 'fs'
 
-import routes from './routes/quote.js'
+// 路由
+import quoteRoutes from './routes/quote.js'
 import scrapeRoutes from './routes/scrape.js'
+import matchRoutes from './routes/match.js'
+import pdfRoutes from './routes/pdf.js'
 
 dotenv.config()
 
@@ -17,7 +20,8 @@ const __dirname = path.dirname(__filename)
 const app = express()
 
 // 允许跨域
-app.use(cors({ origin: '*' }))
+app.use(cors())
+
 // 解析 JSON，限制 4MB
 app.use(express.json({ limit: '4mb' }))
 
@@ -26,18 +30,23 @@ const filesDir = path.join(__dirname, 'files')
 if (!fs.existsSync(filesDir)) fs.mkdirSync(filesDir)
 app.use('/files', express.static(filesDir))
 
-// API 路由（原来的报价/推荐语等）
-app.use('/v1/api', routes(filesDir))
+// API 路由
+app.use('/v1/api', quoteRoutes(filesDir))  // 原来的报价/推荐语等
+app.use('/v1/api/scrape', scrapeRoutes)    // 抓取
+app.use('/v1/api/match', matchRoutes)      // 对比/匹配
+app.use('/v1/api/pdf', pdfRoutes)          // PDF 生成
 
 // 健康检查
 app.get('/v1/api/health', (_req, res) => {
-  res.json({ ok: true, service: 'quote', ts: Date.now() })
+  res.json({
+    ok: true,
+    service: 'quote',
+    version: 'quote-v3-hf-ellipsis',
+    ts: Date.now(),
+  })
 })
 
-// 抓取路由 —— 注意这里挂在 /v1/api（不要再叠加 /scrape）
-app.use('/v1/api', scrapeRoutes)
-
-// 根路径提示，防止 “Cannot GET /”
+// 根路径的可读提示
 app.get('/', (_req, res) => {
   res.type('text/plain').send('mvp2-backend is running. Try /v1/api/health')
 })
