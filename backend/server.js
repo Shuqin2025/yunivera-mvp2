@@ -39,8 +39,7 @@ app.get('/v1/api/health', (_req, res) => {
 })
 
 // 新增：抓取路由（/v1/api/scrape?url=...）
-app.use('/v1/api/scrape', scrapeRoutes)
-
+ app.use('/v1/api', scrapeRoutes)
 // 根路径的可读提示，防止 “Cannot GET /”
 app.get('/', (_req, res) => {
   res.type('text/plain').send('mvp2-backend is running. Try /v1/api/health')
