@@ -17,7 +17,7 @@ const __dirname = path.dirname(__filename)
 const app = express()
 
 // 允许跨域
-app.use(cors())
+app.use(cors({ origin: '*' }))
 // 解析 JSON，限制 4MB
 app.use(express.json({ limit: '4mb' }))
 
@@ -29,18 +29,15 @@ app.use('/files', express.static(filesDir))
 // API 路由（原来的报价/推荐语等）
 app.use('/v1/api', routes(filesDir))
 
-// 新增：健康检查
+// 健康检查
 app.get('/v1/api/health', (_req, res) => {
-  res.json({
-    ok: true,
-    service: 'quote',
-    ts: Date.now(),
-  })
+  res.json({ ok: true, service: 'quote', ts: Date.now() })
 })
 
-// 新增：抓取路由（/v1/api/scrape?url=...）
- app.use('/v1/api', scrapeRoutes)
-// 根路径的可读提示，防止 “Cannot GET /”
+// 抓取路由 —— 注意这里挂在 /v1/api（不要再叠加 /scrape）
+app.use('/v1/api', scrapeRoutes)
+
+// 根路径提示，防止 “Cannot GET /”
 app.get('/', (_req, res) => {
   res.type('text/plain').send('mvp2-backend is running. Try /v1/api/health')
 })
