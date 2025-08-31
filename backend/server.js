@@ -19,22 +19,41 @@ const __dirname = path.dirname(__filename)
 
 const app = express()
 
-// 允许跨域
-app.use(cors())
+/** -------- CORS --------
+ * 生产可改为只允许你的域名：
+ * cors({ origin: ['https://www.yunivera.com'] })
+ */
+app.use(
+  cors({
+    origin: '*',
+  })
+)
 
-// 解析 JSON，限制 4MB
+// 解析 JSON（给 PDF/抓取 POST 用）
 app.use(express.json({ limit: '4mb' }))
 
-// 静态文件目录：用于存放生成的 PDF /files
+/** -------- 静态文件（可选）--------
+ * 现在 PDF 是“直接流回前端”下载，不强依赖磁盘。
+ * 保留 /files 主要为了兼容老逻辑或临时存放资源。
+ */
 const filesDir = path.join(__dirname, 'files')
-if (!fs.existsSync(filesDir)) fs.mkdirSync(filesDir)
+try {
+  fs.mkdirSync(filesDir, { recursive: true })
+} catch (e) {
+  // Render 等平台只读也没关系：我们不是必须写磁盘
+}
 app.use('/files', express.static(filesDir))
 
-// API 路由
-app.use('/v1/api', quoteRoutes(filesDir))  // 原来的报价/推荐语等
-app.use('/v1/api/scrape', scrapeRoutes)    // 抓取
-app.use('/v1/api/match', matchRoutes)      // 对比/匹配
-app.use('/v1/api/pdf', pdfRoutes)          // PDF 生成
+/** -------- 路由挂载 --------
+ * 兼容：quoteRoutes 既可能是 Router，也可能是工厂函数(filesDir)=>Router
+ */
+const mountMaybeFactory = (maybeFactory) =>
+  typeof maybeFactory === 'function' ? maybeFactory(filesDir) : maybeFactory
+
+app.use('/v1/api', mountMaybeFactory(quoteRoutes)) // 报价/推荐语等
+app.use('/v1/api/scrape', scrapeRoutes)            // 抓取
+app.use('/v1/api/match', matchRoutes)              // 对比/匹配
+app.use('/v1/api/pdf', pdfRoutes)                  // PDF 生成（流式回传）
 
 // 健康检查
 app.get('/v1/api/health', (_req, res) => {
@@ -46,14 +65,16 @@ app.get('/v1/api/health', (_req, res) => {
   })
 })
 
-// 根路径的可读提示
+// 根路径提示
 app.get('/', (_req, res) => {
-  res.type('text/plain').send('mvp2-backend is running. Try /v1/api/health')
+  res
+    .type('text/plain')
+    .send('mvp3-backend is running. Try /v1/api/health')
 })
 
-const port = process.env.PORT || 5188
+const port = process.env.PORT || 5190 // ✅ MVP3 默认 5190
 const host = '0.0.0.0'
 
 app.listen(port, host, () => {
-  console.log(`[mvp2-backend] listening at http://${host}:${port}`)
+  console.log(`[mvp3-backend] listening at http://${host}:${port}`)
 })
