@@ -3,95 +3,56 @@ import { Router } from 'express'
 import PDFDocument from 'pdfkit'
 import fs from 'fs'
 import path from 'path'
+import { fileURLToPath } from 'url'
 
 const router = Router()
 
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = path.dirname(__filename)
+
 /**
  * POST /v1/api/pdf
- * 接收两种 Body 之一：
- * 1) { title: string, rows: string[][] }   // ✅ 推荐，二维数组，每行一个数组
- * 2) { title: string, content: string }    // 兼容老格式，纯文本
- *
- * 直接把 PDF 作为二进制流返回（attachment），前端用 fetch -> blob() 下载即可
+ * body: { title: string, content: string }
+ * 说明：直接把 PDF 以流的方式返回给浏览器（Content-Type: application/pdf）
+ *      这样前端用 fetch(...).then(r => r.blob()) 就能得到真正的 PDF。
  */
 router.post('/', (req, res) => {
   try {
-    const { title = '报价单 / Quote', rows, content } = req.body || {}
+    const { title = 'Untitled PDF', content = '' } = req.body || {}
 
-    // ====== HTTP 头：直接回传 PDF ======
+    // 设置响应头：告诉浏览器是 PDF，并提示下载文件名
     res.setHeader('Content-Type', 'application/pdf')
-    res.setHeader(
-      'Content-Disposition',
-      `attachment; filename="quote-${Date.now()}.pdf"`
-    )
+    res.setHeader('Content-Disposition', 'attachment; filename="quote.pdf"')
 
-    // 生成 PDF（留 2cm 边距）
+    // 建立 PDF 文档并直接 pipe 到响应
     const doc = new PDFDocument({ size: 'A4', margin: 56 })
     doc.pipe(res)
 
-    // ====== 中文字体（可选）======
-    // 放置在 backend/fonts/NotoSansSC-Regular.ttf
-    const zhFont = path.join(process.cwd(), 'backend', 'fonts', 'NotoSansSC-Regular.ttf')
-    let hasZh = false
-    if (fs.existsSync(zhFont)) {
+    // （可选）中文字体：backend/fonts/NotoSansSC-Regular.ttf
+    const zhFontPath = path.join(__dirname, '..', 'fonts', 'NotoSansSC-Regular.ttf')
+    if (fs.existsSync(zhFontPath)) {
       try {
-        doc.registerFont('zh', zhFont)
+        doc.registerFont('zh', zhFontPath)
         doc.font('zh')
-        hasZh = true
       } catch (e) {
-        // 字体注册失败则回退到默认字体
-        // 不抛错，继续生成
+        // 字体注册失败则使用内置字体，避免中断
+        console.warn('注册中文字体失败，将使用默认字体：', e?.message || e)
       }
     }
 
-    // ====== 标题 ======
-    doc.fontSize(18).text(title, { align: 'center' })
+    // 标题
+    doc.fontSize(20).text(title, { align: 'center' })
     doc.moveDown(1.2)
 
-    // ====== 正文：优先 rows（二维数组），否则 content（纯文本）======
-    const isRowsValid =
-      Array.isArray(rows) && rows.length > 0 && rows.every((r) => Array.isArray(r))
+    // 正文（简单段落、自动换行）
+    doc.fontSize(12).text(content, { align: 'left', lineGap: 4 })
 
-    if (isRowsValid) {
-      // 用最稳妥的“文本表格”方式画出来（每行拼接为一段）
-      doc.fontSize(12)
-      rows.forEach((lineArr, idx) => {
-        // 允许每行多列，这里用 2~4 个空格拼接
-        const line = (lineArr || []).map((c) => String(c ?? '')).join('    ')
-        doc.text(line, { align: 'left' })
-        // 大段之间留白：如果是空行也照常写入，视觉更自然
-        if (idx < rows.length - 1) {
-          doc.moveDown(0.15)
-        }
-      })
-    } else {
-      // 兼容老格式：content 纯文本
-      const txt = typeof content === 'string' && content.trim() ? content : '(空白)'
-      doc.fontSize(12).text(txt, {
-        align: 'left',
-        lineGap: 4,
-      })
-    }
-
+    // 结束并把流发给浏览器
     doc.end()
-
-    // 重要：错误兜底（例如字体问题）
-    doc.on('error', (err) => {
-      console.error('[PDFKIT ERROR]', err)
-      if (!res.headersSent) {
-        res.status(500).json({ ok: false, error: 'PDF generation failed' })
-      } else {
-        // headers 已发，终止连接
-        res.end()
-      }
-    })
   } catch (err) {
     console.error('[PDF ERROR]', err)
-    if (!res.headersSent) {
-      res.status(500).json({ ok: false, error: 'INTERNAL_ERROR' })
-    } else {
-      res.end()
-    }
+    // 若异常，返回 500 和 JSON 错误
+    res.status(500).json({ ok: false, error: 'PDF generation failed' })
   }
 })
 
