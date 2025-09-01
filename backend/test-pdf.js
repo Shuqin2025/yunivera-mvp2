@@ -1,4 +1,4 @@
-// backend/test-pdf.js  —— 本地生成一个简单 PDF 验证 PDFKit 是否正常
+// backend/test-pdf.js
 import fs from 'fs';
 import path from 'path';
 import PDFDocument from 'pdfkit';
@@ -11,11 +11,9 @@ const __dirname = path.dirname(__filename);
 const outDir = path.join(__dirname, 'files');
 if (!fs.existsSync(outDir)) fs.mkdirSync(outDir);
 
-// 输出文件
 const filename = `local-test-${Date.now()}.pdf`;
 const filepath = path.join(outDir, filename);
 
-// 生成
 const doc = new PDFDocument({ size: 'A4', margin: 56 });
 doc.pipe(fs.createWriteStream(filepath));
 
