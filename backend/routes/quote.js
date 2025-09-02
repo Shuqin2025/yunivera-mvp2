@@ -203,7 +203,6 @@ export default function createRoutes(filesDir) {
   }
 
   // ============ PDF ============
-  router.post('/pdf', async (req, res) => {
     try {
       const { title, lang = 'zh', mode = 'A', rows = [], company = {} } = req.body || {}
       const data = normalizeRows(rows)
