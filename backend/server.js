@@ -11,6 +11,7 @@ import quoteRoutes from "./routes/quote.js";
 import scrapeRoutes from "./routes/scrape.js";
 import matchRoutes from "./routes/match.js";
 import pdfRoutes from "./routes/pdf.js";
+import catalogRoutes from "./routes/catalog.js";  // ✅ 新增：目录抓取
 
 dotenv.config();
 
@@ -38,12 +39,13 @@ app.use("/files", express.static(filesDir));
 
 /**
  * 路由挂载顺序 —— 重点！
- * 把 /v1/api/pdf 放在最前面，避免被 quoteRoutes 拦截
+ * 把所有新路由放在 quoteRoutes 之前，避免被旧接口拦截
  */
-app.use("/v1/api/pdf", pdfRoutes);       // ✅ 新 PDF 路由（优先）
-app.use("/v1/api/scrape", scrapeRoutes);
-app.use("/v1/api/match", matchRoutes);
-app.use("/v1/api", quoteRoutes(filesDir)); // 其它老接口
+app.use("/v1/api/pdf", pdfRoutes);         // ✅ 生成 PDF
+app.use("/v1/api/scrape", scrapeRoutes);   // ✅ 抓取单页
+app.use("/v1/api/match", matchRoutes);     // ✅ 对比匹配
+app.use("/v1/api/catalog", catalogRoutes); // ✅ 抓取目录（新）
+app.use("/v1/api", quoteRoutes(filesDir)); // 其余老接口挂在 /v1/api 下
 
 // 健康检查
 app.get("/v1/api/health", (_req, res) => {
