@@ -1,137 +1,236 @@
 // backend/routes/catalog.js
 import { Router } from "express";
-import * as cheerio from "cheerio";
-import { URL } from "url";
+import cheerio from "cheerio";
 
 const router = Router();
 
-/** 绝对链接 */
-function abs(base, href) {
+/** 小工具：清洗文本 */
+function clean(t = "") {
+  return String(t)
+    .replace(/\s+/g, " ")
+    .replace(/\u00A0/g, " ")
+    .trim();
+}
+
+/** 小工具：绝对化 URL */
+function absolutize(href, base) {
   try {
-    if (!href) return "";
     return new URL(href, base).toString();
   } catch {
     return href || "";
   }
 }
 
-/** 针对不同站点的选择器规则（可逐步完善） */
-const rulesByHost = {
-  // s-impuls-shop.de 目录页的常见结构（先给出较宽松的“命中更高”的组合）
-  "s-impuls-shop.de": {
-    item:
-      ".product, .product-item, .product--box, .product-list-item, li.product, .item", // 容器
-    title:
-      ".product--title a, .product-title a, .title a, h3 a, h2 a, a.product-title",
-    url: "a", // 兜底：容器内第一个 <a>
-    price:
-      ".price, .product--price, .price--default, .product-price, .price--value",
-    sku: "[data-product-ordernumber], .product--sku, .sku, .article-number",
-    img: "img",
-  },
-
-  // 其它站点可继续加……
-};
-
-/** 泛化提取：若没有站点特定规则，就用一个“通用启发式” */
-const genericRules = {
-  item:
-    ".product, .product-item, .product--box, .card, li, .grid-item, .col, .item",
-  title:
-    ".title a, .product--title a, h3 a, h2 a, a.product-title, .card-title a, .title, h3, h2",
-  url: "a",
-  price: ".price, .product--price, .price--default, .product-price",
-  sku: ".sku, .product--sku, [data-sku], [data-article-number]",
-  img: "img",
-};
-
-/** 从一段元素中按规则抽取 */
-function pick($, el, rule, baseUrl) {
-  const $el = $(el);
-
-  const title =
-    ($el.find(rule.title).first().text() ||
-      $el.find("a[title]").first().attr("title") ||
-      $el.find("a").first().text() ||
-      $el.text() ||
-      "")
-      .replace(/\s+/g, " ")
-      .trim();
-
-  const url = abs(baseUrl, $el.find(rule.url).first().attr("href"));
-  const price = ($el.find(rule.price).first().text() || "")
-    .replace(/\s+/g, " ")
-    .trim();
-  const sku =
-    ($el.find(rule.sku).first().text() ||
-      $el.find(rule.sku).first().attr("data-product-ordernumber") ||
-      $el.find(rule.sku).first().attr("data-sku") ||
-      "")
-      .replace(/\s+/g, " ")
-      .trim();
-  const img = abs(
-    baseUrl,
-    $el.find(rule.img).first().attr("src") ||
-      $el.find(rule.img).first().attr("data-src")
-  );
-
-  return { title, url, price, sku, img };
+/** 下载 HTML（Node18+ 原生 fetch） */
+async function fetchHTML(url) {
+  const res = await fetch(url, {
+    headers: {
+      "user-agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
+      accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    },
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status} when fetching ${url} :: ${text.slice(0, 200)}`);
+  }
+  return await res.text();
 }
 
-/**
- * POST /v1/api/catalog
- * body: { url: "https://..." }
- * 返回：{ ok, site, count, items: [...] }
+/** 适配器：s-impuls-shop.de */
+function parseSImpuls($, url) {
+  // 尝试多个可能的「商品卡片」容器选择器（Shopware/自研站点常见类名）
+  const itemSelList = [
+    ".product-box",
+    ".product--box",
+    ".product-wrapper",
+    ".product-item",
+    ".product-list-item",
+    ".box--minimal",
+    ".box--product",
+  ];
+
+  // 可能的字段选择器
+  const titleSel = [
+    ".product-name a",
+    ".product--title a",
+    ".product-title a",
+    ".title a",
+    ".product-name",
+    ".product--title",
+    ".product-title",
+  ];
+  const skuSel = [
+    ".product-number",
+    ".product--ordernumber",
+    ".ordernumber",
+    ".sku",
+    ".product-sku",
+  ];
+  const priceSel = [
+    ".price",
+    ".product-price",
+    ".product--price",
+    ".price--default",
+    ".price--content",
+  ];
+  const linkSel = ["a.product-link", ".product-image a", ".product--image a", "a"];
+  const imgSel = [".product-image img", ".image--element img", "img"];
+
+  const items = [];
+  let containerFound = null;
+
+  for (const itemSel of itemSelList) {
+    const found = $(itemSel);
+    if (found && found.length > 0) {
+      containerFound = itemSel;
+      found.each((_, el) => {
+        const $el = $(el);
+        // 标题
+        let title = "";
+        for (const s of titleSel) {
+          const t = clean($el.find(s).first().text());
+          if (t) {
+            title = t;
+            break;
+          }
+        }
+        // SKU
+        let sku = "";
+        for (const s of skuSel) {
+          const t = clean($el.find(s).first().text());
+          if (t) {
+            sku = t.replace(/(SKU|Artikel|Art\.?Nr\.?|Artikel-Nr\.?):?\s*/i, "");
+            break;
+          }
+        }
+        // 价格
+        let price = "";
+        for (const s of priceSel) {
+          const t = clean($el.find(s).first().text());
+          if (t) {
+            price = t;
+            break;
+          }
+        }
+        // 链接
+        let href = "";
+        for (const s of linkSel) {
+          const a = $el.find(s).first();
+          const h = a.attr("href");
+          if (h && !h.startsWith("#")) {
+            href = absolutize(h, url);
+            break;
+          }
+        }
+        // 图片
+        let image = "";
+        for (const s of imgSel) {
+          const im = $el.find(s).first();
+          const src = im.attr("data-src") || im.attr("src");
+          if (src) {
+            image = absolutize(src, url);
+            break;
+          }
+        }
+
+        // 过滤掉明显为空的
+        if (title || href) {
+          items.push({ title, sku, price, url: href, image });
+        }
+      });
+      break;
+    }
+  }
+
+  return {
+    ok: true,
+    site: "s-impuls-shop",
+    containerFound,
+    count: items.length,
+    items,
+  };
+}
+
+/** 通用回退：从列表页粗略抓取可能的商品链接 */
+function parseGeneric($, url) {
+  const items = [];
+  $("a").each((_, a) => {
+    const $a = $(a);
+    const href = $a.attr("href");
+    const text = clean($a.text());
+    if (!href || href.startsWith("#")) return;
+    // 简单启发式：有图片 / 或者标题像产品名
+    const hasImg = $a.find("img").length > 0;
+    if (hasImg || (text && text.length > 8)) {
+      items.push({
+        title: text,
+        url: absolutize(href, url),
+        sku: "",
+        price: "",
+        image: $a.find("img").first().attr("src")
+          ? absolutize($a.find("img").first().attr("src"), url)
+          : "",
+      });
+    }
+  });
+  // 去重（按 url）
+  const seen = new Set();
+  const uniq = items.filter((x) => {
+    if (!x.url) return false;
+    if (seen.has(x.url)) return false;
+    seen.add(x.url);
+    return true;
+  });
+
+  return {
+    ok: true,
+    site: "generic",
+    count: uniq.length,
+    items: uniq.slice(0, 200),
+  };
+}
+
+/** 主路由：POST /v1/api/catalog
+ * body: { url: string }
  */
 router.post("/", async (req, res) => {
   try {
-    const { url } = req.body || {};
-    if (!url) {
-      return res
-        .status(400)
-        .json({ ok: false, error: "参数缺失：url 必填" });
+    const { url = "" } = req.body || {};
+    if (!url || !/^https?:\/\//i.test(url)) {
+      return res.status(400).json({ ok: false, error: "参数缺失：url" });
     }
 
-    // Node 18+ 自带 fetch，这里直接用全局 fetch（无需 node-fetch）
-    const r = await fetch(url, {
-      headers: {
-        // 简单 UA，部分站点需要
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
-        Accept: "text/html,application/xhtml+xml",
-      },
-    });
-
-    if (!r.ok) {
-      return res
-        .status(r.status)
-        .json({ ok: false, error: `抓取失败：HTTP ${r.status}` });
-    }
-
-    const html = await r.text();
+    const html = await fetchHTML(url);
     const $ = cheerio.load(html);
 
-    const host = new URL(url).hostname.replace(/^www\./, "");
-    const rule = rulesByHost[host] || genericRules;
+    const hostname = new URL(url).hostname.replace(/^www\./, "");
 
-    const items = [];
-    $(rule.item).each((_, el) => {
-      const it = pick($, el, rule, url);
-      // 至少要有标题 + 链接
-      if (it.title && it.url) items.push(it);
-    });
+    let parsed;
+    if (hostname.includes("s-impuls-shop.de")) {
+      parsed = parseSImpuls($, url);
+      // 如果没有命中容器，则回退到通用解析
+      if (!parsed?.count) {
+        parsed = parseGeneric($, url);
+        parsed.note = "fallback:generic";
+      }
+    } else {
+      // 其它站点走通用回退
+      parsed = parseGeneric($, url);
+    }
 
     return res.json({
       ok: true,
-      site: host,
-      count: items.length,
-      items,
+      url,
+      ...parsed,
+      fetchedAt: Date.now(),
     });
   } catch (err) {
-    console.error("[/v1/api/catalog] error:", err);
-    return res
-      .status(500)
-      .json({ ok: false, error: String(err?.message || err) });
+    console.error("[/v1/api/catalog] ERROR:", err);
+    return res.status(500).json({
+      ok: false,
+      error: String(err?.message || err),
+    });
   }
 });
 
