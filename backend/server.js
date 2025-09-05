@@ -3,7 +3,7 @@
 import express from "express";
 import cors from "cors";
 
-// 你现有的 PDF 路由
+// 现有 PDF 路由
 import pdfRouter from "./routes/pdf.js";
 
 // 目录抓取路由
@@ -100,14 +100,22 @@ app.post("/v1/api/export/excel", (req, res) => {
 <h3 style="margin:0 0 6px;">${esc(name)}</h3>
 <div style="margin:0 0 10px;color:#666;">${subtitle}</div>
 <table cellspacing="0" cellpadding="0" style="border-collapse:collapse;font-family:Arial,Helvetica,sans-serif;font-size:12px;">
-<thead><tr>${colHtml}</tr></thead>
-<tbody>${rowsHtml}</tbody>
+  <thead><tr>${colHtml}</tr></thead>
+  <tbody>${rowsHtml}</tbody>
 </table>
 </body></html>`;
 
-    const filename = sanitizeFilename(`${name}.xls`);
+    const safeBase = sanitizeFilename(name);
+    const filename = `${safeBase || "export"}.xls`;
+
+    // 关键修正：严格 ASCII 文件名 + UTF-8 扩展名，避免 header 有非法字符
     res.setHeader("Content-Type", "application/vnd.ms-excel; charset=utf-8");
-    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${filename}"; filename*=UTF-8''${encodeURIComponent(
+        filename
+      )}`
+    );
     res.send(html);
   } catch (err) {
     console.error("[/export/excel] error:", err);
@@ -131,7 +139,10 @@ app.post("/v1/api/export/table-pdf", (req, res) => {
     }
 
     res.setHeader("Content-Type", "application/pdf");
-    res.setHeader("Content-Disposition", `attachment; filename="${sanitizeFilename(title)}.pdf"`);
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${sanitizeFilename(title)}.pdf"`
+    );
 
     const doc = new PDFDocument({ size: "A4", margin: 36 });
     doc.pipe(res);
@@ -214,8 +225,11 @@ app.post("/v1/api/export/table-pdf", (req, res) => {
 
 // utils
 function sanitizeFilename(name) {
+  // 只保留安全 ASCII，避免响应头非法字符
   return String(name || "file")
-    .replace(/[\\/:*?"<>|]+/g, "_")
+    .normalize("NFKD")
+    .replace(/[^\x20-\x7E]+/g, "")      // 去掉非可打印 ASCII
+    .replace(/[\\/:*?"<>|]+/g, "_")      // Windows 不允许的字符
     .replace(/\s+/g, "_")
     .slice(0, 120);
 }
