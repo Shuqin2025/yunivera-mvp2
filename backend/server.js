@@ -1,17 +1,16 @@
-// server.js — ESM
+// backend/server.js — ESM
+
 import express from "express";
 import cors from "cors";
 
-// 你现有的 pdf 路由（保持不变）
+// 你现有的 PDF 路由
 import pdfRouter from "./routes/pdf.js";
 
-// 新增：目录抓取路由
+// 目录抓取路由
 import catalogRouter from "./routes/catalog.js";
 
-// 可选：静态文件（如果没有可移除）
-// import path from "node:path";
-
-import PDFDocument from "pdfkit"; // 用于“表格 PDF”
+// 表格 PDF 用到
+import PDFDocument from "pdfkit";
 
 const app = express();
 const port = process.env.PORT || 10000;
@@ -31,26 +30,20 @@ app.get("/v1/api/health", (_req, res) => {
   );
 });
 
-// 现有整页 PDF 生成
+// 现有 PDF（整页）生成
 app.use("/v1/api/pdf", pdfRouter);
 
 // 目录抓取
 app.use("/v1/api/catalog", catalogRouter);
 
 /**
- * —— 新增：导出 Excel（使用“Excel 兼容 HTML”方案，无需额外依赖）
+ * 导出 Excel（Excel 兼容 HTML，无需第三方库）
  * POST /v1/api/export/excel
- * body: {
- *   name?: string,
- *   columns: [{ key, title, width? }],
- *   rows: [{ [key]: any }...],
- *   meta?: { source?: string, generatedBy?: string }
- * }
+ * body: { name?, columns: [{key,title,width?}], rows: [{...}], meta? }
  */
 app.post("/v1/api/export/excel", (req, res) => {
   try {
     const { name = "export", columns = [], rows = [], meta = {} } = req.body || {};
-
     if (!Array.isArray(columns) || columns.length === 0) {
       return res.status(400).json({ ok: false, error: "MISSING_COLUMNS" });
     }
@@ -65,23 +58,28 @@ app.post("/v1/api/export/excel", (req, res) => {
         .replace(/>/g, "&gt;");
 
     const colHtml = columns
-      .map((c) => `<th style="border:1px solid #999;padding:4px;background:#eee">${esc(c.title || c.key)}</th>`)
+      .map(
+        (c) =>
+          `<th style="border:1px solid #999;padding:4px;background:#eee">${esc(
+            c.title || c.key
+          )}</th>`
+      )
       .join("");
 
     const rowsHtml = rows
       .map((r, i) => {
         return `<tr>${columns
           .map((c) => {
-            const v =
-              c.key === "index"
-                ? i + 1
-                : r[c.key] ?? "";
-            // URL/图片列做成可点击
+            const v = c.key === "index" ? i + 1 : r[c.key] ?? "";
             if (c.key === "url" && v) {
-              return `<td style="border:1px solid #ccc;padding:4px;"><a href="${esc(v)}">${esc(v)}</a></td>`;
+              return `<td style="border:1px solid #ccc;padding:4px;"><a href="${esc(
+                v
+              )}">${esc(v)}</a></td>`;
             }
             if ((c.key === "image" || c.key === "img") && v) {
-              return `<td style="border:1px solid #ccc;padding:4px;"><a href="${esc(v)}">${esc(v)}</a></td>`;
+              return `<td style="border:1px solid #ccc;padding:4px;"><a href="${esc(
+                v
+              )}">${esc(v)}</a></td>`;
             }
             return `<td style="border:1px solid #ccc;padding:4px;">${esc(v)}</td>`;
           })
@@ -89,17 +87,15 @@ app.post("/v1/api/export/excel", (req, res) => {
       })
       .join("");
 
-    const subtitle =
-      [meta.source ? `Source: ${esc(meta.source)}` : "", meta.generatedBy ? `GeneratedBy: ${esc(meta.generatedBy)}` : ""]
-        .filter(Boolean)
-        .join(" | ");
+    const subtitle = [
+      meta.source ? `Source: ${esc(meta.source)}` : "",
+      meta.generatedBy ? `GeneratedBy: ${esc(meta.generatedBy)}` : "",
+    ]
+      .filter(Boolean)
+      .join(" | ");
 
     const html = `<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8" />
-<title>${esc(name)}</title>
-</head>
+<html><head><meta charset="utf-8" /><title>${esc(name)}</title></head>
 <body>
 <h3 style="margin:0 0 6px;">${esc(name)}</h3>
 <div style="margin:0 0 10px;color:#666;">${subtitle}</div>
@@ -107,8 +103,7 @@ app.post("/v1/api/export/excel", (req, res) => {
 <thead><tr>${colHtml}</tr></thead>
 <tbody>${rowsHtml}</tbody>
 </table>
-</body>
-</html>`;
+</body></html>`;
 
     const filename = sanitizeFilename(`${name}.xls`);
     res.setHeader("Content-Type", "application/vnd.ms-excel; charset=utf-8");
@@ -121,13 +116,9 @@ app.post("/v1/api/export/excel", (req, res) => {
 });
 
 /**
- * —— 新增：导出“表格 PDF”（使用 pdfkit）
+ * 导出“表格 PDF”（pdfkit）
  * POST /v1/api/export/table-pdf
- * body: {
- *   title?: string, subtitle?: string,
- *   columns: [{ key, title, width? }],
- *   rows: [{ [key]: any }...]
- * }
+ * body: { title?, subtitle?, columns: [{key,title,width?}], rows: [...] }
  */
 app.post("/v1/api/export/table-pdf", (req, res) => {
   try {
@@ -152,18 +143,18 @@ app.post("/v1/api/export/table-pdf", (req, res) => {
     }
     doc.moveDown(0.8);
 
-    // 定义列宽（按 columns.width 或简单分配）
+    // 列宽
     const pageWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
     let totalWidth = 0;
     const widths = columns.map((c) => {
-      const w = Number(c.width) > 0 ? Number(c.width) : 20; // 以“字符数”近似
+      const w = Number(c.width) > 0 ? Number(c.width) : 20;
       totalWidth += w;
       return w;
     });
     const pxPerUnit = pageWidth / totalWidth;
     const colPx = widths.map((w) => Math.max(30, Math.floor(w * pxPerUnit)));
 
-    // 绘表头
+    // 表头
     let y = doc.y;
     let x = doc.x;
     doc.fontSize(9).fillColor("#000");
@@ -179,46 +170,41 @@ app.post("/v1/api/export/table-pdf", (req, res) => {
       const r = rows[rowIndex];
       let localX = doc.x;
       let rowHeight = 16;
+
       columns.forEach((c, idx) => {
-        const val =
-          c.key === "index"
-            ? rowIndex + 1
-            : r?.[c.key] ?? "";
-        // 估算高度
+        const val = c.key === "index" ? rowIndex + 1 : r?.[c.key] ?? "";
         const txt = String(val);
         const h = doc.heightOfString(txt, { width: colPx[idx] - 6 });
         rowHeight = Math.max(rowHeight, h + 6);
       });
-      // 分页
+
       if (y + rowHeight > doc.page.height - doc.page.margins.bottom) {
         doc.addPage();
         y = doc.y;
         localX = doc.x;
-        // 重新画表头
         columns.forEach((c, idx) => {
           doc.rect(localX, y, colPx[idx], 18).fill("#eee").stroke("#aaa");
-          doc.fillColor("#000").text(String(c.title || c.key), localX + 3, y + 4, { width: colPx[idx] - 6 });
+          doc.fillColor("#000").text(String(c.title || c.key), localX + 3, y + 4, {
+            width: colPx[idx] - 6,
+          });
           doc.fillColor("#000");
           localX += colPx[idx];
         });
         y += 18;
         localX = doc.x;
       }
-      // 画行
+
       localX = doc.x;
       columns.forEach((c, idx) => {
         const val = c.key === "index" ? rowIndex + 1 : r?.[c.key] ?? "";
         doc.rect(localX, y, colPx[idx], rowHeight).stroke("#ddd");
-        doc.text(String(val), localX + 3, y + 3, {
-          width: colPx[idx] - 6,
-        });
+        doc.text(String(val), localX + 3, y + 3, { width: colPx[idx] - 6 });
         localX += colPx[idx];
       });
       y += rowHeight;
     };
 
     for (let i = 0; i < rows.length; i++) drawRow(i);
-
     doc.end();
   } catch (err) {
     console.error("[/export/table-pdf] error:", err);
@@ -226,7 +212,7 @@ app.post("/v1/api/export/table-pdf", (req, res) => {
   }
 });
 
-// -------- utils --------
+// utils
 function sanitizeFilename(name) {
   return String(name || "file")
     .replace(/[\\/:*?"<>|]+/g, "_")
@@ -234,7 +220,6 @@ function sanitizeFilename(name) {
     .slice(0, 120);
 }
 
-// 启动
 app.listen(port, () => {
   console.log(`[mvp2-backend] listening at http://0.0.0.0:${port}`);
 });
