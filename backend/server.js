@@ -1,28 +1,26 @@
-// backend/server.js  —— ESM
+// server.js — ESM
 import express from "express";
 import cors from "cors";
 
-// 现有 PDF 路由（保持不变）
+// 你现有的 pdf 路由（保持不变）
 import pdfRouter from "./routes/pdf.js";
 
-// 目录解析路由（见下文的 routes/catalog.js）
+// 新增：目录抓取路由
 import catalogRouter from "./routes/catalog.js";
 
-// 仅供 /v1/api/scrape 简易抓取用
-import * as cheerio from "cheerio";
+// 可选：静态文件（如果没有可移除）
+// import path from "node:path";
 
-// 导出相关依赖
-import ExcelJS from "exceljs";
-import PDFDocument from "pdfkit";
+import PDFDocument from "pdfkit"; // 用于“表格 PDF”
 
 const app = express();
-const PORT = process.env.PORT || 10000;
+const port = process.env.PORT || 10000;
 
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 
 // 健康检查
-app.get("/v1/api/health", (req, res) => {
+app.get("/v1/api/health", (_req, res) => {
   res.type("application/json").send(
     JSON.stringify({
       ok: true,
@@ -33,241 +31,210 @@ app.get("/v1/api/health", (req, res) => {
   );
 });
 
-// ========== 简易单页抓取：/v1/api/scrape ==========
-async function fetchHtml(u) {
-  const res = await fetch(u, {
-    headers: {
-      "user-agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
-      accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      "accept-language": "zh-CN,zh;q=0.9,en;q=0.8,de;q=0.7",
-    },
-  });
-  if (!res.ok) {
-    const t = await res.text().catch(() => "");
-    throw new Error(`Fetch ${res.status} ${res.statusText} | ${t.slice(0, 200)}`);
-  }
-  return await res.text();
-}
+// 现有整页 PDF 生成
+app.use("/v1/api/pdf", pdfRouter);
 
-app.post("/v1/api/scrape", async (req, res) => {
+// 目录抓取
+app.use("/v1/api/catalog", catalogRouter);
+
+/**
+ * —— 新增：导出 Excel（使用“Excel 兼容 HTML”方案，无需额外依赖）
+ * POST /v1/api/export/excel
+ * body: {
+ *   name?: string,
+ *   columns: [{ key, title, width? }],
+ *   rows: [{ [key]: any }...],
+ *   meta?: { source?: string, generatedBy?: string }
+ * }
+ */
+app.post("/v1/api/export/excel", (req, res) => {
   try {
-    const url = (req.body?.url || "").trim();
-    if (!url) return res.status(400).json({ ok: false, error: "MISSING_URL" });
+    const { name = "export", columns = [], rows = [], meta = {} } = req.body || {};
 
-    const html = await fetchHtml(url);
-    const $ = cheerio.load(html);
-    const title =
-      $('meta[property="og:title"]').attr("content") ||
-      $("title").text().trim() ||
-      $('meta[name="title"]').attr("content") ||
-      "";
-    const description =
-      $('meta[property="og:description"]').attr("content") ||
-      $('meta[name="description"]').attr("content") ||
-      "";
-    const h1 = $("h1")
-      .map((_, el) => $(el).text().trim())
-      .get()
-      .filter(Boolean);
+    if (!Array.isArray(columns) || columns.length === 0) {
+      return res.status(400).json({ ok: false, error: "MISSING_COLUMNS" });
+    }
+    if (!Array.isArray(rows)) {
+      return res.status(400).json({ ok: false, error: "MISSING_ROWS" });
+    }
 
-    const approxTextLength = $("body").text().replace(/\s+/g, " ").trim().length;
+    const esc = (s) =>
+      String(s ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
 
-    res.json({
-      ok: true,
-      url,
-      fetchedAt: Date.now(),
-      title,
-      description,
-      h1,
-      approxTextLength,
-      preview:
-        (description || $("body").text().replace(/\s+/g, " ").trim()).slice(0, 300),
-      vendor: "generic",
-      price: null,
-      currency: null,
-      images: $("img")
-        .map((_, el) => $(el).attr("src"))
-        .get()
+    const colHtml = columns
+      .map((c) => `<th style="border:1px solid #999;padding:4px;background:#eee">${esc(c.title || c.key)}</th>`)
+      .join("");
+
+    const rowsHtml = rows
+      .map((r, i) => {
+        return `<tr>${columns
+          .map((c) => {
+            const v =
+              c.key === "index"
+                ? i + 1
+                : r[c.key] ?? "";
+            // URL/图片列做成可点击
+            if (c.key === "url" && v) {
+              return `<td style="border:1px solid #ccc;padding:4px;"><a href="${esc(v)}">${esc(v)}</a></td>`;
+            }
+            if ((c.key === "image" || c.key === "img") && v) {
+              return `<td style="border:1px solid #ccc;padding:4px;"><a href="${esc(v)}">${esc(v)}</a></td>`;
+            }
+            return `<td style="border:1px solid #ccc;padding:4px;">${esc(v)}</td>`;
+          })
+          .join("")}</tr>`;
+      })
+      .join("");
+
+    const subtitle =
+      [meta.source ? `Source: ${esc(meta.source)}` : "", meta.generatedBy ? `GeneratedBy: ${esc(meta.generatedBy)}` : ""]
         .filter(Boolean)
-        .slice(0, 10),
-    });
+        .join(" | ");
+
+    const html = `<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>${esc(name)}</title>
+</head>
+<body>
+<h3 style="margin:0 0 6px;">${esc(name)}</h3>
+<div style="margin:0 0 10px;color:#666;">${subtitle}</div>
+<table cellspacing="0" cellpadding="0" style="border-collapse:collapse;font-family:Arial,Helvetica,sans-serif;font-size:12px;">
+<thead><tr>${colHtml}</tr></thead>
+<tbody>${rowsHtml}</tbody>
+</table>
+</body>
+</html>`;
+
+    const filename = sanitizeFilename(`${name}.xls`);
+    res.setHeader("Content-Type", "application/vnd.ms-excel; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.send(html);
   } catch (err) {
-    console.error("[/v1/api/scrape] error:", err);
+    console.error("[/export/excel] error:", err);
     res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 });
 
-// ========== PDF（既有） ==========
-app.use("/v1/api/pdf", pdfRouter);
-
-// ========== 目录解析 ==========
-app.use("/v1/api/catalog", catalogRouter);
-
-// ========== 导出：Excel ==========
-app.post("/v1/api/export/excel", async (req, res) => {
+/**
+ * —— 新增：导出“表格 PDF”（使用 pdfkit）
+ * POST /v1/api/export/table-pdf
+ * body: {
+ *   title?: string, subtitle?: string,
+ *   columns: [{ key, title, width? }],
+ *   rows: [{ [key]: any }...]
+ * }
+ */
+app.post("/v1/api/export/table-pdf", (req, res) => {
   try {
-    const { name = "export", columns = [], rows = [], meta = {} } = req.body || {};
-
-    const wb = new ExcelJS.Workbook();
-    wb.creator = "MVP3 Backend";
-    wb.created = new Date();
-
-    const ws = wb.addWorksheet("Sheet1");
-
-    // ExcelJS 列配置
-    ws.columns = columns.map((c) => ({
-      header: c.title || c.key,
-      key: c.key,
-      width: c.width || 16,
-    }));
-
-    // 写入数据
-    rows.forEach((r) => ws.addRow(r));
-
-    // 顶部 metadata（可选）
-    if (Object.keys(meta || {}).length) {
-      ws.insertRow(1, []);
-      ws.insertRow(
-        1,
-        [`Source: ${meta.source || ""}`, `GeneratedBy: ${meta.generatedBy || ""}`],
-        "n"
-      );
-      ws.mergeCells(1, 1, 1, Math.max(2, columns.length));
+    const { title = "表格导出", subtitle = "", columns = [], rows = [] } = req.body || {};
+    if (!Array.isArray(columns) || columns.length === 0) {
+      return res.status(400).json({ ok: false, error: "MISSING_COLUMNS" });
+    }
+    if (!Array.isArray(rows)) {
+      return res.status(400).json({ ok: false, error: "MISSING_ROWS" });
     }
 
-    // 边框 & 自动筛选
-    const lastRow = ws.lastRow?.number || rows.length + 2;
-    const lastCol = columns.length || 1;
-    ws.autoFilter = {
-      from: { row: 2, column: 1 },
-      to: { row: 2, column: lastCol },
-    };
-    for (let r = 2; r <= lastRow; r++) {
-      for (let c = 1; c <= lastCol; c++) {
-        ws.getCell(r, c).border = {
-          top: { style: "thin" },
-          left: { style: "thin" },
-          bottom: { style: "thin" },
-          right: { style: "thin" },
-        };
-        ws.getCell(r, c).alignment = { vertical: "middle", wrapText: true };
-      }
-    }
-
-    const buf = await wb.xlsx.writeBuffer();
-    res.setHeader(
-      "content-type",
-      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    );
-    res.setHeader(
-      "content-disposition",
-      `attachment; filename="${encodeURIComponent(`${name}.xlsx`)}"`
-    );
-    res.send(Buffer.from(buf));
-  } catch (err) {
-    console.error("[/v1/api/export/excel] error:", err);
-    res.status(500).send(String(err?.message || err));
-  }
-});
-
-// ========== 导出：表格 PDF ==========
-app.post("/v1/api/export/table-pdf", async (req, res) => {
-  try {
-    const { title = "Table", subtitle = "", columns = [], rows = [] } = req.body || {};
-
-    res.setHeader("content-type", "application/pdf");
-    res.setHeader(
-      "content-disposition",
-      `attachment; filename="${encodeURIComponent(`${title}.pdf`)}"`
-    );
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${sanitizeFilename(title)}.pdf"`);
 
     const doc = new PDFDocument({ size: "A4", margin: 36 });
     doc.pipe(res);
 
-    // 标题区
-    doc.fontSize(18).text(title, { align: "center" });
-    if (subtitle) doc.moveDown(0.3).fontSize(10).fillColor("#666").text(subtitle, { align: "center" });
-    doc.moveDown(0.6).fillColor("#000");
+    // 标题
+    doc.fontSize(16).text(title, { align: "center" }).moveDown(0.3);
+    if (subtitle) {
+      doc.fontSize(10).fillColor("#666").text(subtitle, { align: "center" }).fillColor("#000");
+    }
+    doc.moveDown(0.8);
 
-    // 简易表格布局（按列的 width 权重进行缩放）
-    const contentWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right; // ~523
-    const totalWeight = (columns.length ? columns : [{ width: 10 }]).reduce(
-      (s, c) => s + (Number(c.width) || 10),
-      0
-    );
-    const x0 = doc.x, y0 = doc.y;
-
-    // 表头
-    let x = x0;
-    columns.forEach((c) => {
-      const w = (Number(c.width) || 10) / totalWeight * contentWidth;
-      doc.font("Helvetica-Bold").fontSize(10).text(c.title || c.key || "", x, doc.y, {
-        width: w,
-        continued: false,
-      });
-      x += w;
+    // 定义列宽（按 columns.width 或简单分配）
+    const pageWidth = doc.page.width - doc.page.margins.left - doc.page.margins.right;
+    let totalWidth = 0;
+    const widths = columns.map((c) => {
+      const w = Number(c.width) > 0 ? Number(c.width) : 20; // 以“字符数”近似
+      totalWidth += w;
+      return w;
     });
-    doc.moveDown(0.2);
-    doc.moveTo(x0, doc.y).lineTo(x0 + contentWidth, doc.y).strokeColor("#999").stroke();
-    doc.strokeColor("#000");
+    const pxPerUnit = pageWidth / totalWidth;
+    const colPx = widths.map((w) => Math.max(30, Math.floor(w * pxPerUnit)));
 
-    // 行
-    rows.forEach((r) => {
-      let xx = x0;
-      let rowHeight = 0;
-      const yStart = doc.y + 2;
-
-      // 先测量每个单元需要的高度
-      const cellHeights = columns.map((c) => {
-        const w = (Number(c.width) || 10) / totalWeight * contentWidth;
-        const v =
-          r[c.key] == null
-            ? ""
-            : typeof r[c.key] === "string"
-            ? r[c.key]
-            : String(r[c.key]);
-        const { height } = doc
-          .font("Helvetica")
-          .fontSize(9)
-          .heightOfString(v, { width: w });
-        return Math.max(height, 12);
-      });
-      rowHeight = Math.max(...cellHeights) + 6;
-
-      // 真正绘制
-      columns.forEach((c, i) => {
-        const w = (Number(c.width) || 10) / totalWeight * contentWidth;
-        const v =
-          r[c.key] == null
-            ? ""
-            : typeof r[c.key] === "string"
-            ? r[c.key]
-            : String(r[c.key]);
-        doc
-          .font("Helvetica")
-          .fontSize(9)
-          .text(v, xx, yStart, { width: w, height: rowHeight - 4 });
-        xx += w;
-      });
-
-      doc.moveTo(x0, yStart + rowHeight).lineTo(x0 + contentWidth, yStart + rowHeight).strokeColor("#eee").stroke();
-      doc.strokeColor("#000");
-      doc.y = yStart + rowHeight; // 下一行
+    // 绘表头
+    let y = doc.y;
+    let x = doc.x;
+    doc.fontSize(9).fillColor("#000");
+    columns.forEach((c, idx) => {
+      doc.rect(x, y, colPx[idx], 18).fill("#eee").stroke("#aaa");
+      doc.fillColor("#000").text(String(c.title || c.key), x + 3, y + 4, { width: colPx[idx] - 6 });
+      doc.fillColor("#000");
+      x += colPx[idx];
     });
+    y += 18;
+
+    const drawRow = (rowIndex) => {
+      const r = rows[rowIndex];
+      let localX = doc.x;
+      let rowHeight = 16;
+      columns.forEach((c, idx) => {
+        const val =
+          c.key === "index"
+            ? rowIndex + 1
+            : r?.[c.key] ?? "";
+        // 估算高度
+        const txt = String(val);
+        const h = doc.heightOfString(txt, { width: colPx[idx] - 6 });
+        rowHeight = Math.max(rowHeight, h + 6);
+      });
+      // 分页
+      if (y + rowHeight > doc.page.height - doc.page.margins.bottom) {
+        doc.addPage();
+        y = doc.y;
+        localX = doc.x;
+        // 重新画表头
+        columns.forEach((c, idx) => {
+          doc.rect(localX, y, colPx[idx], 18).fill("#eee").stroke("#aaa");
+          doc.fillColor("#000").text(String(c.title || c.key), localX + 3, y + 4, { width: colPx[idx] - 6 });
+          doc.fillColor("#000");
+          localX += colPx[idx];
+        });
+        y += 18;
+        localX = doc.x;
+      }
+      // 画行
+      localX = doc.x;
+      columns.forEach((c, idx) => {
+        const val = c.key === "index" ? rowIndex + 1 : r?.[c.key] ?? "";
+        doc.rect(localX, y, colPx[idx], rowHeight).stroke("#ddd");
+        doc.text(String(val), localX + 3, y + 3, {
+          width: colPx[idx] - 6,
+        });
+        localX += colPx[idx];
+      });
+      y += rowHeight;
+    };
+
+    for (let i = 0; i < rows.length; i++) drawRow(i);
 
     doc.end();
   } catch (err) {
-    console.error("[/v1/api/export/table-pdf] error:", err);
-    res.status(500).send(String(err?.message || err));
+    console.error("[/export/table-pdf] error:", err);
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 });
 
-// 兜底
-app.get("/", (req, res) => {
-  res.type("text/plain").send("mvp2-backend is running. Try /v1/api/health");
-});
+// -------- utils --------
+function sanitizeFilename(name) {
+  return String(name || "file")
+    .replace(/[\\/:*?"<>|]+/g, "_")
+    .replace(/\s+/g, "_")
+    .slice(0, 120);
+}
 
-app.listen(PORT, () => {
-  console.log(`[mvp2-backend] listening at http://0.0.0.0:${PORT}`);
+// 启动
+app.listen(port, () => {
+  console.log(`[mvp2-backend] listening at http://0.0.0.0:${port}`);
 });
