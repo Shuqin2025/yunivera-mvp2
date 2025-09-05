@@ -1,194 +1,141 @@
 // backend/routes/catalog.js
-// 统一的目录抓取入口 + 针对 s-impuls-shop 的专用解析
-import express from "express";
-import fetch from "node-fetch";
-import * as cheerio from "cheerio";
-import { URL } from "url";
+import express from 'express';
+import * as cheerio from 'cheerio';
+import { URL } from 'node:url';
 
 const router = express.Router();
 
-function absUrl(base, href) {
-  if (!href) return "";
+// 绝对链接工具
+function absolutize(base, href) {
   try {
     return new URL(href, base).toString();
   } catch {
-    return href;
+    return href || '';
   }
 }
 
-function parsePriceText(txt = "") {
-  // 例： "€ 19,90", "19,90 €", "EUR 19.90"
-  const t = txt.replace(/\s+/g, " ").trim();
-  const currency =
-    (t.match(/(€|eur|usd|chf|gbp)/i) || [])[1]?.toUpperCase().replace("€", "EUR") ||
-    null;
-  const num = t
-    .replace(/[^\d.,-]/g, "")
-    .replace(/\.(?=\d{3}\b)/g, "") // 去掉千分位点
-    .replace(",", "."); // 德语小数逗号 -> 点
-  const price = num && !isNaN(Number(num)) ? Number(num) : null;
-  return { price, currency };
+// 提取并清洗文本
+function clean(t = '') {
+  return t.replace(/\s+/g, ' ').trim();
 }
 
-/** 仅解析页面中真正的商品卡片（s-impuls-shop 专用） */
-function parseSImpulsCatalog(html, pageUrl) {
-  const $ = cheerio.load(html);
-
-  // 1) 在主体内容区内查找商品卡片（多套选择器兜底）
-  const candidates = $(
-    "#content .product-layout, #content .product-grid .product-thumb, .product-layout, .product-thumb"
-  );
-
-  const products = [];
-  const seen = new Set();
-
-  candidates.each((_, card) => {
-    const $card = $(card);
-
-    // a) 链接：优先 h4/name 区域的 a；接受含 product/product、product_id、/produkt/、/product/、/artikel/ 的链接
-    let linkEl =
-      $card.find("h4 a, .caption .name a, .product-name a").first()[0] ||
-      $card.find('a[href*="product_id="]').first()[0] ||
-      $card.find('a[href*="/produkt/"], a[href*="/product/"], a[href*="/artikel/"]').first()[0];
-
-    let url = linkEl ? $(linkEl).attr("href") : "";
-    url = absUrl(pageUrl, url);
-
-    // 过滤掉分类/筛选链接（index.php?path=...）
-    if (!url || /index\.php\?path=/i.test(url)) return;
-
-    // 去重
-    const dedupKey = url.split("?")[0];
-    if (seen.has(dedupKey)) return;
-    seen.add(dedupKey);
-
-    // b) 标题
-    const title =
-      ($(linkEl).text() || "")
-        .replace(/\s+/g, " ")
-        .trim() ||
-      $card.find(".caption h4, .product-name").text().trim() ||
-      null;
-
-    // c) SKU（型号/货号）
-    let sku =
-      $card.find(".model, .sku, .artnr, .article, .product-code, .code").first().text().trim() ||
-      null;
-
-    // d) 价格/币种
-    const priceNode =
-      $card.find(".price, .product-price, .price-new, .price-old").first().text().trim() || "";
-    const { price, currency } = parsePriceText(priceNode);
-
-    // e) 图片
-    const img =
-      $card.find("img").attr("data-src") ||
-      $card.find("img").attr("src") ||
-      null;
-
-    // f) 预览（截取一段描述文本）
-    const preview =
-      $card.find(".description, .desc, .caption p").first().text().replace(/\s+/g, " ").trim() ||
-      null;
-
-    products.push({
-      title,
-      url,
-      sku,
-      price,
-      currency,
-      img,
-      preview,
-    });
-  });
-
-  return {
-    ok: true,
-    source: pageUrl,
-    count: products.length,
-    products,
-  };
+// 从价格文本里大致提取数字（保留原币种文本）
+function pickPrice(text = '') {
+  const m = text.replace(',', '.').match(/-?\d+(?:\.\d+)?/);
+  return m ? Number(m[0]) : null;
 }
 
-/** 通用解析：尽量从常见电商模板里提取商品卡片 */
-function parseGenericCatalog(html, pageUrl) {
-  const $ = cheerio.load(html);
-  const products = [];
-  const seen = new Set();
+// 针对 s-impuls 等常见电商列表的鲁棒选择器
+const PRODUCT_BLOCK_SELECTOR = [
+  // 常见 B2B/B2C 列表
+  '#content .product-list .product-layout',
+  '#content .product-grid .product-layout',
+  '.product-list .product-layout',
+  '.product-grid .product-layout',
+  // 有的主题直接用 col- 栅格项承载商品块
+  '#content .product-grid > div[class*=col-]',
+  '#content .product-list > div[class*=col-]',
+  '.product-grid > div[class*=col-]',
+  '.product-list > div[class*=col-]',
+].join(', ');
 
-  const cards = $(
-    ".product, .product-card, .product-item, .product-tile, .product-thumb, .grid-item, .prod, li.product"
-  );
+// 尝试从一个商品块中抓取信息
+function scrapeItem($, base, el) {
+  const $el = $(el);
 
-  cards.each((_, card) => {
-    const $c = $(card);
+  // 标题与链接
+  const $titleA =
+    $el.find('.caption h4 a').first().length
+      ? $el.find('.caption h4 a').first()
+      : $el.find('h4 a, .product-title a, .title a').first();
 
-    let a =
-      $c.find("h3 a, h4 a, .title a, .name a, .product-title a").first()[0] ||
-      $c.find("a").first()[0];
+  const title = clean($titleA.text());
+  const url = absolutize(base, $titleA.attr('href') || '');
 
-    let url = a ? $(a).attr("href") : "";
-    url = absUrl(pageUrl, url);
-    if (!url) return;
-    if (seen.has(url)) return;
-    seen.add(url);
+  // 图片
+  const $img =
+    $el.find('.image img').first().length
+      ? $el.find('.image img').first()
+      : $el.find('img').first();
+  const img = absolutize(base, $img.attr('data-src') || $img.attr('src') || '');
 
-    const title =
-      ($(a).text() || "").replace(/\s+/g, " ").trim() ||
-      $c.find(".title, .name, .product-title").first().text().trim() ||
-      null;
+  // 价格（如果有）
+  const priceText =
+    $el.find('.price').first().text() ||
+    $el.find('.product-price').first().text() ||
+    '';
+  const price = pickPrice(priceText);
 
-    const sku =
-      $c.find(".sku, .model, .code, .product-code").first().text().trim() || null;
+  // SKU/型号（如果有）
+  const sku =
+    clean(
+      $el.find('.model, .product-model, .sku, .product-sku').first().text()
+    ) || '';
 
-    const priceTxt =
-      $c.find(".price, .product-price, .price-new, .price-old").first().text().trim() || "";
-    const { price, currency } = parsePriceText(priceTxt);
+  // 简短预览（如果有）
+  const preview =
+    clean(
+      $el
+        .find('.description, .product-description, .desc')
+        .first()
+        .text()
+    ) || '';
 
-    const img = $c.find("img").attr("data-src") || $c.find("img").attr("src") || null;
+  // 币种：此处不足为据，仅在存在价格文本时保留原始价钱行以供人工审阅
+  const currency = priceText ? null : null;
 
-    const preview =
-      $c.find(".description, .desc, p").first().text().replace(/\s+/g, " ").trim() || null;
-
-    products.push({ title, url, sku, price, currency, img, preview });
-  });
-
-  return { ok: true, source: pageUrl, count: products.length, products };
+  return { title, url, sku, price, currency, img, preview };
 }
 
-router.get("/v1/api/catalog/parse", async (req, res) => {
-  const pageUrl = req.query.url?.toString().trim();
-  if (!pageUrl) return res.status(400).json({ ok: false, error: "Missing url" });
+// GET /v1/api/catalog/parse?url=...
+router.get('/parse', async (req, res) => {
+  const target = (req.query.url || '').toString().trim();
+  if (!target) {
+    return res.status(400).json({ ok: false, error: 'Missing url' });
+  }
 
   try {
-    const r = await fetch(pageUrl, {
+    // Node 18+ 全局 fetch（无需 node-fetch）
+    const resp = await fetch(target, {
       headers: {
-        "user-agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119 Safari/537.36",
-        accept: "text/html,application/xhtml+xml",
+        'user-agent':
+          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36',
+        accept: 'text/html,application/xhtml+xml',
       },
-      timeout: 20000,
+      // timeout：Render 上可不设，若想严格限制可用 AbortController
     });
 
-    if (!r.ok) {
+    if (!resp.ok) {
       return res
         .status(502)
-        .json({ ok: false, error: `Upstream ${r.status} ${r.statusText}` });
+        .json({ ok: false, error: `Upstream HTTP ${resp.status}` });
     }
 
-    const html = await r.text();
-    const host = new URL(pageUrl).hostname;
+    const html = await resp.text();
+    const $ = cheerio.load(html);
 
-    let result;
-    if (/s-impuls-shop\.de$/i.test(host)) {
-      result = parseSImpulsCatalog(html, pageUrl);
-    } else {
-      result = parseGenericCatalog(html, pageUrl);
-    }
+    // 抓取商品块
+    const blocks = $(PRODUCT_BLOCK_SELECTOR).toArray();
 
-    return res.json(result);
+    // 兜底：有些站点把每个商品放在 .product-thumb 或 .product-item
+    const fallbacks =
+      blocks.length > 0
+        ? blocks
+        : $('.product-thumb, .product-item').toArray();
+
+    const items = (fallbacks.length ? fallbacks : [])
+      .map((el) => scrapeItem($, target, el))
+      // 排除明显空壳（没有标题也没有链接）
+      .filter((it) => it.title || it.url);
+
+    return res.json({
+      ok: true,
+      source: target,
+      count: items.length,
+      products: items,
+    });
   } catch (err) {
-    console.error("[catalog.parse] error:", err);
+    console.error('[catalog.parse] error:', err);
     return res.status(500).json({ ok: false, error: String(err.message || err) });
   }
 });
