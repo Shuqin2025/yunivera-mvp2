@@ -1,199 +1,147 @@
 // backend/routes/catalog.js
-import express from 'express';
-import * as cheerio from 'cheerio';
-import fetch from 'node-fetch';
-import { URL } from 'url';
+// ESM 路由。支持 GET/POST /v1/api/catalog/parse?url=...
 
-const router = express.Router();
+import { Router } from "express";
+import * as cheerio from "cheerio";
 
-/** 把相对地址补成绝对地址 */
-function toAbsUrl(href, base) {
+const router = Router();
+
+// 更像浏览器的请求头，很多站需要这个才会返回完整 HTML
+const UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
+
+async function fetchHtml(targetUrl) {
+  const res = await fetch(targetUrl, {
+    headers: {
+      "user-agent": UA,
+      "accept-language": "de,en;q=0.8,zh;q=0.7",
+      accept:
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    },
+  });
+  if (!res.ok) {
+    throw new Error(`HTTP ${res.status} when fetching ${targetUrl}`);
+  }
+  return await res.text();
+}
+
+function abs(origin, href = "") {
   try {
-    if (!href) return '';
-    return new URL(href, base).toString();
+    return new URL(href, origin).href;
   } catch {
-    return href || '';
+    return href || origin;
   }
 }
 
-/** 去重 */
-function uniq(arr) {
-  return Array.from(new Set(arr));
-}
+/**
+ * 从 s-impuls-shop 的目录页抽取商品
+ * 站点模版可能更新，所以选择器做了多备选。
+ */
+function extractProducts(html, pageUrl) {
+  const $ = cheerio.load(html);
 
-/** 判断链接像不像商品详情（尽量宽松） */
-function looksLikeProductUrl(href) {
-  if (!href) return false;
-  const h = href.toLowerCase();
-  return (
-    h.includes('/catalog/') || h.includes('index.php?') || h.includes('/produkt') || h.includes('/product')
+  // 常见承载容器（多备选）
+  let items = $(
+    "div.product-layout, div.product-grid .product-thumb, div.product-thumb, .product-list .product-layout"
   );
-}
 
-/** 优先从卡片里挑一个“最像商品”的 a */
-function pickBestAnchor($, $card) {
-  const anchors = $card.find('a').toArray();
-  let best = null;
+  // 兜底：如果外层没命中，再尝试商品卡片内部 class
+  if (items.length === 0) {
+    items = $("div[class*='product']:has(a, img)");
+  }
 
-  for (const a of anchors) {
-    const href = $(a).attr('href') || '';
-    if (!href) continue;
-    if (looksLikeProductUrl(href)) {
-      best = a;
-      break;
+  const products = [];
+  items.each((_, el) => {
+    const root = $(el);
+
+    // 名称（多备选）
+    const name =
+      root.find(".caption a, .name a, .product-name a, a[title]").first().text().trim() ||
+      root.find("img[alt]").attr("alt") ||
+      root.find("a").first().text().trim();
+
+    // 链接
+    const href =
+      root.find(".caption a, .name a, .product-name a, a[href*='product_id'], a[href]").first().attr("href") ||
+      "";
+
+    // 价格（多备选：price-new / price / .price）
+    const priceTxt =
+      root.find(".price-new, .price .price-new, .price").first().text().replace(/\s+/g, " ").trim() ||
+      "";
+
+    // 图片
+    const img =
+      root.find("img[data-src]").attr("data-src") ||
+      root.find("img[src]").attr("src") ||
+      "";
+
+    if (name || href) {
+      products.push({
+        title: name || "",
+        url: abs(pageUrl, href),
+        sku: "", // 目录页通常无 SKU，这里留空
+        price: priceTxt || null,
+        currency: null,
+        img: img ? abs(pageUrl, img) : null,
+        preview: "",
+      });
     }
+  });
+
+  // 去重（按 url）
+  const seen = new Set();
+  const unique = [];
+  for (const p of products) {
+    const key = p.url || p.title;
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    unique.push(p);
   }
-  // 实在没有，就退而求其次：第一个有 href 的链接
-  if (!best) {
-    best = anchors.find(a => $(a).attr('href')) || null;
-  }
-  return best;
+
+  return unique;
 }
 
-/** 从卡片取图 */
-function pickImage($, $card) {
-  let src = $card.find('img[src]').first().attr('src') || '';
-  if (!src) {
-    // 有些站把图片放 data-src
-    src = $card.find('img[data-src]').first().attr('data-src') || '';
-  }
-  return src;
+async function handleParse(targetUrl) {
+  const html = await fetchHtml(targetUrl);
+  const products = extractProducts(html, targetUrl);
+
+  return {
+    ok: true,
+    source: targetUrl,
+    count: products.length,
+    products,
+  };
 }
 
-/** 解析目录页 */
-export async function parseCatalogHandler(req, res) {
-  const rawUrl = (req.query.url || '').trim();
-  if (!rawUrl) {
-    return res.status(400).json({ ok: false, error: 'Missing url' });
-  }
+// ---- 路由 ----
+
+// GET /v1/api/catalog/parse?url=...
+router.get("/parse", async (req, res) => {
+  const url = String(req.query.url || "").trim();
+  if (!url) return res.status(400).json({ ok: false, error: "MISSING_URL" });
 
   try {
-    const response = await fetch(rawUrl, {
-      headers: {
-        'user-agent':
-          'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',
-        accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      },
-      timeout: 20000,
-    });
-
-    if (!response.ok) {
-      return res.status(502).json({ ok: false, error: `Upstream ${response.status}` });
-    }
-
-    const html = await response.text();
-    const $ = cheerio.load(html);
-
-    // 多选择器兜底：命中任意一个即可
-    const selectorPool = [
-      '.product-layout',                 // OpenCart 常见
-      '.products-grid .product',         // 常见网店
-      '.product-list .product-one',
-      'ul.products > li.product',
-      '.product-item',
-      '.card.product',
-      '.catalog-products .catalog-product',
-      '.products-listing .product',      // 更多兜底
-    ];
-
-    let $cards = $();
-    for (const sel of selectorPool) {
-      const found = $(sel);
-      if (found.length > 0) {
-        $cards = found;
-        break;
-      }
-    }
-
-    // 如果还没命中，最后再兜底：页面所有 a[href]，但只挑“像商品”的
-    let products = [];
-    if ($cards.length === 0) {
-      const anchors = $('a[href]')
-        .toArray()
-        .map(a => $(a).attr('href'))
-        .filter(Boolean)
-        .map(href => toAbsUrl(href, rawUrl))
-        .filter(looksLikeProductUrl);
-
-      const uniqAnchors = uniq(anchors);
-      products = uniqAnchors.map(href => ({
-        title: '',
-        url: href,
-        sku: '',
-        price: null,
-        currency: null,
-        img: '',
-        preview: '',
-      }));
-    } else {
-      // 从卡片抽取
-      $cards.each((_, el) => {
-        const $card = $(el);
-
-        const anchor = pickBestAnchor($, $card);
-        const href = anchor ? $(anchor).attr('href') : '';
-        const absUrl = toAbsUrl(href, rawUrl);
-        if (!absUrl) return;
-
-        // 标题：优先 a[title] / a 文本 / 卡片文本里第一句
-        let title =
-          (anchor && ($(anchor).attr('title') || $(anchor).text().trim())) ||
-          $card.find('.product-title, .name, h2, h3, .caption a').first().text().trim() ||
-          '';
-
-        // 图片
-        const imgSrc = toAbsUrl(pickImage($, $card), rawUrl);
-
-        // 价格 & 货币（尽力匹配）
-        let price = null;
-        let currency = null;
-        const priceText =
-          $card.find('.price, .product-price, .price-new, .prices').first().text().replace(/\s+/g, ' ').trim() || '';
-        const m = priceText.match(/([€$£])?\s*([\d.,]+)/);
-        if (m) {
-          price = parseFloat(m[2].replace(/\./g, '').replace(',', '.'));
-          currency = m[1] || (priceText.includes('€') ? '€' : null);
-        }
-
-        // 预览文案（尽量短）
-        const preview =
-          $card.find('.description, .product-description, .caption').first().text().replace(/\s+/g, ' ').trim() || '';
-
-        products.push({
-          title,
-          url: absUrl,
-          sku: '',
-          price: Number.isFinite(price) ? price : null,
-          currency: currency,
-          img: imgSrc,
-          preview,
-        });
-      });
-
-      // 去重（按 url）
-      const seen = new Set();
-      products = products.filter(p => {
-        if (!p.url) return false;
-        if (seen.has(p.url)) return false;
-        seen.add(p.url);
-        return true;
-      });
-    }
-
-    return res.json({
-      ok: true,
-      source: rawUrl,
-      count: products.length,
-      products,
-    });
+    const data = await handleParse(url);
+    res.json(data);
   } catch (err) {
-    // eslint-disable-next-line no-console
-    console.error('[catalog:parse] error', err);
-    return res.status(500).json({ ok: false, error: err.message || 'catalog parse error' });
+    console.error("[catalog.parse][GET] error:", err);
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
-}
+});
 
-// 路由：GET /v1/api/catalog/parse
-router.get('/parse', parseCatalogHandler);
+// POST /v1/api/catalog/parse  body: { url }
+router.post("/parse", async (req, res) => {
+  const url = String((req.body && req.body.url) || "").trim();
+  if (!url) return res.status(400).json({ ok: false, error: "MISSING_URL" });
+
+  try {
+    const data = await handleParse(url);
+    res.json(data);
+  } catch (err) {
+    console.error("[catalog.parse][POST] error:", err);
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
+  }
+});
 
 export default router;
