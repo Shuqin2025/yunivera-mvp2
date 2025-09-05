@@ -11,7 +11,7 @@ import quoteRoutes from "./routes/quote.js";
 import scrapeRoutes from "./routes/scrape.js";
 import matchRoutes from "./routes/match.js";
 import pdfRoutes from "./routes/pdf.js";
-import catalogRoutes from "./routes/catalog.js";  // ✅ 新增：目录抓取
+import catalogRoutes from "./routes/catalog.js";  // ✅ 目录抓取（已有则保留）
 
 dotenv.config();
 
@@ -29,23 +29,23 @@ app.use(
   })
 );
 
-// JSON
+// JSON 解析
 app.use(express.json({ limit: "4mb" }));
 
-// 静态文件（生成的 PDF 如有落地到 /files）
+// 静态文件（未来可用：/backend/files）—— 现在不要求持久化，也可用于预览
 const filesDir = path.join(__dirname, "files");
 if (!fs.existsSync(filesDir)) fs.mkdirSync(filesDir);
 app.use("/files", express.static(filesDir));
 
 /**
  * 路由挂载顺序 —— 重点！
- * 把所有新路由放在 quoteRoutes 之前，避免被旧接口拦截
+ * 把新路由放在 quoteRoutes 之前，避免被旧接口拦截
  */
 app.use("/v1/api/pdf", pdfRoutes);         // ✅ 生成 PDF
 app.use("/v1/api/scrape", scrapeRoutes);   // ✅ 抓取单页
 app.use("/v1/api/match", matchRoutes);     // ✅ 对比匹配
-app.use("/v1/api/catalog", catalogRoutes); // ✅ 抓取目录（新）
-app.use("/v1/api", quoteRoutes(filesDir)); // 其余老接口挂在 /v1/api 下
+app.use("/v1/api/catalog", catalogRoutes); // ✅ 抓取目录（若无此路由请忽略）
+app.use("/v1/api", quoteRoutes(filesDir)); // 其余老接口仍挂 /v1/api 下
 
 // 健康检查
 app.get("/v1/api/health", (_req, res) => {
