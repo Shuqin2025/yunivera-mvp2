@@ -9,6 +9,9 @@ import pdfRouter from "./routes/pdf.js";
 // 目录抓取路由（/v1/api/catalog/parse?url=...）
 import catalogRouter from "./routes/catalog.js";
 
+// 新增：导出路由
+import exportRouter from "./routes/export.js";
+
 // “表格 PDF” 用到
 import PDFDocument from "pdfkit";
 
@@ -76,6 +79,9 @@ app.use("/v1/api/pdf", pdfRouter);
 
 // 目录抓取：/v1/api/catalog/parse?url=...
 app.use("/v1/api/catalog", catalogRouter);
+
+// 新增：导出功能 /v1/api/export/*
+app.use("/v1/api/export", exportRouter);
 
 /**
  * 导出 Excel（利用 Excel 对 HTML 的兼容性，无需第三方库）
