@@ -9,7 +9,7 @@ import pdfRouter from "./routes/pdf.js";
 // 目录抓取路由（/v1/api/catalog/parse?url=...）
 import catalogRouter from "./routes/catalog.js";
 
-// 新增：导出路由
+// 新增：导出路由（ExcelJS .xlsx，支持图片）
 import exportRouter from "./routes/export.js";
 
 // “表格 PDF” 用到
@@ -18,22 +18,15 @@ import PDFDocument from "pdfkit";
 const app = express();
 const port = process.env.PORT || 10000;
 
-/**
- * CORS
- * - 允许前端（yunivera.com / onrender.com）跨域访问
- * - 如需收紧可将 origin 改为白名单检查函数
- */
+/** CORS */
 app.use(
   cors({
-    // credentials: true, // 如需要携带 cookie 再开启
+    // credentials: true,
   })
 );
-
 app.use(express.json({ limit: "2mb" }));
 
-/**
- * 根路径：简单欢迎页（避免 “Cannot GET /”）
- */
+/** 根路径 */
 app.get("/", (_req, res) => {
   res
     .type("text/plain")
@@ -43,19 +36,15 @@ app.get("/", (_req, res) => {
         "API:",
         "  - GET  /v1/api/health",
         "  - GET  /v1/api/catalog/parse?url=<catalog-url>",
-        "  - POST /v1/api/export/excel",
+        "  - POST /v1/api/export/excel         (xlsx with images, via exportRouter)",
+        "  - POST /v1/api/export/excel-html    (legacy .xls, no images)",
         "  - POST /v1/api/export/table-pdf",
         "",
       ].join("\n")
     );
 });
 
-/**
- * 健康检查
- * - GET /v1/api/health
- * - HEAD 也返回 200
- * - 禁止缓存，避免偶发 304 干扰
- */
+/** 健康检查 */
 const healthHandler = (_req, res) => {
   res
     .set("Cache-Control", "no-store, max-age=0")
@@ -74,21 +63,20 @@ app.head("/v1/api/health", (_req, res) => {
   res.set("Cache-Control", "no-store, max-age=0").status(200).end();
 });
 
-// 旧有：整页 PDF 生成（无改动）
+// 旧有：整页 PDF
 app.use("/v1/api/pdf", pdfRouter);
 
-// 目录抓取：/v1/api/catalog/parse?url=...
+// 目录抓取
 app.use("/v1/api/catalog", catalogRouter);
 
-// 新增：导出功能 /v1/api/export/*
+// ✅ 新：ExcelJS 导出（含图片的 .xlsx）— 由 export.js 提供 /excel 路由
 app.use("/v1/api/export", exportRouter);
 
 /**
- * 导出 Excel（利用 Excel 对 HTML 的兼容性，无需第三方库）
- * POST /v1/api/export/excel
- * body: { name?, columns: [{key,title,width?}], rows: [{...}], meta? }
+ * （改名后保留）HTML 兼容版导出：不含图片，输出 .xls
+ * 之前路径是 /v1/api/export/excel —— 为避免冲突，改为 /v1/api/export/excel-html
  */
-app.post("/v1/api/export/excel", (req, res) => {
+app.post("/v1/api/export/excel-html", (req, res) => {
   try {
     const { name = "export", columns = [], rows = [], meta = {} } = req.body || {};
     if (!Array.isArray(columns) || columns.length === 0) {
@@ -154,28 +142,19 @@ app.post("/v1/api/export/excel", (req, res) => {
 
     const safeBase = sanitizeFilename(name);
     const filename = `${safeBase || "export"}.xls`;
-
-    // 关键：严格 ASCII 文件名 + UTF-8 扩展，避免 header 非法字符
     res.setHeader("Content-Type", "application/vnd.ms-excel; charset=utf-8");
     res.setHeader(
       "Content-Disposition",
-      `attachment; filename="${filename}"; filename*=UTF-8''${encodeURIComponent(
-        filename
-      )}`
+      `attachment; filename="${filename}"; filename*=UTF-8''${encodeURIComponent(filename)}`
     );
-
     res.send(html);
   } catch (err) {
-    console.error("[/export/excel] error:", err);
+    console.error("[/export/excel-html] error:", err);
     res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 });
 
-/**
- * 导出“表格 PDF”（pdfkit）
- * POST /v1/api/export/table-pdf
- * body: { title?, subtitle?, columns: [{key,title,width?}], rows: [...] }
- */
+/** 表格 PDF */
 app.post("/v1/api/export/table-pdf", (req, res) => {
   try {
     const { title = "表格导出", subtitle = "", columns = [], rows = [] } = req.body || {};
@@ -271,18 +250,17 @@ app.post("/v1/api/export/table-pdf", (req, res) => {
   }
 });
 
-// 统一 404（API 命名空间）
+// 统一 404
 app.use("/v1", (_req, res) => {
   res.status(404).json({ ok: false, error: "NOT_FOUND" });
 });
 
 // ---- utils ----
 function sanitizeFilename(name) {
-  // 只保留安全 ASCII，避免响应头非法字符（尤其是 Content-Disposition）
   return String(name || "file")
     .normalize("NFKD")
-    .replace(/[^\x20-\x7E]+/g, "") // 去掉非可打印 ASCII
-    .replace(/[\\/:*?"<>|]+/g, "_") // Windows 不允许的字符
+    .replace(/[^\x20-\x7E]+/g, "")
+    .replace(/[\\/:*?"<>|]+/g, "_")
     .replace(/\s+/g, "_")
     .slice(0, 120);
 }
