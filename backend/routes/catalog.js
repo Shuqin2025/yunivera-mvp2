@@ -1,12 +1,12 @@
 // backend/routes/catalog.js
-// ESM 路由。支持 GET/POST /v1/api/catalog/parse?url=...
+// ESM 路由：支持 GET/POST /v1/api/catalog/parse?url=...
 
 import { Router } from "express";
 import * as cheerio from "cheerio";
 
 const router = Router();
 
-// 更像浏览器的请求头，很多站需要这个才会返回完整 HTML
+// 更像浏览器的请求头（不少站点需要这个才会返回完整 HTML）
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
 
@@ -34,8 +34,8 @@ function abs(origin, href = "") {
 }
 
 /**
- * 从 s-impuls-shop 的目录页抽取商品
- * 站点模版可能更新，所以选择器做了多备选。
+ * 从 s-impuls-shop 目录页抽取商品
+ * 站点模版可能更新，所以选择器做了多备选与兜底。
  */
 function extractProducts(html, pageUrl) {
   const $ = cheerio.load(html);
@@ -62,8 +62,9 @@ function extractProducts(html, pageUrl) {
 
     // 链接
     const href =
-      root.find(".caption a, .name a, .product-name a, a[href*='product_id'], a[href]").first().attr("href") ||
-      "";
+      root.find(".caption a, .name a, .product-name a, a[href*='product_id'], a[href]")
+        .first()
+        .attr("href") || "";
 
     // 价格（多备选：price-new / price / .price）
     const priceTxt =
@@ -80,7 +81,7 @@ function extractProducts(html, pageUrl) {
       products.push({
         title: name || "",
         url: abs(pageUrl, href),
-        sku: "", // 目录页通常无 SKU，这里留空
+        sku: "", // 目录页通常无 SKU，留空
         price: priceTxt || null,
         currency: null,
         img: img ? abs(pageUrl, img) : null,
