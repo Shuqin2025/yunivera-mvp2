@@ -3,13 +3,13 @@
 import express from "express";
 import cors from "cors";
 
-// 现有 PDF 路由
+// 现有 PDF 路由（整页 PDF）
 import pdfRouter from "./routes/pdf.js";
 
-// 目录抓取路由
+// 目录抓取路由（/v1/api/catalog/parse?url=...）
 import catalogRouter from "./routes/catalog.js";
 
-// 表格 PDF 用到
+// “表格 PDF” 用到
 import PDFDocument from "pdfkit";
 
 const app = express();
@@ -17,8 +17,8 @@ const port = process.env.PORT || 10000;
 
 /**
  * CORS
- * - 默认允许跨域（前端托管在 yunivera.com / onrender 域名）
- * - 如需收紧，可把 origin 换成 allowlist 检查函数
+ * - 允许前端（yunivera.com / onrender.com）跨域访问
+ * - 如需收紧可将 origin 改为白名单检查函数
  */
 app.use(
   cors({
@@ -29,28 +29,29 @@ app.use(
 app.use(express.json({ limit: "2mb" }));
 
 /**
- * 根路径：给人看的简单提示
- * 访问 https://<your-backend>.onrender.com 时，不再是 "Cannot GET /"
+ * 根路径：简单欢迎页（避免 “Cannot GET /”）
  */
 app.get("/", (_req, res) => {
-  res.type("text/plain").send(
-    [
-      "mvp2-backend is running. Try /v1/api/health",
-      "API:",
-      "  - GET  /v1/api/health",
-      "  - POST /v1/api/export/excel",
-      "  - POST /v1/api/export/table-pdf",
-      "  - GET  /v1/api/catalog/parse?url=<catalog-url>",
-      "",
-    ].join("\n")
-  );
+  res
+    .type("text/plain")
+    .send(
+      [
+        "mvp2-backend is running. Try /v1/api/health",
+        "API:",
+        "  - GET  /v1/api/health",
+        "  - GET  /v1/api/catalog/parse?url=<catalog-url>",
+        "  - POST /v1/api/export/excel",
+        "  - POST /v1/api/export/table-pdf",
+        "",
+      ].join("\n")
+    );
 });
 
 /**
- * 健康检查（对浏览器与监控更友好）
+ * 健康检查
  * - GET /v1/api/health
  * - HEAD 也返回 200
- * - 加 no-store，避免缓存干扰
+ * - 禁止缓存，避免偶发 304 干扰
  */
 const healthHandler = (_req, res) => {
   res
@@ -70,14 +71,14 @@ app.head("/v1/api/health", (_req, res) => {
   res.set("Cache-Control", "no-store, max-age=0").status(200).end();
 });
 
-// 现有 PDF（整页）生成
+// 旧有：整页 PDF 生成（无改动）
 app.use("/v1/api/pdf", pdfRouter);
 
-// 目录抓取
+// 目录抓取：/v1/api/catalog/parse?url=...
 app.use("/v1/api/catalog", catalogRouter);
 
 /**
- * 导出 Excel（Excel 兼容 HTML，无需第三方库）
+ * 导出 Excel（利用 Excel 对 HTML 的兼容性，无需第三方库）
  * POST /v1/api/export/excel
  * body: { name?, columns: [{key,title,width?}], rows: [{...}], meta? }
  */
@@ -148,7 +149,7 @@ app.post("/v1/api/export/excel", (req, res) => {
     const safeBase = sanitizeFilename(name);
     const filename = `${safeBase || "export"}.xls`;
 
-    // 关键：严格 ASCII 文件名 + UTF-8 扩展名，避免 header 非法字符
+    // 关键：严格 ASCII 文件名 + UTF-8 扩展，避免 header 非法字符
     res.setHeader("Content-Type", "application/vnd.ms-excel; charset=utf-8");
     res.setHeader(
       "Content-Disposition",
@@ -156,6 +157,7 @@ app.post("/v1/api/export/excel", (req, res) => {
         filename
       )}`
     );
+
     res.send(html);
   } catch (err) {
     console.error("[/export/excel] error:", err);
@@ -190,11 +192,7 @@ app.post("/v1/api/export/table-pdf", (req, res) => {
     // 标题
     doc.fontSize(16).text(title, { align: "center" }).moveDown(0.3);
     if (subtitle) {
-      doc
-        .fontSize(10)
-        .fillColor("#666")
-        .text(subtitle, { align: "center" })
-        .fillColor("#000");
+      doc.fontSize(10).fillColor("#666").text(subtitle, { align: "center" }).fillColor("#000");
     }
     doc.moveDown(0.8);
 
@@ -215,9 +213,7 @@ app.post("/v1/api/export/table-pdf", (req, res) => {
     doc.fontSize(9).fillColor("#000");
     columns.forEach((c, idx) => {
       doc.rect(x, y, colPx[idx], 18).fill("#eee").stroke("#aaa");
-      doc
-        .fillColor("#000")
-        .text(String(c.title || c.key), x + 3, y + 4, { width: colPx[idx] - 6 });
+      doc.fillColor("#000").text(String(c.title || c.key), x + 3, y + 4, { width: colPx[idx] - 6 });
       doc.fillColor("#000");
       x += colPx[idx];
     });
@@ -243,9 +239,7 @@ app.post("/v1/api/export/table-pdf", (req, res) => {
           doc.rect(localX, y, colPx[idx], 18).fill("#eee").stroke("#aaa");
           doc
             .fillColor("#000")
-            .text(String(c.title || c.key), localX + 3, y + 4, {
-              width: colPx[idx] - 6,
-            });
+            .text(String(c.title || c.key), localX + 3, y + 4, { width: colPx[idx] - 6 });
           doc.fillColor("#000");
           localX += colPx[idx];
         });
@@ -271,14 +265,14 @@ app.post("/v1/api/export/table-pdf", (req, res) => {
   }
 });
 
-// 统一 404（API）
+// 统一 404（API 命名空间）
 app.use("/v1", (_req, res) => {
   res.status(404).json({ ok: false, error: "NOT_FOUND" });
 });
 
-// utils
+// ---- utils ----
 function sanitizeFilename(name) {
-  // 只保留安全 ASCII，避免响应头非法字符
+  // 只保留安全 ASCII，避免响应头非法字符（尤其是 Content-Disposition）
   return String(name || "file")
     .normalize("NFKD")
     .replace(/[^\x20-\x7E]+/g, "") // 去掉非可打印 ASCII
