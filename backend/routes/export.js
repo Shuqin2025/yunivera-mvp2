@@ -3,7 +3,6 @@
 
 import Router from "express";
 import ExcelJS from "exceljs";
-import axios from "axios";
 
 const router = Router();
 
