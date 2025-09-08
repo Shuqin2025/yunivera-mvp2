@@ -1,182 +1,168 @@
 // backend/routes/export.js
-// 导出 Excel（含嵌入图片）
+// 导出 Excel（含图片缩略图）
+// POST /v1/api/export/excel  body: { source?: string, rows: Array<{title, sku, price, moq, url, img}> }
+
 import { Router } from "express";
 import ExcelJS from "exceljs";
 
 const router = Router();
 
-// 简单 UA，部分站点会拦截默认 UA
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
 
-/**
- * 下载图片为 Buffer（带超时/大小限制/类型校验）
- * @param {string} imgUrl
- * @param {number} timeoutMs
- * @param {number} maxBytes
- * @returns {Promise<{buffer: Buffer, ext: 'png' | 'jpeg'}>}
- */
-async function fetchImageBuffer(imgUrl, timeoutMs = 10000, maxBytes = 2_000_000) {
-  if (!imgUrl) throw new Error("empty image url");
+function guessExtFrom(ct, url = "") {
+  const u = url.toLowerCase();
+  if (ct?.includes("png") || u.endsWith(".png")) return "png";
+  return "jpeg"; // 默认 jpeg
+}
 
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), timeoutMs);
+async function fetchImageBuffer(imgUrl, timeoutMs = 15000, maxBytes = 2_500_000) {
+  if (!imgUrl) return null;
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), timeoutMs);
   try {
     const res = await fetch(imgUrl, {
-      headers: { "user-agent": UA, accept: "image/*" },
-      signal: ctrl.signal,
+      headers: { "user-agent": UA, accept: "image/*,*/*;q=0.8" },
+      redirect: "follow",
+      signal: ctl.signal,
     });
     if (!res.ok) throw new Error(`HTTP ${res.status} for ${imgUrl}`);
+    const ct = res.headers.get("content-type") || "";
+    if (!/^image\//i.test(ct)) throw new Error(`Not an image: ${ct}`);
 
-    const ct = (res.headers.get("content-type") || "").toLowerCase();
-    if (!ct.startsWith("image/")) throw new Error(`Not an image: ${ct}`);
-
-    let received = 0;
     const reader = res.body.getReader();
     const chunks = [];
+    let received = 0;
     while (true) {
-      const { done, value } = await reader.read();
+      const { value, done } = await reader.read();
       if (done) break;
-      received += value.byteLength;
-      if (received > maxBytes) throw new Error("image too large");
+      received += value.length;
+      if (received > maxBytes) throw new Error("Image too large");
       chunks.push(value);
     }
-    const buffer = Buffer.concat(chunks.map((u) => Buffer.from(u)));
-    const ext = ct.includes("png") ? "png" : "jpeg";
-    return { buffer, ext };
+    return {
+      buffer: Buffer.concat(chunks.map((u) => Buffer.from(u))),
+      ext: guessExtFrom(ct, imgUrl),
+    };
   } finally {
-    clearTimeout(t);
+    clearTimeout(timer);
   }
 }
 
-/**
- * 生成 Excel（含图片）
- * body: { source?: string, rows: Array<{title, sku, price, moq, url, img}> }
- */
 router.post("/excel", async (req, res) => {
   try {
     const { source = "", rows = [] } = req.body || {};
-    if (!Array.isArray(rows)) {
-      return res.status(400).json({ ok: false, error: "rows must be an array" });
-    }
+    const book = new ExcelJS.Workbook();
+    const ws = book.addWorksheet("Catalog");
 
-    const wb = new ExcelJS.Workbook();
-    const ws = wb.addWorksheet("抓取目录（前 50 条）");
-
-    // 列定义：A:#  B:标题  C:SKU  D:价格  E:MOQ  F:URL(超链接)  G:图片
+    // 列宽：#, 标题, SKU, 价格, MOQ, URL, 图片
     ws.columns = [
-      { header: "#", key: "idx", width: 5 },
-      { header: "标题/Title", key: "title", width: 42 },
+      { header: "#", key: "_no", width: 6 },
+      { header: "标题/Title", key: "title", width: 64 },
       { header: "SKU", key: "sku", width: 14 },
-      { header: "价格/Price", key: "price", width: 14 },
+      { header: "价格/Price", key: "price", width: 12 },
       { header: "MOQ", key: "moq", width: 10 },
-      { header: "链接/URL", key: "url", width: 80 },
-      { header: "图片/Image", key: "img", width: 34 }, // 宽一些给图片
+      { header: "链接/URL", key: "url", width: 110 },
+      { header: "图片/Image", key: "img", width: 34 },
     ];
 
-    // 顶部来源行
-    ws.addRow(["Source:", source]);
-    ws.addRow([]); // 空一行
+    // 顶部标题 + 来源
+    ws.mergeCells("A1:G1");
+    ws.getCell("A1").value = "【抓取目录（前 50 条）】";
+    ws.getCell("A1").font = { bold: true, size: 14 };
+    ws.getCell("A1").alignment = { horizontal: "left", vertical: "middle" };
 
-    // 表头样式
-    const headerRow = ws.addRow(
-      ws.columns.map((c) => c.header)
-    );
-    headerRow.font = { bold: true };
-    headerRow.alignment = { vertical: "middle", horizontal: "center" };
-    headerRow.eachCell((cell) => {
-      cell.border = {
-        top: { style: "thin" },
-        left: { style: "thin" },
-        bottom: { style: "thin" },
-        right: { style: "thin" },
-      };
-      cell.fill = {
-        type: "pattern",
-        pattern: "solid",
-        fgColor: { argb: "FFEFEFEF" },
-      };
-    });
+    ws.getCell("A2").value = "Source:";
+    ws.getCell("B2").value = source ?? "";
+    ws.mergeCells("B2:G2");
 
-    // 开始插入数据
-    // 图片放 G 列（第 7 列，image anchor 使用 0-based 坐标）
-    const imgColZeroBased = 6;
-    const imageBox = { width: 120, height: 120 }; // 图片显示尺寸
-    const dataStartRow = ws.lastRow.number + 1;
+    // 表头样式（第3行）
+    ws.getRow(3).values = ws.columns.map((c) => c.header);
+    ws.getRow(3).font = { bold: true };
+    ws.getRow(3).alignment = { horizontal: "center", vertical: "middle" };
+    ws.getRow(3).height = 22;
 
-    for (let i = 0; i < rows.length; i++) {
-      const r = rows[i] || {};
-      const excelRow = ws.addRow({
-        idx: i + 1,
-        title: r.title ?? "",
-        sku: r.sku ?? "",
-        price: r.price ?? "",
-        moq: r.moq ?? "",
-        url: r.url ?? "",
-        img: "", // 占位
-      });
+    // 冻结前3行
+    ws.views = [{ state: "frozen", ySplit: 3 }];
 
-      // URL 做成超链接
-      if (r.url) {
-        const c = excelRow.getCell("url");
-        c.value = { text: r.url, hyperlink: r.url };
-        c.font = { color: { argb: "FF1E78D7" }, underline: true };
+    const border = {
+      top: { style: "thin" },
+      left: { style: "thin" },
+      bottom: { style: "thin" },
+      right: { style: "thin" },
+    };
+
+    // 写入数据 & 插图
+    let rIndex = 4;
+    let No = 1;
+
+    for (const item of rows) {
+      const { title = "", sku = "", price = "", moq = "", url = "", img = "" } = item || {};
+      ws.getCell(`A${rIndex}`).value = No++;
+      ws.getCell(`B${rIndex}`).value = title;
+      ws.getCell(`C${rIndex}`).value = sku || null;
+      ws.getCell(`D${rIndex}`).value = price || null;
+      ws.getCell(`E${rIndex}`).value = moq || null;
+
+      // URL 超链
+      if (url) {
+        ws.getCell(`F${rIndex}`).value = { text: url, hyperlink: url };
+        ws.getCell(`F${rIndex}`).font = { color: { argb: "FF1F4E79" }, underline: true };
       }
 
-      // 行高给图片留空间
-      excelRow.height = 95;
+      // 单元格样式
+      for (const col of ["A", "B", "C", "D", "E", "F", "G"]) {
+        const c = ws.getCell(`${col}${rIndex}`);
+        c.border = border;
+        c.alignment = { vertical: "middle", wrapText: col === "B" };
+      }
 
-      // 尝试下载图片并嵌入
-      if (r.img) {
+      // 图片（缩略图）
+      if (img) {
         try {
-          const { buffer, ext } = await fetchImageBuffer(r.img);
-          const imgId = wb.addImage({ buffer, extension: ext });
-          const rowIdx0 = excelRow.number - 1; // 0-based
-
-          ws.addImage(imgId, {
-            tl: { col: imgColZeroBased, row: rowIdx0 }, // 左上角
-            ext: { width: imageBox.width, height: imageBox.height }, // 尺寸
-            // 也可以改成 'editAs: "oneCell"' 以适应单元格
-          });
+          const got = await fetchImageBuffer(img);
+          if (got?.buffer?.length) {
+            const imageId = book.addImage({ buffer: got.buffer, extension: got.ext });
+            // 适中的缩略图尺寸
+            const width = 220;
+            const height = 140;
+            // 放到第7列（G），当前数据行的可视区；tl 的 row/col 从 0 起
+            ws.addImage(imageId, {
+              tl: { col: 6, row: rIndex - 1 + 0.15 }, // 第7列索引=6
+              ext: { width, height },
+              editAs: "oneCell",
+            });
+            // 为了不挤压外观，设定统一的行高
+            ws.getRow(rIndex).height = Math.max(ws.getRow(rIndex).height ?? 0, height + 12);
+          }
         } catch (e) {
-          // 下载失败就忽略，不阻断导出
-          // 你也可以把错误写进某列：excelRow.getCell('img').value = 'IMG ERR';
+          // 忽略单条图片失败
         }
       }
 
-      // 给数据行画个细边框，观感更清爽
-      excelRow.eachCell((cell) => {
-        cell.alignment = { vertical: "middle" };
-        cell.border = {
-          top: { style: "thin" },
-          left: { style: "thin" },
-          bottom: { style: "thin" },
-          right: { style: "thin" },
-        };
-      });
+      rIndex++;
     }
 
-    // 冻结首行标题（数据部分的标题行）
-    ws.views = [{ state: "frozen", ySplit: dataStartRow - 1 }];
+    // 统一边框美化（数据区）
+    for (let r = 4; r < rIndex; r++) {
+      for (let c = 1; c <= 7; c++) {
+        ws.getRow(r).getCell(c).border = border;
+      }
+    }
 
-    // 生成二进制并输出
-    const buffer = await wb.xlsx.writeBuffer();
-    const filename = "catalog-export.xlsx"; // 只用 ASCII，避免 header 报错
-
+    // 输出
+    const buf = await book.xlsx.writeBuffer();
     res.setHeader(
       "Content-Type",
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     );
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename="${filename}"; filename*=UTF-8''${encodeURIComponent(
-        filename
-      )}`
-    );
-    return res.status(200).send(Buffer.from(buffer));
+    // 仅 ASCII 文件名，避免 “invalid character in header content”
+    res.setHeader("Content-Disposition", 'attachment; filename="catalog-export.xlsx"');
+    res.status(200).send(Buffer.from(buf));
   } catch (err) {
-    console.error("EXPORT ERROR:", err);
-    return res.status(500).json({ ok: false, error: String(err && err.message || err) });
+    res
+      .status(500)
+      .json({ ok: false, error: err?.message || String(err) });
   }
 });
 
