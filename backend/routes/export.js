@@ -135,7 +135,7 @@ router.post("/excel", async (req, res) => {
             // 为了不挤压外观，设定统一的行高
             ws.getRow(rIndex).height = Math.max(ws.getRow(rIndex).height ?? 0, height + 12);
           }
-        } catch (e) {
+        } catch {
           // 忽略单条图片失败
         }
       }
@@ -150,20 +150,19 @@ router.post("/excel", async (req, res) => {
       }
     }
 
-    // 输出
+    // 输出为 xlsx
     const buf = await book.xlsx.writeBuffer();
     res.setHeader(
       "Content-Type",
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     );
-    // 仅 ASCII 文件名，避免 “invalid character in header content”
+    // 仅 ASCII 文件名，避免 header 非法字符
     res.setHeader("Content-Disposition", 'attachment; filename="catalog-export.xlsx"');
     res.status(200).send(Buffer.from(buf));
   } catch (err) {
-    res
-      .status(500)
-      .json({ ok: false, error: err?.message || String(err) });
+    res.status(500).json({ ok: false, error: err?.message || String(err) });
   }
 });
 
 export default router;
+
