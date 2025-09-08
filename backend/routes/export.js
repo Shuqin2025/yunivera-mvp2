@@ -1,189 +1,136 @@
-// backend/routes/export.js
-import { Router } from "express";
-import ExcelJS from "exceljs";
+// export.js
+const Router = require('express').Router;
+const ExcelJS = require('exceljs');
+const axios = require('axios');
+const pLimit = require('p-limit');
+const { chromium } = require('playwright');
 
 const router = Router();
 
-// ===== 抓图：带 Referer，超时与体积保护 =====
-async function fetchImageBuffer(imgUrl, productUrl, {
-  timeoutMs = 12_000,
-  maxBytes = 1_800_000
-} = {}) {
-  if (!imgUrl) return { ok: false, reason: "no_img" };
+// 通用 UA
+const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36';
 
-  // 组装 Referer：优先商品页；其次图片同域根；最后留空
-  let referer = "";
+// 工具：根据 Content-Type 猜扩展名
+function extFromContentType(ct = '') {
+  ct = (ct || '').toLowerCase();
+  if (ct.includes('png')) return 'png';
+  if (ct.includes('jpeg') || ct.includes('jpg')) return 'jpeg';
+  if (ct.includes('webp')) return 'webp';
+  if (ct.includes('gif')) return 'gif';
+  return 'png';
+}
+
+// 先尝试 axios 下载（带 Referer）；失败再用 Playwright 兜底
+async function fetchImageBuffer(imgUrl) {
+  const origin = (() => {
+    try { return new URL(imgUrl).origin; } catch { return undefined; }
+  })();
+
+  // 1) axios 直连
   try {
-    if (productUrl) referer = productUrl;
-    if (!referer) referer = new URL(imgUrl).origin + "/";
-  } catch (_) { /* ignore */ }
-
-  const ctrl = new AbortController();
-  const to = setTimeout(() => ctrl.abort(), timeoutMs);
-
-  try {
-    const res = await fetch(imgUrl, {
-      method: "GET",
-      signal: ctrl.signal,
+    const resp = await axios.get(imgUrl, {
+      responseType: 'arraybuffer',
       headers: {
-        "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
-        "accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-        "referer": referer,
-        // 有些站会看这个
-        "sec-fetch-mode": "no-cors"
+        'User-Agent': UA,
+        'Referer': origin || imgUrl, // 有的站校验来源
+        'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
       },
-      redirect: "follow"
+      timeout: 15000,
+      validateStatus: s => s >= 200 && s < 400
     });
-
-    if (!res.ok) {
-      return { ok: false, reason: `http_${res.status}` };
-    }
-    const ct = (res.headers.get("content-type") || "").toLowerCase();
-    if (!ct.startsWith("image/")) {
-      return { ok: false, reason: `not_image(${ct || "unknown"})` };
-    }
-
-    // 流式读取并限制大小
-    const reader = res.body.getReader();
-    let received = 0;
-    const chunks = [];
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      received += value.byteLength;
-      if (received > maxBytes) return { ok: false, reason: "too_large" };
-      chunks.push(value);
-    }
-    const buf = Buffer.concat(chunks.map(u => Buffer.from(u)));
-    // 推断扩展名
-    let ext = "jpeg";
-    if (ct.includes("png")) ext = "png";
-    else if (ct.includes("gif")) ext = "gif";
-    else if (ct.includes("bmp")) ext = "bmp";
-    else if (ct.includes("webp")) ext = "png"; // Excel 不直接支持 webp，转成 png 更安全（此处先按 png 标注）
-
-    return { ok: true, buf, ext };
+    const ext = extFromContentType(resp.headers['content-type']);
+    return { buffer: Buffer.from(resp.data), extension: ext };
   } catch (e) {
-    const msg = (e && e.name === "AbortError") ? "timeout" : (e?.message || "fetch_err");
-    return { ok: false, reason: msg };
-  } finally {
-    clearTimeout(to);
+    // 继续兜底
   }
-}
 
-// ===== 样式小工具 =====
-function thStyle(cell) {
-  cell.font = { bold: true };
-  cell.alignment = { vertical: "middle", horizontal: "left" };
-  cell.border = {
-    bottom: { style: "thin", color: { argb: "FF888888" } }
-  };
-}
-
-router.post("/excel", async (req, res) => {
+  // 2) Playwright 兜底（模拟浏览器发起请求，天然带 Referer）
+  const browser = await chromium.launch({ headless: true });
   try {
-    const { source = "", rows = [] } = req.body || {};
-    const wb = new ExcelJS.Workbook();
-    wb.creator = "MVP3-Frontend";
-    const ws = wb.addWorksheet("抓取目录（前 50 条）", {
-      properties: { defaultRowHeight: 18 }
-    });
-
-    // 表头
-    ws.getCell("A1").value = "【抓取目录（前 50 条）】";
-    ws.mergeCells("A1:G1");
-    ws.getCell("A2").value = "Source:";
-    ws.getCell("B2").value = source;
-
-    // 列头
-    const headerRowIdx = 3;
-    const header = ["#", "标题/Title", "SKU", "价格/Price", "MOQ", "链接/URL", "图片/Image"];
-    ws.getRow(headerRowIdx).values = header;
-    ws.columns = [
-      { key: "idx", width: 5 },
-      { key: "title", width: 58 },
-      { key: "sku", width: 14 },
-      { key: "price", width: 14 },
-      { key: "moq", width: 8 },
-      { key: "url", width: 110 },
-      { key: "img", width: 18 }
-    ];
-    ws.getRow(headerRowIdx).eachCell(thStyle);
-
-    // 数据起始行
-    let r = headerRowIdx + 1;
-
-    // 逐行写入 + 抓图
-    for (let i = 0; i < rows.length; i++) {
-      const { title = "", sku = "", price = "", moq = "", url = "", img = "" } = rows[i] || {};
-
-      ws.getCell(`A${r}`).value = i + 1;
-      ws.getCell(`B${r}`).value = title || "";
-      ws.getCell(`C${r}`).value = sku || "";
-      ws.getCell(`D${r}`).value = price || "";
-      ws.getCell(`E${r}`).value = moq || "";
-
-      // 商品链接超链接
-      if (url) {
-        ws.getCell(`F${r}`).value = { text: url, hyperlink: url };
-        ws.getCell(`F${r}`).font = { color: { argb: "FF0563C1" }, underline: true };
-      } else {
-        ws.getCell(`F${r}`).value = "";
-      }
-
-      // —— 图片抓取（带 Referer）——
-      let placed = false;
-      if (img) {
-        const ret = await fetchImageBuffer(img, url);
-        if (ret.ok) {
-          try {
-            const imgId = wb.addImage({
-              buffer: ret.buf,
-              extension: ret.ext === "jpg" ? "jpeg" : ret.ext
-            });
-            // 保持行高以能看到图（可按需调整）
-            ws.getRow(r).height = Math.max(ws.getRow(r).height || 18, 110);
-            // 把图片放到第 G 列这一行的单元格里（稍留内边距）
-            ws.addImage(imgId, {
-              tl: { col: 6 + 0.2, row: r - 1 + 0.2 }, // G 列 = 第 7 列，0-based => 6
-              br: { col: 6 + 0.2 + 2.6, row: r - 1 + 0.2 + 1.8 } // 大约 260x180 像素
-            });
-            placed = true;
-          } catch (_) {
-            placed = false;
-          }
-        }
-      }
-
-      // 抓图失败 → 放“Open Image”占位链接兜底
-      if (!placed) {
-        if (img) {
-          ws.getCell(`G${r}`).value = { text: "Open Image", hyperlink: img };
-          ws.getCell(`G${r}`).font = { color: { argb: "FF0563C1" }, underline: true };
-        } else {
-          ws.getCell(`G${r}`).value = "";
-        }
-      }
-
-      r++;
-    }
-
-    // 输出
-    res.setHeader("Content-Type",
-      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename*=UTF-8''catalog-export.xlsx; filename="catalog-export.xlsx"`
-    );
-
-    const buf = await wb.xlsx.writeBuffer();
-    return res.status(200).send(Buffer.from(buf));
-  } catch (err) {
-    console.error("[/v1/api/export/excel] error:", err);
-    return res
-      .status(500)
-      .json({ ok: false, error: "EXPORT_FAILED" });
+    const page = await browser.newPage({ userAgent: UA });
+    // 直接 fetch 图片，拿到 arrayBuffer
+    const arrBuf = await page.evaluate(async (url) => {
+      const r = await fetch(url, { credentials: 'omit' });
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      const ab = await r.arrayBuffer();
+      return Array.from(new Uint8Array(ab)); // 序列化给 Node
+    }, imgUrl);
+    // 尝试根据扩展名推断
+    const extGuess = imgUrl.split('?')[0].split('.').pop().toLowerCase();
+    const ext = ['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(extGuess) ? extGuess : 'png';
+    return { buffer: Buffer.from(Uint8Array.from(arrBuf)), extension: ext };
+  } finally {
+    await browser.close();
   }
+}
+
+// 主导出路由：接收 JSON 数组
+// items: [{ title, link, imageUrl, price, sku, ... }]
+router.post('/export/xlsx', async (req, res) => {
+  const items = Array.isArray(req.body?.items) ? req.body.items : [];
+
+  const wb = new ExcelJS.Workbook();
+  const ws = wb.addWorksheet('Products');
+
+  // 表头
+  ws.columns = [
+    { header: 'Title', key: 'title', width: 40 },
+    { header: 'Price', key: 'price', width: 12 },
+    { header: 'SKU',   key: 'sku',   width: 18 },
+    { header: 'Link',  key: 'link',  width: 60 },
+    { header: 'Image', key: 'image', width: 22 }, // 实际用于放图
+  ];
+
+  // 先写文本数据（第 2 行开始放）
+  items.forEach((it, idx) => {
+    const row = ws.addRow({
+      title: it.title || '',
+      price: it.price || '',
+      sku: it.sku || '',
+      link: it.link || '',
+      image: '' // 占位
+    });
+    // 给 Link 加超链
+    if (it.link) {
+      const cell = row.getCell('link');
+      cell.value = { text: it.link, hyperlink: it.link };
+      cell.font = { color: { argb: 'FF1B73E8' }, underline: true };
+    }
+    // 行高为放图准备
+    row.height = 100;
+  });
+
+  // 下载图片并嵌入（控制并发，避免被限流/过慢）
+  const limit = pLimit(4);
+  const tasks = items.map((it, i) => limit(async () => {
+    if (!it.imageUrl) return;
+    try {
+      const { buffer, extension } = await fetchImageBuffer(it.imageUrl);
+      const imageId = wb.addImage({ buffer, extension });
+      // ExcelJS 坐标（列行从 0 开始）：Image 列是第 5 列 → 索引 4
+      const rowIdx = i + 2; // 数据从第 2 行开始
+      ws.addImage(imageId, {
+        tl: { col: 4, row: rowIdx - 1 }, // 放到第 5 列（E列）
+        ext: { width: 120, height: 90 }, // 按你需要调整
+        editAs: 'oneCell'
+      });
+    } catch (e) {
+      // 失败就忽略，保留空白
+      // 也可以在相邻列写上 "Image fetch failed"
+    }
+  }));
+
+  await Promise.all(tasks);
+
+  // 样式微调
+  ws.getRow(1).font = { bold: true };
+  ws.getColumn('image').alignment = { vertical: 'middle', horizontal: 'center' };
+
+  // 输出
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', 'attachment; filename="products.xlsx"');
+  await wb.xlsx.write(res);
+  res.end();
 });
 
-export default router;
+module.exports = router;
