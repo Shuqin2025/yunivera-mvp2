@@ -9,8 +9,9 @@ import pdfRouter from "./routes/pdf.js";
 // 目录抓取路由（/v1/api/catalog/parse?url=...）
 import catalogRouter from "./routes/catalog.js";
 
-// ✅ 新增：导出路由（ExcelJS .xlsx，支持图片）
-import exportRouter from "./routes/export.js";
+/** ✅ 新增：兼容式导入 export.js（无论默认导出/具名导出/CJS 均可） */
+import * as exportNS from "./routes/export.js";
+const exportRouter = exportNS.default ?? exportNS.router ?? exportNS;
 
 // “表格 PDF” 用到
 import PDFDocument from "pdfkit";
@@ -39,7 +40,7 @@ app.get("/", (_req, res) => {
         "  - POST /v1/api/export/excel         (xlsx with images, via exportRouter)",
         "  - POST /v1/api/export/excel-html    (legacy .xls, no images)",
         "  - POST /v1/api/export/table-pdf",
-        "",
+        ""
       ].join("\n")
     );
 });
@@ -54,7 +55,7 @@ const healthHandler = (_req, res) => {
         ok: true,
         service: "quote",
         version: "quote-v3-hf-ellipsis",
-        ts: Date.now(),
+        ts: Date.now()
       })
     );
 };
@@ -74,7 +75,7 @@ app.use("/v1/api/export", exportRouter);
 
 /**
  * （保留兼容）HTML 版导出：不含图片，输出 .xls
- * 之前路径是 /v1/api/export/excel —— 为避免冲突，改为 /v1/api/export/excel-html
+ * 之前路径是 /v1/api/export/excel —— 为避免冲突，使用 /v1/api/export/excel-html
  */
 app.post("/v1/api/export/excel-html", (req, res) => {
   try {
@@ -124,7 +125,7 @@ app.post("/v1/api/export/excel-html", (req, res) => {
 
     const subtitle = [
       meta.source ? `Source: ${esc(meta.source)}` : "",
-      meta.generatedBy ? `GeneratedBy: ${esc(meta.generatedBy)}` : "",
+      meta.generatedBy ? `GeneratedBy: ${esc(meta.generatedBy)}` : ""
     ]
       .filter(Boolean)
       .join(" | ");
@@ -244,28 +245,4 @@ app.post("/v1/api/export/table-pdf", (req, res) => {
 
     for (let i = 0; i < rows.length; i++) drawRow(i);
     doc.end();
-  } catch (err) {
-    console.error("[/export/table-pdf] error:", err);
-    res.status(500).json({ ok: false, error: String(err?.message || err) });
-  }
-});
-
-// 统一 404
-app.use("/v1", (_req, res) => {
-  res.status(404).json({ ok: false, error: "NOT_FOUND" });
-});
-
-// ---- utils ----
-function sanitizeFilename(name) {
-  return String(name || "file")
-    .normalize("NFKD")
-    .replace(/[^\x20-\x7E]+/g, "")
-    .replace(/[\\/:*?"<>|]+/g, "_")
-    .replace(/\s+/g, "_")
-    .slice(0, 120);
-}
-
-app.listen(port, () => {
-  console.log(`[mvp2-backend] listening at http://0.0.0.0:${port}`);
-});
-
+  } catch
