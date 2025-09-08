@@ -8,7 +8,6 @@ const router = Router();
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36";
 
-// 猜扩展名
 function extFromContentType(ct = "") {
   ct = (ct || "").toLowerCase();
   if (ct.includes("png")) return "png";
@@ -18,7 +17,6 @@ function extFromContentType(ct = "") {
   return "png";
 }
 
-// 下载图片：先 axios（带 Referer），失败再尝试动态引入 Playwright 兜底
 async function fetchImageBuffer(imgUrl) {
   const origin = (() => {
     try {
@@ -42,7 +40,7 @@ async function fetchImageBuffer(imgUrl) {
     });
     const ext = extFromContentType(resp.headers["content-type"]);
     return { buffer: Buffer.from(resp.data), extension: ext };
-  } catch (e) {
+  } catch {
     // 继续兜底
   }
 
@@ -65,12 +63,10 @@ async function fetchImageBuffer(imgUrl) {
       await browser.close();
     }
   } catch {
-    // Playwright 不可用时，放弃兜底，交由调用方决定是否忽略图片
     throw new Error("IMAGE_FETCH_FAILED");
   }
 }
 
-// 通用处理函数
 async function buildWorkbookBuffer(items = []) {
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet("Products");
@@ -113,7 +109,7 @@ async function buildWorkbookBuffer(items = []) {
           editAs: "oneCell"
         });
       } catch {
-        // 忽略单张图片失败
+        // 忽略单张失败
       }
     })
   );
@@ -130,8 +126,11 @@ router.post("/excel", async (req, res) => {
   try {
     const items = Array.isArray(req.body?.items) ? req.body.items : [];
     const buf = await buildWorkbookBuffer(items);
-    const filename = 'products.xlsx';
-    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    const filename = "products.xlsx";
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    );
     res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
     res.send(Buffer.from(buf));
   } catch (err) {
@@ -141,12 +140,14 @@ router.post("/excel", async (req, res) => {
 });
 
 router.post("/xlsx", async (req, res) => {
-  // 与 /excel 相同
   try {
     const items = Array.isArray(req.body?.items) ? req.body.items : [];
     const buf = await buildWorkbookBuffer(items);
-    const filename = 'products.xlsx';
-    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    const filename = "products.xlsx";
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    );
     res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
     res.send(Buffer.from(buf));
   } catch (err) {
