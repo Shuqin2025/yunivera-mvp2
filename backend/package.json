@@ -16,6 +16,7 @@
     "express": "^4.19.2",
     "nanoid": "^5.0.7",
     "pdfkit": "^0.15.0",
-    "cheerio": "^1.0.0-rc.12"
+    "cheerio": "^1.0.0-rc.12",
+    "node-fetch": "^2.6.7"
   }
 }
