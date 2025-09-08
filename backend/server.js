@@ -9,7 +9,7 @@ import pdfRouter from "./routes/pdf.js";
 // 目录抓取路由（/v1/api/catalog/parse?url=...）
 import catalogRouter from "./routes/catalog.js";
 
-// 新增：导出路由（ExcelJS .xlsx，支持图片）
+// ✅ 新增：导出路由（ExcelJS .xlsx，支持图片）
 import exportRouter from "./routes/export.js";
 
 // “表格 PDF” 用到
@@ -73,7 +73,7 @@ app.use("/v1/api/catalog", catalogRouter);
 app.use("/v1/api/export", exportRouter);
 
 /**
- * （改名后保留）HTML 兼容版导出：不含图片，输出 .xls
+ * （保留兼容）HTML 版导出：不含图片，输出 .xls
  * 之前路径是 /v1/api/export/excel —— 为避免冲突，改为 /v1/api/export/excel-html
  */
 app.post("/v1/api/export/excel-html", (req, res) => {
@@ -268,3 +268,4 @@ function sanitizeFilename(name) {
 app.listen(port, () => {
   console.log(`[mvp2-backend] listening at http://0.0.0.0:${port}`);
 });
+
