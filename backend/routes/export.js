@@ -1,160 +1,173 @@
 // backend/routes/export.js
-// 导出 Excel（嵌入图片缩略图）
-// POST /v1/api/export/excel  body: { source?: string, rows: Array<{title, sku, price, moq, url, img}> }
+// 生成带内嵌图片的 .xlsx
 
-import { Router } from "express";
+import Router from "express";
 import ExcelJS from "exceljs";
+import axios from "axios";
 
 const router = Router();
+
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
 
-// 仅接受 png/jpeg，其它格式回退为超链接
-function pickSupportedExt(contentType = "") {
-  if (/png/i.test(contentType)) return "png";
-  if (/jpe?g/i.test(contentType)) return "jpeg";
-  return null; // 其它一律视为不支持
-}
-
-async function fetchImageBuffer(imgUrl, timeoutMs = 12000, maxBytes = 2_000_000) {
-  if (!imgUrl) return null;
+// 拉取图片二进制
+async function fetchImageBuffer(url, timeoutMs = 10000, maxBytes = 2_000_000) {
+  if (!url) return null;
   const ctl = new AbortController();
   const t = setTimeout(() => ctl.abort(), timeoutMs);
   try {
-    const res = await fetch(imgUrl, {
-      headers: { "user-agent": UA, accept: "image/*,*/*;q=0.8" },
+    const res = await axios.get(url, {
+      responseType: "arraybuffer",
+      headers: { "User-Agent": UA, Accept: "image/*,*/*;q=0.8" },
       signal: ctl.signal,
+      maxContentLength: maxBytes,
+      maxBodyLength: maxBytes,
+      validateStatus: (s) => s >= 200 && s < 300,
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status} for ${imgUrl}`);
-
-    const ct = res.headers.get("content-type") || "";
-    const ext = pickSupportedExt(ct);
-    if (!ext) return null; // 不支持的类型（如 webp/gif），回退到文本链接
-
-    // 读流并限流
-    const reader = res.body.getReader();
-    const chunks = [];
-    let received = 0;
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      received += value.byteLength;
-      if (received > maxBytes) throw new Error("Image too large");
-      chunks.push(value);
-    }
-    const buf = Buffer.concat(chunks.map((u) => Buffer.from(u)));
-    return { buf, ext };
-  } catch {
-    return null;
+    const ct = (res.headers["content-type"] || "").toLowerCase();
+    if (!ct.startsWith("image/")) return null;
+    return Buffer.from(res.data);
   } finally {
     clearTimeout(t);
   }
 }
 
-function autoCol(ws, col, width) {
-  if (width) ws.getColumn(col).width = width;
-}
-
+// 入口：POST /v1/api/export/excel
 router.post("/excel", async (req, res) => {
   try {
-    const { rows = [], source = "" } = req.body || {};
-    if (!Array.isArray(rows) || rows.length === 0) {
-      return res.status(400).json({ ok: false, error: "EMPTY_ROWS", tip: "rows 不能为空" });
-    }
+    const { source = "", rows = [] } = req.body || {};
+    // rows: [{title, sku, price, moq, url, img}...]
 
     const wb = new ExcelJS.Workbook();
     const ws = wb.addWorksheet("导出结果");
 
-    // 顶部标题行
-    ws.mergeCells("A1", "L1");
-    ws.getCell("A1").value = `Source: ${source || "-"}  |  GeneratedBy: MVP3-Frontend`;
-    ws.getCell("A1").font = { bold: true };
-    ws.getCell("A1").alignment = { vertical: "middle", wrapText: true };
-    ws.getRow(1).height = 18;
+    // 样式与标题
+    ws.getRow(1).values = [`【抓取目录（前 50 条）】`];
+    ws.mergeCells(1, 1, 1, 11);
+    ws.getRow(1).font = { bold: true, size: 14 };
+    ws.getRow(2).values = [
+      `Source: ${source}`,
+      "",
+      "",
+      "",
+      "GeneratedBy: MVP3-Frontend",
+    ];
+    ws.getRow(2).font = { italic: true, size: 10 };
 
-    // 表头
-    const header = ["#", "标题/Title", "SKU", "价格/Price", "MOQ", "链接/URL", "图片/Image"];
-    ws.addRow(header);
-    ws.getRow(2).font = { bold: true };
-    ws.getRow(2).alignment = { vertical: "middle" };
+    // 表头（中德英双语）
+    const headerRow = [
+      "#",
+      "标题/Title",
+      "SKU",
+      "价格/Price",
+      "MOQ",
+      "链接/URL",
+      "图片/Image",
+    ];
+    ws.addRow([]);
+    ws.addRow(headerRow);
+    const hdr = ws.getRow(4);
+    hdr.font = { bold: true };
+    hdr.alignment = { vertical: "middle", horizontal: "center" };
 
-    // 列宽（加宽图片列，便于缩略图展示）
-    autoCol(ws, 1, 5);
-    autoCol(ws, 2, 32);
-    autoCol(ws, 3, 16);
-    autoCol(ws, 4, 14);
-    autoCol(ws, 5, 10);
-    autoCol(ws, 6, 50);
-    autoCol(ws, 7, 24);
+    // 列宽
+    ws.getColumn(1).width = 6;     // #
+    ws.getColumn(2).width = 38;    // Title
+    ws.getColumn(3).width = 16;    // SKU
+    ws.getColumn(4).width = 14;    // Price
+    ws.getColumn(5).width = 10;    // MOQ
+    ws.getColumn(6).width = 48;    // URL
+    ws.getColumn(7).width = 28;    // Image (列宽+行高只影响单元格，不影响真正图片大小)
 
-    // 冻结表头
-    ws.views = [{ state: "frozen", xSplit: 0, ySplit: 2 }];
-
-    // 从第 3 行开始写数据
-    const startRow = 3;
-
-    // 先写文本
-    rows.forEach((r, i) => {
-      const rowIndex = startRow + i;
-      const row = ws.getRow(rowIndex);
-      row.getCell(1).value = i + 1;
-      row.getCell(2).value = r.title || "";
-      row.getCell(3).value = r.sku || "";
-      row.getCell(4).value = r.price ?? "";
-      row.getCell(5).value = r.moq ?? "";
-
-      if (r.url) {
-        row.getCell(6).value = { text: r.url, hyperlink: r.url, tooltip: r.url };
-        row.getCell(6).font = { color: { argb: "FF1F4E79" }, underline: true };
-      }
-
-      // 预设行高，适配缩略图（像素到行高的映射由 Excel 处理；设置高一点更保险）
-      row.height = 86;
-      row.commit();
-    });
-
-    // 串行抓图并插入，使用 { tl, ext } 固定像素尺寸
-    // 缩略图统一宽高（像素），你可以按需调整
-    const thumbWidth = 140;
-    const thumbHeight = 90;
+    // 数据 + 图片
+    // 图片我们用固定缩略图尺寸（例如 120x120 px），并贴在第 7 列对应行
+    // ExcelJS 图片定位：列/行是从 0 开始计的
+    const BASE_ROW = 5; // 数据开始行（第1~4行为标题和表头）
+    const THUMB_W = 120;
+    const THUMB_H = 120;
 
     for (let i = 0; i < rows.length; i++) {
-      const r = rows[i];
-      const rowIndex = startRow + i;
-      if (!r.img) continue;
+      const idx = i + 1;
+      const r = rows[i] || {};
+      const excelRow = ws.addRow([
+        idx,
+        r.title || "",
+        r.sku || "",
+        r.price ?? "",
+        r.moq ?? "",
+        r.url || "",
+        "", // 图片列占位
+      ]);
+      excelRow.alignment = { vertical: "middle" };
+      excelRow.height = 95; // 行高稍微加大，便于显示缩略图
 
-      const imgData = await fetchImageBuffer(r.img);
-      if (!imgData) {
-        // 回退：写入超链接文本
-        ws.getCell(rowIndex, 7).value = { text: r.img, hyperlink: r.img, tooltip: r.img };
-        ws.getCell(rowIndex, 7).font = { color: { argb: "FF1F4E79" }, underline: true };
-        continue;
+      // URL 做成超链接
+      if (r.url) {
+        const cell = ws.getCell(excelRow.number, 6);
+        cell.value = { text: r.url, hyperlink: r.url, tooltip: r.url };
+        cell.font = { color: { argb: "FF0563C1" }, underline: true };
       }
 
-      const imageId = wb.addImage({
-        buffer: imgData.buf,
-        extension: imgData.ext, // 只会是 png/jpeg
-      });
+      // 图片嵌入
+      if (r.img) {
+        try {
+          const buf = await fetchImageBuffer(r.img);
+          if (buf) {
+            // 根据格式选择类型
+            let ext = "png";
+            const lower = r.img.toLowerCase();
+            if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) ext = "jpeg";
+            else if (lower.endsWith(".gif")) ext = "gif";
 
-      // G 列（索引从 0 算，第 7 列是 6），行索引同理：ExcelJS 用 0-based
-      ws.addImage(imageId, {
-        tl: { col: 6 + 0.15, row: rowIndex - 1 + 0.15 },
-        ext: { width: thumbWidth, height: thumbHeight },
-        editAs: "oneCell",
-      });
+            const imgId = wb.addImage({
+              buffer: buf,
+              extension: ext,
+            });
+
+            // 目标位置：第 7 列（索引从0计数 -> 6），当前数据行（从0计数 -> BASE_ROW-1+i）
+            // 微调让图片在单元格中居中一些
+            const tl = { col: 6 + 0.15, row: (BASE_ROW - 1 + i) + 0.2 };
+            const extPx = { width: THUMB_W, height: THUMB_H };
+
+            ws.addImage(imgId, { tl, ext: extPx });
+          }
+        } catch (e) {
+          // 忽略单图失败
+        }
+      }
     }
 
-    // 输出 .xlsx
+    // 边框（可选）
+    const lastRow = ws.lastRow.number;
+    for (let r = 4; r <= lastRow; r++) {
+      for (let c = 1; c <= 7; c++) {
+        ws.getCell(r, c).border = {
+          top: { style: "thin", color: { argb: "FFCCCCCC" } },
+          left: { style: "thin", color: { argb: "FFCCCCCC" } },
+          bottom: { style: "thin", color: { argb: "FFCCCCCC" } },
+          right: { style: "thin", color: { argb: "FFCCCCCC" } },
+        };
+      }
+    }
+
+    // 输出
+    const filename = "导出结果.xlsx";
     res.setHeader(
       "Content-Type",
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     );
-    res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''export.xlsx`);
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`
+    );
+
     await wb.xlsx.write(res);
     res.end();
   } catch (err) {
-    console.error("[export.excel] error:", err);
-    res.status(500).json({ ok: false, error: String(err?.message || err) });
+    console.error("excel export error:", err);
+    res
+      .status(500)
+      .json({ ok: false, error: err?.message || "excel export failed" });
   }
 });
 
