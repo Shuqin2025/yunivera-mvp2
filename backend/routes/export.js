@@ -1,4 +1,5 @@
-// backend/routes/export.js — ESM (6-column layout for ItemNo/Picture/Desc/MOQ/UnitPrice/Link)
+// backend/routes/export.js — ESM (6 columns, bigger image 180x135, compact row height)
+
 import { Router } from "express";
 import ExcelJS from "exceljs";
 import axios from "axios";
@@ -8,7 +9,8 @@ const router = Router();
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36";
 
-/* ---------- helpers ---------- */
+/* ---------------- helpers ---------------- */
+
 const pickFirst = (obj, keys, fallback = "") => {
   for (const k of keys) if (obj && obj[k] != null && obj[k] !== "") return obj[k];
   return fallback;
@@ -28,11 +30,12 @@ function normalizeItems(body = {}) {
     const imageUrl = pickFirst(r, ["imageUrl", "img", "image", "picture", "photo"]);
     const title = pickFirst(r, ["title", "description", "name", "productName"]);
     const rawSku = pickFirst(r, ["sku", "code", "model", "mpn"]);
-    return { link, imageUrl, title, rawSku };
+    const price = pickFirst(r, ["price", "amount", "value"]);
+    return { link, imageUrl, title, rawSku, price };
   });
 }
 
-// 提取企业产品编号（Item No.）：优先用 rawSku；没有则尝试从链接或标题里抓 02-22001 这类模式
+// 企业产品编号（Item No.）：优先 rawSku；没有则从链接/标题里匹配 02-22001 这类样式
 function deriveItemNo({ rawSku, link = "", title = "" }) {
   if (rawSku) return String(rawSku).trim();
   const m1 = (link || "").match(/(\d{2}-\d{5})(?:\.\w+)?$/);
@@ -42,19 +45,16 @@ function deriveItemNo({ rawSku, link = "", title = "" }) {
   return "";
 }
 
-// 价格字符串 → 数值（支持 19.90 / 19,90 / €19,90 等）
+// 价格字符串 → 数值（19,90 / €19.90 / 1.234,56 等）
 function parsePriceNumeric(s) {
-  if (s == null) return "";
+  if (s == null || s === "") return "";
   let str = String(s).replace(/[^\d.,-]/g, "").trim();
   if (!str) return "";
-  // 如果同时含有 . 和 , ，默认把最后一个分隔符当小数点
   const lastDot = str.lastIndexOf(".");
   const lastComma = str.lastIndexOf(",");
   if (lastComma > lastDot) {
-    // 德式：1.234,56
     str = str.replace(/\./g, "").replace(",", ".");
   } else {
-    // 美式：1,234.56
     str = str.replace(/,/g, "");
   }
   const num = Number(str);
@@ -86,9 +86,11 @@ async function fetchImageBuffer(imgUrl) {
     });
     const ext = extFromContentType(resp.headers["content-type"]);
     return { buffer: Buffer.from(resp.data), extension: ext };
-  } catch { /* fallback */ }
+  } catch {
+    // fallback
+  }
 
-  // 2) Playwright（可选）兜底
+  // 2) Playwright 兜底（可选）
   try {
     const { chromium } = await import("playwright");
     const browser = await chromium.launch({ headless: true });
@@ -111,14 +113,15 @@ async function fetchImageBuffer(imgUrl) {
   }
 }
 
-/* ---------- workbook builder (6 columns) ---------- */
+/* ---------------- workbook (6 columns, bigger picture) ---------------- */
+
 async function buildWorkbookBuffer(rawBody = {}) {
   const rawItems = normalizeItems(rawBody);
   const items = rawItems.map((r) => ({
     itemNo: deriveItemNo(r),
     description: r.title || "",
-    moq: "", // 留空，便于手工填写；需要默认值可改为 "1"
-    unitPrice: parsePriceNumeric(pickFirst(r, ["price", "amount", "value"])),
+    moq: "", // 留空，便于后续手工填写；需要默认值可改为 "1"
+    unitPrice: parsePriceNumeric(r.price),
     link: r.link || "",
     imageUrl: r.imageUrl || ""
   }));
@@ -128,43 +131,45 @@ async function buildWorkbookBuffer(rawBody = {}) {
 
   ws.columns = [
     { header: "Item No.",    key: "itemNo",    width: 14 },
-    { header: "Picture",     key: "picture",   width: 26 },
+    { header: "Picture",     key: "picture",   width: 30 }, // 更宽以容纳 180px
     { header: "Description", key: "description", width: 60 },
     { header: "MOQ",         key: "moq",       width: 10 },
     { header: "Unit Price",  key: "unitPrice", width: 14 },
     { header: "Link",        key: "link",      width: 60 }
   ];
 
+  // 样式：表头加粗；Picture 列居中
+  ws.getRow(1).font = { bold: true };
+  ws.getColumn("picture").alignment = { vertical: "middle", horizontal: "center" };
+  ws.getColumn("description").alignment = { wrapText: true, vertical: "top" };
+  ws.getColumn("link").alignment = { wrapText: true };
+
   const hasAnyImage = items.some((it) => it.imageUrl);
 
-  // 写文本列（图片后面再嵌入）
-  items.forEach((it, idx) => {
+  // 写入文本列
+  items.forEach((it) => {
     const row = ws.addRow({
       itemNo: it.itemNo,
-      picture: "", // 占位
+      picture: "",
       description: it.description,
       moq: it.moq,
       unitPrice: it.unitPrice === "" ? "" : it.unitPrice,
       link: it.link
     });
 
-    // 超链接
     if (it.link) {
       const c = row.getCell("link");
       c.value = { text: it.link, hyperlink: it.link };
       c.font = { color: { argb: "FF1B73E8" }, underline: true };
     }
 
-    // 样式：描述换行，价格两位小数
-    row.getCell("description").alignment = { wrapText: true, vertical: "top" };
-    row.getCell("link").alignment = { wrapText: true };
     if (it.unitPrice !== "") row.getCell("unitPrice").numFmt = '#,##0.00';
 
-    // 行高：有图时高一些
-    row.height = hasAnyImage ? 110 : 20;
+    // 行高：刚好容纳 135px 图片（≈ 101pt），取 105pt 更安全
+    row.height = hasAnyImage ? 105 : 20;
   });
 
-  // 插入图片（B 列 = 第 2 列 → 0-based col=1）
+  // 插入图片：B 列（0-based col=1），尺寸 180×135 px
   const limit = pLimit(4);
   await Promise.all(
     items.map((it, i) =>
@@ -175,8 +180,8 @@ async function buildWorkbookBuffer(rawBody = {}) {
           const id = wb.addImage({ buffer, extension });
           const rowIdx = i + 2; // 数据从第 2 行开始
           ws.addImage(id, {
-            tl: { col: 1, row: rowIdx - 1 }, // B 列（0-based=1）
-            ext: { width: 130, height: 95 },
+            tl: { col: 1, row: rowIdx - 1 },
+            ext: { width: 180, height: 135 }, // ✅ 更大
             editAs: "oneCell"
           });
         } catch {
@@ -186,34 +191,38 @@ async function buildWorkbookBuffer(rawBody = {}) {
     )
   );
 
-  // 表头加粗
-  ws.getRow(1).font = { bold: true };
-
   return wb.xlsx.writeBuffer();
 }
 
-/* ---------- routes ---------- */
+/* ---------------- routes ---------------- */
+
 router.post("/excel", async (req, res) => {
   try {
     const buf = await buildWorkbookBuffer(req.body);
-    res.setHeader("Content-Type","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-    res.setHeader("Content-Disposition",'attachment; filename="products.xlsx"');
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    );
+    res.setHeader("Content-Disposition", 'attachment; filename="products.xlsx"');
     res.send(Buffer.from(buf));
   } catch (err) {
     console.error("[/export/excel] error:", err);
-    res.status(500).json({ ok:false, error:String(err?.message||err) });
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 });
 
 router.post("/xlsx", async (req, res) => {
   try {
     const buf = await buildWorkbookBuffer(req.body);
-    res.setHeader("Content-Type","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-    res.setHeader("Content-Disposition",'attachment; filename="products.xlsx"');
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    );
+    res.setHeader("Content-Disposition", 'attachment; filename="products.xlsx"');
     res.send(Buffer.from(buf));
   } catch (err) {
     console.error("[/export/xlsx] error:", err);
-    res.status(500).json({ ok:false, error:String(err?.message||err) });
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 });
 
