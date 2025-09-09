@@ -1,7 +1,7 @@
-// backend/routes/export.js — ESM
+// backend/routes/export.js — Final stable build
 // Layout: Item No. | Picture | Description | MOQ | Unit Price | Link
-// Features: bigger images (180x135), price fallback (fetch product page),
-//           strong Item No. fallback (JSON-LD/microdata/visible labels), no placeholder when missing.
+// Features: bigger images (180x135), price fallback, strong Item No. fallback,
+// compact layout, Euro price format.
 
 import { Router } from "express";
 import ExcelJS from "exceljs";
@@ -12,7 +12,7 @@ const router = Router();
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36";
 
-/* ---------------- helpers ---------------- */
+/* ---------------- small helpers ---------------- */
 
 const pickFirst = (obj, keys, fallback = "") => {
   for (const k of keys) if (obj && obj[k] != null && obj[k] !== "") return obj[k];
@@ -42,17 +42,17 @@ function normalizeItems(body = {}) {
   });
 }
 
-// 本地快速推断（不命中就返回空串，不再用占位）
+// quick local guess (no placeholder if missing)
 function deriveItemNoLocal({ rawSku, link = "", title = "" }) {
   if (rawSku) return String(rawSku).trim();
-  const m1 = (link || "").match(/(\d{2}-\d{5})(?:\.\w+)?$/);
+  const m1 = (link || "").match(/(\d{2}-\d{5})(?:\.\w+)?$/); // e.g. 02-22001
   if (m1) return m1[1];
-  const m2 = (title || "").match(/\b[A-Z0-9]{2,8}-\d{3,8}\b/);
+  const m2 = (title || "").match(/\b[A-Z0-9]{2,8}-\d{3,8}\b/); // e.g. PV4-12345
   if (m2) return m2[0];
   return "";
 }
 
-// "9,00 EUR" / "€9.00" / "1.234,56" → 数值
+// "9,00 EUR" / "€9.00" / "1.234,56" -> numeric
 function parsePriceNumeric(s) {
   if (s == null || s === "") return "";
   let str = String(s).replace(/[^\d.,-]/g, "").trim();
@@ -68,7 +68,8 @@ function parsePriceNumeric(s) {
   return Number.isFinite(num) ? num : "";
 }
 
-/* ---------- Price fallback: fetch product page ---------- */
+/* ---------------- price fallback: fetch product page ---------------- */
+
 async function fetchPriceFromPage(url) {
   if (!url) return "";
   try {
@@ -88,7 +89,9 @@ async function fetchPriceFromPage(url) {
     m = html.match(/"price"\s*:\s*"([^"]+)"/i);
     if (m) return parsePriceNumeric(m[1]);
 
-    m = html.match(/(?:€|\bEUR\b)\s*([0-9][0-9\.,]*)/i) || html.match(/([0-9][0-9\.,]*)\s*(?:€|\bEUR\b)/i);
+    m =
+      html.match(/(?:€|\bEUR\b)\s*([0-9][0-9\.,]*)/i) ||
+      html.match(/([0-9][0-9\.,]*)\s*(?:€|\bEUR\b)/i);
     if (m) return parsePriceNumeric(m[1]);
 
     return "";
@@ -97,16 +100,16 @@ async function fetchPriceFromPage(url) {
   }
 }
 
-/* ---------- Item No. fallback: fetch product page & extract ---------- */
+/* ---------------- item no. fallback: fetch product page ---------------- */
 
-// 解析所有 JSON-LD，递归查找任意层级的 sku/mpn
+// walk any JSON for sku/mpn
 function findSkuInJson(obj) {
   if (!obj || typeof obj !== "object") return "";
   if (typeof obj.sku === "string" && obj.sku.trim()) return obj.sku.trim();
   if (typeof obj.mpn === "string" && obj.mpn.trim()) return obj.mpn.trim();
   for (const k of Object.keys(obj)) {
     const v = obj[k];
-    if (typeof v === "object") {
+    if (v && typeof v === "object") {
       const hit = findSkuInJson(v);
       if (hit) return hit;
     }
@@ -125,14 +128,11 @@ async function fetchItemNoFromPage(url) {
     // 1) JSON-LD blocks
     const ldBlocks = [...html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)];
     for (const m of ldBlocks) {
-      const raw = m[1];
       try {
-        const json = JSON.parse(raw);
-        const sku = findSkuInJson(json);
+        const data = JSON.parse(m[1]);
+        const sku = findSkuInJson(data);
         if (sku) return sku;
-      } catch {
-        // 某些站点 JSON-LD 含注释或尾逗号，忽略解析错误
-      }
+      } catch {}
     }
 
     // 2) microdata/meta: itemprop="sku"
@@ -141,7 +141,7 @@ async function fetchItemNoFromPage(url) {
       html.match(/<[^>]+itemprop=["']sku["'][^>]*>([\s\S]*?)<\/[^>]+>/i);
     if (m && m[1]) return m[1].replace(/<[^>]+>/g, "").trim();
 
-    // 3) 可见文本标签（多语种）
+    // 3) visible labels (multi-lingual)
     const labelPatterns = [
       /Art\.?\s*[-\.]?\s*Nr\.?\s*[:#]?\s*([A-Za-z0-9\-_.\/]+)/i,
       /Artikel(?:nummer|-?Nr\.?)\s*[:#]?\s*([A-Za-z0-9\-_.\/]+)/i,
@@ -156,7 +156,7 @@ async function fetchItemNoFromPage(url) {
       if (mm && mm[1]) return mm[1].trim();
     }
 
-    // 4) 再试 URL 常见编号
+    // 4) last try: URL pattern
     m = url.match(/\b([A-Z0-9]{2,8}-\d{3,8})\b/i);
     if (m) return m[1];
 
@@ -178,7 +178,7 @@ function extFromContentType(ct = "") {
 async function fetchImageBuffer(imgUrl) {
   const origin = (() => { try { return new URL(imgUrl).origin; } catch { return undefined; } })();
 
-  // 1) axios 直连
+  // 1) axios direct
   try {
     const resp = await axios.get(imgUrl, {
       responseType: "arraybuffer",
@@ -193,21 +193,21 @@ async function fetchImageBuffer(imgUrl) {
     const ext = extFromContentType(resp.headers["content-type"]);
     return { buffer: Buffer.from(resp.data), extension: ext };
   } catch {}
-  // 2) Playwright 兜底（可选）
+  // 2) Playwright fallback (optional)
   try {
     const { chromium } = await import("playwright");
     const browser = await chromium.launch({ headless: true });
     try {
       const page = await browser.newPage({ userAgent: UA });
-      const arrBuf = await page.evaluate(async (url) => {
+      const arr = await page.evaluate(async (url) => {
         const r = await fetch(url, { credentials: "omit" });
         if (!r.ok) throw new Error("HTTP " + r.status);
         const ab = await r.arrayBuffer();
         return Array.from(new Uint8Array(ab));
       }, imgUrl);
       const extGuess = imgUrl.split("?")[0].split(".").pop()?.toLowerCase() || "";
-      const ext = ["png", "jpg", "jpeg", "webp", "gif"].includes(extGuess) ? extGuess : "png";
-      return { buffer: Buffer.from(Uint8Array.from(arrBuf)), extension: ext };
+      const extension = ["png","jpg","jpeg","webp","gif"].includes(extGuess) ? extGuess : "png";
+      return { buffer: Buffer.from(Uint8Array.from(arr)), extension };
     } finally {
       await browser.close();
     }
@@ -216,12 +216,11 @@ async function fetchImageBuffer(imgUrl) {
   }
 }
 
-/* ---------------- workbook (6 columns) ---------------- */
+/* ---------------- workbook builder ---------------- */
 
 async function buildWorkbookBuffer(rawBody = {}) {
   const rawItems = normalizeItems(rawBody);
 
-  // 先做一次本地映射（编号留空也不放占位）
   let items = rawItems.map((r) => ({
     itemNo: deriveItemNoLocal(r) || "",
     description: r.title || "",
@@ -231,7 +230,7 @@ async function buildWorkbookBuffer(rawBody = {}) {
     imageUrl: r.imageUrl || ""
   }));
 
-  // 兜底补齐：价格 & 编号（并发 3）
+  // fill missing price & itemNo via product page (concurrency 3)
   const limit = pLimit(3);
   await Promise.all(
     items.map((it, i) =>
@@ -251,15 +250,15 @@ async function buildWorkbookBuffer(rawBody = {}) {
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet("Sheet1");
 
+  // columns & styles
   ws.columns = [
     { header: "Item No.",    key: "itemNo",    width: 18 },
-    { header: "Picture",     key: "picture",   width: 30 },
+    { header: "Picture",     key: "picture",   width: 30 }, // fit 180px
     { header: "Description", key: "description", width: 60 },
     { header: "MOQ",         key: "moq",       width: 10 },
     { header: "Unit Price",  key: "unitPrice", width: 14 },
     { header: "Link",        key: "link",      width: 60 }
   ];
-
   ws.getRow(1).font = { bold: true };
   ws.getColumn("picture").alignment = { vertical: "middle", horizontal: "center" };
   ws.getColumn("description").alignment = { wrapText: true, vertical: "top" };
@@ -267,35 +266,36 @@ async function buildWorkbookBuffer(rawBody = {}) {
 
   const hasAnyImage = items.some((it) => it.imageUrl);
 
-  // 文本列
+  // rows (text first)
   items.forEach((it) => {
     const row = ws.addRow({
-      itemNo: it.itemNo || "",   // ✅ 找不到就留空
+      itemNo: it.itemNo || "",
       picture: "",
       description: it.description,
       moq: it.moq,
       unitPrice: it.unitPrice === "" ? "" : it.unitPrice,
       link: it.link
     });
+
     if (it.link) {
       const c = row.getCell("link");
       c.value = { text: it.link, hyperlink: it.link };
       c.font = { color: { argb: "FF1B73E8" }, underline: true };
     }
-    if (it.unitPrice !== "") row.getCell("unitPrice").numFmt = '#,##0.00';
-    row.height = hasAnyImage ? 105 : 20; // 容纳 135px 高图
+    if (it.unitPrice !== "") row.getCell("unitPrice").numFmt = '#,##0.00 "€"'; // Euro display
+    row.height = hasAnyImage ? 105 : 20; // fits 135px image height
   });
 
-  // 图片列（B）
+  // images in column B (0-based col=1)
   const limitImg = pLimit(4);
   await Promise.all(
-    items.map((it, i) =>
+    items.map((it, idx) =>
       limitImg(async () => {
         if (!it.imageUrl) return;
         try {
           const { buffer, extension } = await fetchImageBuffer(it.imageUrl);
           const id = wb.addImage({ buffer, extension });
-          const rowIdx = i + 2;
+          const rowIdx = idx + 2; // data starts at row 2
           ws.addImage(id, {
             tl: { col: 1, row: rowIdx - 1 },
             ext: { width: 180, height: 135 },
@@ -314,24 +314,30 @@ async function buildWorkbookBuffer(rawBody = {}) {
 router.post("/excel", async (req, res) => {
   try {
     const buf = await buildWorkbookBuffer(req.body);
-    res.setHeader("Content-Type","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-    res.setHeader("Content-Disposition",'attachment; filename="products.xlsx"');
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    );
+    res.setHeader("Content-Disposition", 'attachment; filename="products.xlsx"');
     res.send(Buffer.from(buf));
   } catch (err) {
     console.error("[/export/excel] error:", err);
-    res.status(500).json({ ok:false, error:String(err?.message||err) });
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 });
 
 router.post("/xlsx", async (req, res) => {
   try {
     const buf = await buildWorkbookBuffer(req.body);
-    res.setHeader("Content-Type","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-    res.setHeader("Content-Disposition",'attachment; filename="products.xlsx"');
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    );
+    res.setHeader("Content-Disposition", 'attachment; filename="products.xlsx"');
     res.send(Buffer.from(buf));
   } catch (err) {
     console.error("[/export/xlsx] error:", err);
-    res.status(500).json({ ok:false, error:String(err?.message||err) });
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 });
 
