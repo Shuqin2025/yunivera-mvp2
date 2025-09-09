@@ -1,7 +1,7 @@
-// backend/routes/export.js — Final stable build
+// backend/routes/export.js — Final i18n build (zh/de/en)
 // Layout: Item No. | Picture | Description | MOQ | Unit Price | Link
 // Features: bigger images (180x135), price fallback, strong Item No. fallback,
-// compact layout, Euro price format.
+// compact layout, i18n headers + filename + price numFmt.
 
 import { Router } from "express";
 import ExcelJS from "exceljs";
@@ -11,6 +11,51 @@ import pLimit from "p-limit";
 const router = Router();
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36";
+
+/* ---------------- i18n ---------------- */
+const LOCALES = {
+  en: {
+    itemNo: "Item No.",
+    picture: "Picture",
+    description: "Description",
+    moq: "MOQ",
+    unitPrice: "Unit Price",
+    link: "Link",
+    filename: "products",
+    nf: "en-GB",
+    // Excel numFmt per locale (optional fine-tune)
+    numFmt: '€ #,##0.00'
+  },
+  de: {
+    itemNo: "Artikel-Nr.",
+    picture: "Bild",
+    description: "Beschreibung",
+    moq: "Mindestmenge",
+    unitPrice: "Stückpreis",
+    link: "Link",
+    filename: "produkte",
+    nf: "de-DE",
+    numFmt: '#,##0.00 "€"'
+  },
+  zh: {
+    itemNo: "产品编号",
+    picture: "图片",
+    description: "描述",
+    moq: "起订量",
+    unitPrice: "单价",
+    link: "链接",
+    filename: "产品清单",
+    nf: "zh-CN",
+    numFmt: '#,##0.00 "€"'
+  }
+};
+
+function pickLang(req) {
+  const q = String(req.query.lang || "").toLowerCase();
+  const h = String(req.header("X-Lang") || "").toLowerCase();
+  const lang = ["zh", "de", "en"].includes(q) ? q : (["zh","de","en"].includes(h) ? h : "de");
+  return LOCALES[lang] || LOCALES.de;
+}
 
 /* ---------------- small helpers ---------------- */
 
@@ -218,7 +263,7 @@ async function fetchImageBuffer(imgUrl) {
 
 /* ---------------- workbook builder ---------------- */
 
-async function buildWorkbookBuffer(rawBody = {}) {
+async function buildWorkbookBuffer(rawBody = {}, i18n = LOCALES.de) {
   const rawItems = normalizeItems(rawBody);
 
   let items = rawItems.map((r) => ({
@@ -250,14 +295,14 @@ async function buildWorkbookBuffer(rawBody = {}) {
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet("Sheet1");
 
-  // columns & styles
+  // columns & styles (i18n headers)
   ws.columns = [
-    { header: "Item No.",    key: "itemNo",    width: 18 },
-    { header: "Picture",     key: "picture",   width: 30 }, // fit 180px
-    { header: "Description", key: "description", width: 60 },
-    { header: "MOQ",         key: "moq",       width: 10 },
-    { header: "Unit Price",  key: "unitPrice", width: 14 },
-    { header: "Link",        key: "link",      width: 60 }
+    { header: i18n.itemNo,    key: "itemNo",    width: 18 },
+    { header: i18n.picture,   key: "picture",   width: 30 }, // fit 180px
+    { header: i18n.description, key: "description", width: 60 },
+    { header: i18n.moq,       key: "moq",       width: 10 },
+    { header: i18n.unitPrice, key: "unitPrice", width: 14 },
+    { header: i18n.link,      key: "link",      width: 60 }
   ];
   ws.getRow(1).font = { bold: true };
   ws.getColumn("picture").alignment = { vertical: "middle", horizontal: "center" };
@@ -282,7 +327,11 @@ async function buildWorkbookBuffer(rawBody = {}) {
       c.value = { text: it.link, hyperlink: it.link };
       c.font = { color: { argb: "FF1B73E8" }, underline: true };
     }
-    if (it.unitPrice !== "") row.getCell("unitPrice").numFmt = '#,##0.00 "€"'; // Euro display
+    if (it.unitPrice !== "") {
+      // 显示用 Excel numFmt（按语言给不同样式）
+      row.getCell("unitPrice").numFmt = i18n.numFmt;
+      row.getCell("unitPrice").value = Number(it.unitPrice);
+    }
     row.height = hasAnyImage ? 105 : 20; // fits 135px image height
   });
 
@@ -313,12 +362,17 @@ async function buildWorkbookBuffer(rawBody = {}) {
 
 router.post("/excel", async (req, res) => {
   try {
-    const buf = await buildWorkbookBuffer(req.body);
+    const i18n = pickLang(req);
+    const buf = await buildWorkbookBuffer(req.body, i18n);
+    const filename = `${i18n.filename}.xlsx`;
     res.setHeader(
       "Content-Type",
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     );
-    res.setHeader("Content-Disposition", 'attachment; filename="products.xlsx"');
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${filename}"; filename*=UTF-8''${encodeURIComponent(filename)}`
+    );
     res.send(Buffer.from(buf));
   } catch (err) {
     console.error("[/export/excel] error:", err);
@@ -328,12 +382,17 @@ router.post("/excel", async (req, res) => {
 
 router.post("/xlsx", async (req, res) => {
   try {
-    const buf = await buildWorkbookBuffer(req.body);
+    const i18n = pickLang(req);
+    const buf = await buildWorkbookBuffer(req.body, i18n);
+    const filename = `${i18n.filename}.xlsx`;
     res.setHeader(
       "Content-Type",
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     );
-    res.setHeader("Content-Disposition", 'attachment; filename="products.xlsx"');
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${filename}"; filename*=UTF-8''${encodeURIComponent(filename)}`
+    );
     res.send(Buffer.from(buf));
   } catch (err) {
     console.error("[/export/xlsx] error:", err);
