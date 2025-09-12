@@ -1,206 +1,134 @@
 // backend/server.js
-import express from "express";
-import cors from "cors";
-import fetch from "node-fetch";
-import { load as cheerioLoad } from "cheerio";
+import express from 'express';
+import cors from 'cors';
+import axios from 'axios';
+import * as cheerio from 'cheerio';
+import { URL } from 'url';
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 
+// 允许任意来源（前端预览域名不同步时更省心）
 app.use(cors());
-app.set("trust proxy", true);
 
-/** 小工具：绝对化 URL */
-function absolutize(href, base) {
+// 健康检查
+app.get('/healthz', (_, res) => res.send('ok'));
+
+// 工具：把链接 slug 转成 SKU（xxx-yyy.html -> XXX-YYY）
+function slugToSku(href = '') {
   try {
-    return new URL(href, base).toString();
+    const u = new URL(href, 'https://dummy.invalid');
+    const last = u.pathname.split('/').filter(Boolean).pop() || '';
+    const base = last.replace(/\.html?$/i, '');
+    return base.replace(/[^a-z0-9-]+/ig, '-').replace(/-+/g, '-').toUpperCase();
   } catch {
-    return href || "";
+    const last = (href || '').split('/').filter(Boolean).pop() || '';
+    return last.replace(/\.html?$/i, '').replace(/[^a-z0-9-]+/ig, '-').toUpperCase();
   }
 }
 
-/** 从 s-impuls-shop 的商品链接推断 Item No.（SKU） */
-function inferSkuFromUrl(itemUrl) {
-  try {
-    const u = new URL(itemUrl);
-    const last = u.pathname.split("/").filter(Boolean).pop() || "";
-    const raw = decodeURIComponent(last.replace(/\.html?$/i, ""));
-    // 例如：30805-mhq-slim  →  30805-MHQ-SLIM
-    if (/^\d/.test(raw)) {
-      return raw.replace(/[^0-9a-z-]+/gi, "").replace(/-/g, "-").toUpperCase();
-    }
-    return "";
-  } catch {
-    return "";
+// 解析 s-impuls-shop.de 分类页商品
+function parseSImpulsCatalog(html, base) {
+  const $ = cheerio.load(html);
+
+  // 尝试多种常见网店主题的商品卡选择器（容错）
+  const candidates = [
+    '.product-layout',                 // OpenCart 常见
+    '.product-list .product',          // 另一类主题
+    '.products-grid .product',         // grid
+    '.ty-product-list__item',          // CS-Cart
+    '.ty-grid-list__item',             // CS-Cart
+    '.prod-box',                       // 通用兜底
+  ];
+
+  let cards = [];
+  for (const sel of candidates) {
+    const found = $(sel);
+    if (found.length >= 1) { cards = found.toArray(); break; }
   }
-}
 
-/** 解析 s-impuls-shop 分类页 */
-function parseImpulsCategory(html, pageUrl, limit = 50) {
-  const $ = cheerioLoad(html);
+  const items = cards.map(node => {
+    const el = $(node);
 
-  // 页面主体所有可能的商品卡片（结构在不同目录有轻微差别，这里穷举一些常见选择器）
-  const cards = $(
-    // 常见卡片容器里 a[href^="/product/…"]
-    '.product-list a[href*="/product/"], \
-     .product-box a[href*="/product/"], \
-     a.product--image[href*="/product/"], \
-     .listing a[href*="/product/"]'
-  )
-    .filter((i, el) => {
-      const href = $(el).attr("href") || "";
-      return /\/product\//i.test(href);
-    })
-    // 同一个卡片里可能匹配到多个 a，这里去重到“卡片级”
-    .map((i, el) => $(el).closest("article, .product-box, li, .product--box")[0])
-    .toArray()
-    .filter(Boolean);
+    // 链接（优先商品标题上的 <a>）
+    let a = el.find('a').filter((_, x) => {
+      const href = $(x).attr('href') || '';
+      return /\/product\/|\.html/i.test(href); // 更像商品链接的 a
+    }).first();
+    if (!a.length) a = el.find('a').first();
 
-  const items = [];
-  for (const card of cards) {
-    const $card = $(card);
+    const href = a.attr('href') || '';
+    const url = new URL(href, base).toString();
 
-    // 链接
-    let linkEl =
-      $card.find('a[href*="/product/"]').get(0) ||
-      $card.find("a").get(0);
-    const href = linkEl ? $(linkEl).attr("href") || "" : "";
-    const url = absolutize(href, pageUrl);
+    // 标题
+    const title = (a.text() || el.find('h3, .caption, .name, .ty-grid-list__item-name').text() || '')
+      .replace(/\s+/g, ' ')
+      .trim();
 
-    // 标题（优先标题元素，其次图片 alt，再次链接标题）
-    const title =
-      ($card.find(".product-title, .product--title, .title, h3, h2").first().text() || "").trim() ||
-      ($card.find("img[alt]").attr("alt") || "").trim() ||
-      ($(linkEl).attr("title") || "").trim();
+    // 图片（data-src / data-original / src）
+    const imgEl = el.find('img').first();
+    const img = new URL(
+      imgEl.attr('data-src') || imgEl.attr('data-original') || imgEl.attr('src') || '',
+      base
+    ).toString();
 
-    // 图片（优先卡片内 img，其次 data-src/data-original）
-    let img =
-      $card.find("img").attr("src") ||
-      $card.find("img").attr("data-src") ||
-      $card.find("img").attr("data-original") ||
-      "";
-    img = absolutize(img, pageUrl);
+    // SKU：由 URL 最后一段生成（稳定）
+    const sku = slugToSku(url);
 
-    // 价格与货币（如果有）
-    let priceText =
-      $card.find(".price, .product-price, .amount, .price--default").first().text().trim() || "";
-    priceText = priceText.replace(/\s+/g, " ");
-    let price = "";
-    let currency = "";
-    const m = priceText.match(/([€$£])\s*([\d.,]+)/);
-    if (m) {
-      currency = m[1];
-      price = m[2].replace(/\./g, "").replace(",", ".");
-    }
-
-    // MOQ（通常目录页没有，这里置空留给将来扩展）
-    const moq = "";
-
-    // SKU
-    const sku = inferSkuFromUrl(url);
-
-    // 兜底：标题或链接不齐就跳过
-    if (!url || !title) continue;
-
-    items.push({ sku, title, url, img, price, currency, moq });
-    if (items.length >= Number(limit || 50)) break;
-  }
+    return { sku, title, url, img, price: '', currency: '', moq: '' };
+  })
+  // 过滤掉没有 sku 或标题/链接的
+  .filter(x => x.sku && x.title && x.url);
 
   return items;
 }
 
-/** 统一抓取器 */
-async function fetchHtml(targetUrl) {
-  const res = await fetch(targetUrl, {
-    headers: {
-      "user-agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
-      accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      "accept-language": "de,en;q=0.9,zh;q=0.8",
-    },
-    redirect: "follow",
-    // Render 免费实例偶发超时，设长一点
-    timeout: 30000,
-  });
-  if (!res.ok) {
-    throw new Error(`Fetch HTML failed: ${res.status} ${res.statusText}`);
-  }
-  return await res.text();
-}
-
-/** API：解析分类页 */
-app.get("/v1/api/catalog/parse", async (req, res) => {
+app.get('/v1/api/catalog/parse', async (req, res) => {
   try {
-    const raw = (req.query.url || "").toString();
-    const limit = Number(req.query.limit || 50);
-    if (!raw) return res.status(400).json({ error: "missing url" });
+    const raw = (req.query.url || '').toString().trim();
+    const limit = Math.max(1, Math.min(500, parseInt(req.query.limit || '50', 10)));
+    if (!raw) return res.status(400).json({ error: 'missing url' });
 
-    const pageUrl = decodeURIComponent(raw);
-    const html = await fetchHtml(pageUrl);
+    const target = new URL(raw);
+    // 语言透传：前端会设置 X-Lang（zh/de/en），转成 Accept-Language
+    const xLang = (req.get('x-lang') || '').toLowerCase();
+    const acceptLanguage = xLang === 'de' ? 'de,de-DE;q=0.9,en;q=0.8'
+                         : xLang === 'en' ? 'en,en-GB;q=0.9,de;q=0.8,zh;q=0.7'
+                         : 'zh-CN,zh;q=0.9,en;q=0.8,de;q=0.7';
+
+    const resp = await axios.get(target.toString(), {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
+        'Accept-Language': acceptLanguage,
+        'Referer': target.origin + '/',
+      },
+      timeout: 30000,
+      // 避免某些站点压缩差异
+      decompress: true,
+      validateStatus: s => s >= 200 && s < 400,
+    });
 
     let items = [];
-    const host = new URL(pageUrl).hostname;
-
-    if (/s-impuls-shop\.de$/i.test(host)) {
-      items = parseImpulsCategory(html, pageUrl, limit);
+    if (/s-impuls-shop\.de$/i.test(target.hostname)) {
+      items = parseSImpulsCatalog(resp.data, target.origin).slice(0, limit);
     } else {
-      // 默认兜底：抓取页面上所有 /product/ 链接
-      const $ = cheerioLoad(html);
-      $("a[href*='/product/']").each((_, a) => {
-        const href = $(a).attr("href") || "";
-        const url = absolutize(href, pageUrl);
-        const title = ($(a).attr("title") || $(a).text() || "").trim();
-        const img = absolutize($(a).find("img").attr("src") || "", pageUrl);
-        const sku = inferSkuFromUrl(url);
-        if (url && title) items.push({ sku, title, url, img, price: "", currency: "", moq: "" });
-      });
-      items = items.slice(0, limit);
+      // 其他站点可在此扩展
+      items = [];
     }
 
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.json({
-      url: pageUrl,
+    return res.json({
+      url: target.toString(),
       count: items.length,
-      items,
+      items
     });
   } catch (err) {
-    res.status(500).json({ error: String(err && err.message || err) });
+    console.error('[parse error]', err?.message);
+    return res.status(500).json({ error: 'parse_failed', message: String(err?.message || err) });
   }
 });
 
-/** 图片代理（用于 Excel 插入真实图片，避免前端跨域） */
-app.get("/v1/api/img", async (req, res) => {
-  try {
-    const raw = (req.query.url || "").toString();
-    if (!raw) return res.status(400).send("missing url");
-    const imgUrl = decodeURIComponent(raw);
-
-    const r = await fetch(imgUrl, {
-      headers: {
-        "user-agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
-        accept: "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-        referer: new URL(imgUrl).origin + "/",
-      },
-      redirect: "follow",
-      timeout: 30000,
-    });
-    if (!r.ok) {
-      res.status(r.status).send(`fetch image failed: ${r.status}`);
-      return;
-    }
-    const buf = Buffer.from(await r.arrayBuffer());
-    const ctype = r.headers.get("content-type") || "image/jpeg";
-    res.setHeader("Access-Control-Allow-Origin", "*");
-    res.setHeader("Cache-Control", "public, max-age=86400");
-    res.type(ctype).send(buf);
-  } catch (e) {
-    res.status(500).send(String(e));
-  }
-});
-
-/** 健康检查 */
-app.get("/v1/health", (req, res) => res.json({ ok: true, ts: Date.now() }));
+// 根路径不暴露页面
+app.get('/', (_, res) => res.type('text/plain').send('ok'));
 
 app.listen(PORT, () => {
   console.log(`[mvp2-backend] up on :${PORT}`);
