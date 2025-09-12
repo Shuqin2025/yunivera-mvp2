@@ -1,208 +1,224 @@
-// backend/server.js
+// backend/server.js  —— ESM
 import express from "express";
 import cors from "cors";
 import fetch from "node-fetch";
-import cheerio from "cheerio";
-import pLimit from "p-limit";
+import * as cheerio from "cheerio"; // ← 修正：cheerio 无 default，必须用 * as
 
 const app = express();
+const PORT = process.env.PORT || 10000;
 
-// 允许所有来源（前端预览页会带 ?api=xxx 跨域访问）
+// 允许所有来源调用（前端部署在 Render 的 preview 域名上）
 app.use(cors());
-app.use(express.json({ limit: "2mb" }));
+app.use(express.json());
 
-// 通用获取 HTML
-async function getHTML(url) {
-  const res = await fetch(url, {
-    headers: {
-      // 某些站点需要 UA / 语言头才会返回完整 DOM
-      "user-agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118 Safari/537.36",
-      "accept-language": "de,en;q=0.9,zh;q=0.8",
-    },
-    redirect: "follow",
-  });
-  if (!res.ok) {
-    throw new Error(`fetch ${url} failed: ${res.status}`);
-  }
-  return await res.text();
-}
-
-// 规范化为绝对地址
-function abs(base, href = "") {
+// 小工具
+const absolutize = (base, maybeUrl) => {
   try {
-    return new URL(href, base).href;
+    return new URL(maybeUrl, base).toString();
   } catch {
-    return href || base;
+    return "";
   }
-}
+};
 
-// 从 title 里尽力抽取货号（像 30805-MHQ-SLIM）
-function guessSkuFromTitle(title = "") {
-  const m = title.trim().match(/[A-Z0-9][A-Z0-9\-\.]+/i);
-  return m ? m[0] : "";
-}
+// =============== 站点适配 ===============
 
-/**
- * 解析 auto-schmuck.de 类站点（我们之前支持的）
- */
-function parseAutoSchmuck($, base) {
-  const items = [];
-  // 典型结构：商品块里有 a 和 img
-  $("a").each((_, a) => {
-    const href = $(a).attr("href");
-    const title = $(a).text().trim();
-    const img = $(a).find("img").attr("src");
-    if (href && title && img) {
-      items.push({
-        sku: "",
-        title,
-        url: abs(base, href),
-        img: abs(base, img),
-        price: "",
-        currency: "",
-        moq: "",
-      });
-    }
-  });
-  return items;
-}
+// s-impuls-shop.de 列表页解析（以 /catalog/... 为主）
+async function parseImpulsCatalog(url, limit = 50) {
+  const html = await (await fetch(url, { redirect: "follow" })).text();
+  const $ = cheerio.load(html);
 
-/**
- * 解析 s-impuls-shop.de（OpenCart 风格）
- * 列表页常见结构：
- *   .product-layout 里有 .image img 与 .caption / .name 区域 a
- */
-function parseSImpuls($, base) {
+  // 做得尽量“鲁棒”：抓取主内容里所有指向 /product/… 的卡片
+  const seen = new Set();
   const items = [];
 
-  // 1) 新版/常见：.product-layout .product-thumb
-  const blocks =
-    $("#content .product-layout, .product-layout, .product-thumb").toArray();
+  $('#content a[href*="/product/"]').each((_, a) => {
+    if (items.length >= limit) return;
+    const href = $(a).attr("href") || "";
+    if (!href.includes("/product/")) return;
 
-  if (blocks.length) {
-    for (const el of blocks) {
-      const $el = $(el);
+    const link = absolutize(url, href);
+    if (seen.has(link)) return;
+    seen.add(link);
 
-      // 图片
-      const img =
-        $el.find(".image img").attr("src") ||
-        $el.find("img").attr("src") ||
-        "";
+    // 标题有时在 a 内部的 .title 或文字节点里
+    let title =
+      $(a).find(".title").text().trim() ||
+      $(a).text().trim().replace(/\s+/g, " ");
 
-      // 标题与链接（多主题兼容）
-      const a =
-        $el.find(".caption a").first()[0] ||
-        $el.find(".name a").first()[0] ||
-        $el.find("a").first()[0];
+    // 有些页面标题只有商品号，或“商品号 + 简短描述”
+    // SKU：取标题中第一个“非空白连续片段”（通常就是 30805-MHQ-SLIM 这种）
+    const sku = (title.split(/[,\s]/).filter(Boolean)[0] || "").trim();
 
-      let title = "";
-      let href = "";
-      if (a) {
-        title = $(a).attr("title")?.trim() || $(a).text().trim() || "";
-        href = $(a).attr("href") || "";
-      }
+    // 缩略图：a 里或同级 img；常见 /img/products/thumb/*.jpg
+    const $img =
+      $(a).find("img").first().attr("src") ||
+      $(a).find("img").first().attr("data-src") ||
+      "";
+    const img = absolutize(url, $img);
 
-      if (!title && img) {
-        // 有时 title 放在 img 的 alt
-        title = $el.find("img").attr("alt")?.trim() || "";
-      }
-
-      // 过滤掉明显是面包屑 / 类目卡片
-      if (!href || !title) continue;
-      if (/index\.php\?path=catalog\/home-cinema\/undefined/i.test(href)) {
-        continue;
-      }
-
-      items.push({
-        sku: guessSkuFromTitle(title),
-        title,
-        url: abs(base, href),
-        img: abs(base, img),
-        price: "",
-        currency: "",
-        moq: "",
-      });
-    }
-  }
-
-  // 2) 兜底：若没抓到，再尝试更宽松的选择器
-  if (items.length === 0) {
-    $("a").each((_, a) => {
-      const href = $(a).attr("href") || "";
-      const title = ($(a).attr("title") || $(a).text() || "").trim();
-      const img = $(a).find("img").attr("src") || "";
-
-      if (
-        href.includes("/product/") &&
-        title &&
-        img &&
-        !/undefined/i.test(href)
-      ) {
-        items.push({
-          sku: guessSkuFromTitle(title),
-          title,
-          url: abs(base, href),
-          img: abs(base, img),
-          price: "",
-          currency: "",
-          moq: "",
-        });
-      }
+    items.push({
+      sku,
+      title: title || sku,
+      url: link,
+      img,
+      price: "",
+      currency: "",
+      moq: "",
     });
-  }
+  });
 
-  return items;
+  return { url, count: items.length, items };
 }
 
-/**
- * 主解析函数：根据域名路由到不同解析器
- */
-function parseBySite(html, pageURL) {
-  const $ = cheerio.load(html, { decodeEntities: false });
+// auto-schmuck.com（你之前的类目页）—— 保持可用
+async function parseAutoSchmuck(url, limit = 50) {
+  const html = await (await fetch(url, { redirect: "follow" })).text();
+  const $ = cheerio.load(html);
 
-  const host = new URL(pageURL).host;
+  const items = [];
+  // 兼容其列表结构（标题+链接+首图）
+  $("a[href*='.html']").each((_, a) => {
+    if (items.length >= limit) return;
+    const link = absolutize(url, $(a).attr("href") || "");
+    const title =
+      ($(a).text() || $(a).attr("title") || "").trim().replace(/\s+/g, " ");
+    const img = absolutize(url, $(a).find("img").attr("src") || "");
 
-  if (/s-impuls-shop\.de$/i.test(host)) {
-    const items = parseSImpuls($, pageURL);
-    return { url: pageURL, count: items.length, items };
-  }
+    // 过滤导航/面包屑等噪声
+    if (!title || !/\.html$/.test(link)) return;
 
-  // 默认尝试之前的解析（auto-schmuck 一类）
-  const items = parseAutoSchmuck($, pageURL);
-  return { url: pageURL, count: items.length, items };
+    items.push({
+      sku: "",
+      title,
+      url: link,
+      img,
+      price: "",
+      currency: "",
+      moq: "",
+    });
+  });
+
+  return { url, count: items.length, items: items.slice(0, limit) };
 }
 
-app.get("/v1/api/catalog/parse", async (req, res) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Headers", "X-Lang");
-
+// 价格 / MOQ 补齐（可选）：对于“详情页”我们再抓一次
+// - s-impuls-shop：大多列表页无价；详情页里如有价格/货币/最小起订量则补齐
+async function hydrateDetailForImpuls(item) {
+  if (!item?.url) return item;
   try {
-    const pageURL = req.query.url;
-    const limit = Number(req.query.limit || 50);
+    const html = await (await fetch(item.url, { redirect: "follow" })).text();
+    const $ = cheerio.load(html);
 
-    if (!pageURL) {
-      return res.status(400).json({ error: "missing url" });
+    // 价格（示例选择器，尽量宽松）
+    // 常见：.price 或 [itemprop="price"] 等
+    const priceText =
+      $('[itemprop="price"]').attr("content") ||
+      $(".price").first().text().trim() ||
+      "";
+    // 货币
+    const currency =
+      $('[itemprop="priceCurrency"]').attr("content") ||
+      (/\b(EUR|USD|CNY|RMB|CHF)\b/i.exec(html)?.[1] || "") ||
+      "";
+
+    // MOQ（最小起订量），尝试从文案里找“ab x Stück / MOQ x”
+    let moq = "";
+    const bodyTxt = $("body").text().replace(/\s+/g, " ");
+    const m1 = /\bMOQ\s*[:：]?\s*(\d+)/i.exec(bodyTxt);
+    const m2 = /\bab\s*(\d+)\s*St(ck|ück)/i.exec(bodyTxt);
+    if (m1) moq = m1[1];
+    else if (m2) moq = m2[1];
+
+    if (priceText) item.price = priceText;
+    if (currency) item.currency = currency;
+    if (moq) item.moq = moq;
+  } catch {
+    // 忽略详情页异常
+  }
+  return item;
+}
+
+// =============== API ===============
+
+// 1) 目录页解析
+app.get("/v1/api/catalog/parse", async (req, res) => {
+  try {
+    const { url, limit: limitStr } = req.query;
+    if (!url) return res.status(400).json({ error: "missing url" });
+    const limit = Math.min(parseInt(limitStr || "50", 10) || 50, 500);
+
+    const host = new URL(url).hostname;
+    let result;
+
+    if (host.includes("s-impuls-shop.de")) {
+      result = await parseImpulsCatalog(url, limit);
+
+      // 如果抓到的是“面包屑”而非商品（<= 5 个且标题像 Home/Audio Kabel 之类），就返回空数组避免前端报 “items 不是数组”
+      if (result.items.length <= 5 && result.items.every(it => /home|kabel|undefined/i.test(it.title))) {
+        result.items = [];
+        result.count = 0;
+      }
+
+      // 可选：前 N 项补齐价格和 MOQ（控制一下数量与并发）
+      const MAX_HYDRATE = Math.min(result.items.length, 20);
+      await Promise.all(
+        result.items.slice(0, MAX_HYDRATE).map(async (it, idx) => {
+          // 仅当价格为空时才抓详情
+          if (!it.price) await hydrateDetailForImpuls(it);
+        })
+      );
+    } else if (host.includes("auto-schmuck.com")) {
+      result = await parseAutoSchmuck(url, limit);
+    } else {
+      // 兜底：尝试通用解析（所有 a[href] + img）
+      const html = await (await fetch(url, { redirect: "follow" })).text();
+      const $ = cheerio.load(html);
+      const items = [];
+      $("a[href]").each((_, a) => {
+        const href = $(a).attr("href") || "";
+        const link = absolutize(url, href);
+        if (!/https?:/.test(link)) return;
+        const title = ($(a).text() || $(a).attr("title") || "").trim();
+        const img = absolutize(url, $(a).find("img").attr("src") || "");
+        if (title && img) {
+          items.push({ sku: "", title, url: link, img, price: "", currency: "", moq: "" });
+        }
+      });
+      result = { url, count: items.length, items: items.slice(0, limit) };
     }
 
-    const html = await getHTML(pageURL);
-    let { url, count, items } = parseBySite(html, pageURL);
-
-    // 截断到 limit
-    if (Array.isArray(items) && items.length > limit) {
-      items = items.slice(0, limit);
-    }
-
-    return res.json({ url, count: items.length, items });
+    // 始终返回 items 为数组（即使空数组），避免前端 “items 不是数组”
+    if (!Array.isArray(result.items)) result.items = [];
+    res.set("Content-Type", "application/json; charset=utf-8");
+    res.json(result);
   } catch (err) {
-    console.error("[parse error]", err);
-    return res.status(500).json({ error: String(err) });
+    res.status(500).json({ error: String(err?.message || err) });
   }
 });
 
-app.get("/health", (_, res) => res.send("ok"));
+// 2) 图片代理（为前端 Excel 内嵌图片准备，解决跨域 & 防盗链）
+app.get("/v1/api/proxy-img", async (req, res) => {
+  try {
+    const { url } = req.query;
+    if (!url) return res.status(400).send("missing url");
+    const r = await fetch(url, { redirect: "follow" });
+    if (!r.ok) return res.status(502).send("bad upstream");
+    const ct = r.headers.get("content-type") || "image/jpeg";
+    const buf = Buffer.from(await r.arrayBuffer());
+    res.set("Content-Type", ct);
+    res.set("Cache-Control", "public, max-age=86400");
+    res.set("Access-Control-Allow-Origin", "*");
+    res.send(buf);
+  } catch {
+    res.status(500).send("img proxy error");
+  }
+});
 
-const PORT = process.env.PORT || 10000;
+// 健康检查
+app.get("/", (_, res) => {
+  res.type("text/plain").send("OK");
+});
+
 app.listen(PORT, () => {
-  console.log(`[mvp2-backend] listening on ${PORT}`);
+  console.log("backend started on port", PORT);
 });
