@@ -1,241 +1,267 @@
-// backend/server.js
-/* eslint-disable no-console */
-const express = require("express");
-const cors = require("cors");
-const fetch = require("node-fetch");           // v2
-const ExcelJS = require("exceljs");
-const PDFDocument = require("pdfkit");
-const cheerio = require("cheerio");
-const { URL } = require("url");
+// ESM 版本：与 package.json 中 "type": "module" 匹配
+import express from "express";
+import cors from "cors";
+import axios from "axios";
+import * as cheerio from "cheerio";
+import ExcelJS from "exceljs";
+import urlLib from "url";
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 
-// --- Middlewares ---
-app.use(cors({ origin: true }));
-app.use(express.json({ limit: "3mb" }));
-
-// --- Utils ---
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-
-async function fetchText(url, init = {}) {
-  const res = await fetch(url, { ...init, timeout: 20000 });
-  if (!res.ok) throw new Error(`GET ${url} -> ${res.status}`);
-  return res.text();
-}
-async function fetchBuffer(url, init = {}) {
-  const res = await fetch(url, { ...init, timeout: 20000 });
-  if (!res.ok) throw new Error(`GET ${url} -> ${res.status}`);
-  return res.buffer();
-}
-function absUrl(base, maybe) {
-  try {
-    if (!maybe) return "";
-    return new URL(maybe, base).toString();
-  } catch { return maybe || ""; }
-}
-
-// -------- Health --------
-app.get("/v1/api/health", (_req, res) => {
-  res.type("text/plain").send("OK");
+// 允许跨域（含自定义头）
+app.use(cors({ origin: true, credentials: false }));
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, X-Lang");
+  next();
 });
 
-// -------- Catalog Parse --------
-app.post("/v1/api/catalog/parse", async (req, res) => {
-  const { url, limit = 100 } = req.body || {};
-  if (!url) return res.status(400).json({ error: "missing url" });
+const UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/118.0 Safari/537.36";
 
+/** 工具：取绝对地址 */
+function absUrl(base, maybe) {
   try {
-    const html = await fetchText(url, { headers: { "user-agent": "Mozilla/5.0 MVP3/1.0" } });
-    const $ = cheerio.load(html);
-    const host = new URL(url).host;
+    return new URL(maybe, base).toString();
+  } catch (_) {
+    return maybe || "";
+  }
+}
 
-    // site-specific: s-impuls-shop.de
-    let items = [];
-    if (/s-impuls-shop\.de$/i.test(host)) {
-      // 常见列表容器：卡片里通常有 <a href="/product/..."> 与 <img src="/img/products/thumb/xxxx.jpg">
-      const cards = $('a[href*="/product/"]').closest("article,li,div");
-      cards.each((_, el) => {
-        const $el = $(el);
-        const a = $el.find('a[href*="/product/"]').first();
-        const href = absUrl(url, a.attr("href"));
+/** 工具：抓 HTML */
+async function fetchHTML(target) {
+  const resp = await axios.get(target, {
+    headers: { "User-Agent": UA, Referer: target },
+    timeout: 20000,
+  });
+  return resp.data;
+}
 
-        // 标题：a 文本 + 旁边的小字
-        const title =
-          (a.text().trim() ||
-           $el.find("h2,h3,.title,.product-title").first().text().trim() || "");
+/** 解析目录页（尽量通用，兼容 s-impuls / auto-schmuck 等） */
+async function parseCatalog(listUrl, limit = 50) {
+  const html = await fetchHTML(listUrl);
+  const $ = cheerio.load(html);
+  const items = [];
 
-        // SKU：标题起始的一段货号（字母/数字/短横）
-        const skuMatch = title.match(/[A-Z0-9]+(?:[-.][A-Z0-9]+)*/i);
-        const sku = skuMatch ? skuMatch[0].toUpperCase() : "";
+  // 针对多站点的兜底选择器
+  const tiles = $(
+    [
+      // s-impuls-shop（Shopware）
+      "div.product-box, div.product--box, article.product-box, article.product--box, div.product-small",
+      // 其它站点常见
+      "[itemprop='itemListElement'], li.product, article.product, div.product",
+    ].join(",")
+  );
 
-        // 图片：thumb 或者 <img> 的 src
-        const img = absUrl(url,
-          $el.find('img[src*="/img/"]').attr("src") ||
-          a.find("img").attr("src") ||
-          ""
-        );
+  tiles.each((i, el) => {
+    if (items.length >= limit) return;
 
-        // 列表页多数没有价格 / MOQ，这里留空
-        const price =
-          $el.find(".price,.product-price,[data-price]").first().text().trim() || "";
-        const moq =
-          $el.find(".moq,[data-moq]").first().text().trim() || "";
+    const $el = $(el);
 
-        items.push({
-          sku,
-          title,
-          url: href,
-          image: img,
-          price,
-          moq,
-        });
+    // 名称
+    const title =
+      $el.find("[itemprop='name']").text().trim() ||
+      $el.find(".product-name, .product-title, .title, a").first().text().trim() ||
+      $el.text().trim().split("\n")[0];
+
+    // 链接
+    const href =
+      $el.find("a[href]").first().attr("href") ||
+      $el.find("link[itemprop='url']").attr("href");
+    const url = absUrl(listUrl, href);
+
+    // 图片（src / data-src / data-original 都试一下）
+    const imgEl =
+      $el.find("img").first() ||
+      $el.find("img[data-src]").first() ||
+      $el.find("img[data-original]").first();
+    const img =
+      absUrl(listUrl, imgEl.attr("src")) ||
+      absUrl(listUrl, imgEl.attr("data-src")) ||
+      absUrl(listUrl, imgEl.attr("data-original"));
+
+    // 价格（欧站普遍：€、EUR）
+    let priceText =
+      $el
+        .find(
+          ".price, .product-price, [itemprop='price'], .product-box-price, .price--default"
+        )
+        .first()
+        .text()
+        .trim() || "";
+    const mPrice = priceText.match(
+      /([€$]|EUR|USD)\s*([\d.,]+)|([\d.,]+)\s*(€|EUR|USD)/
+    );
+    let price = "";
+    let currency = "";
+    if (mPrice) {
+      const num = mPrice[2] || mPrice[3] || "";
+      price = num.replace(/\./g, "").replace(/,/g, "."); // 1.234,56 → 1234.56
+      currency = (mPrice[1] || mPrice[4] || "").replace(/\s+/g, "");
+    }
+
+    // 货号 / SKU：常见是纯数字或“数字-字母组合”
+    // 例：30805-MHQ-SLIM、40102-MHQ
+    let sku = "";
+    const mSku =
+      title.match(/\b(\d{4,}[-A-Z0-9]+)\b/i) ||
+      title.match(/\b(\d{5,})\b/) ||
+      (url && url.match(/\/(\d{4,}[-A-Z0-9]+)\b/i));
+    if (mSku) sku = mSku[1];
+
+    if (title && url) {
+      items.push({
+        sku,
+        title,
+        url,
+        img,
+        price,
+        currency,
+        moq: "", // 目录页大多没有 MOQ，如需从详情页抓可在此扩展
       });
     }
+  });
 
-    // fallback 通用解析（尽力而为）
-    if (items.length === 0) {
-      $('a[href]').each((_, a) => {
-        const href = $(a).attr("href") || "";
-        if (!/\/product/i.test(href)) return;
-        const $a = $(a);
-        const card = $a.closest("article,li,div");
-        const img = absUrl(url, card.find("img").attr("src") || $a.find("img").attr("src") || "");
-        const title = ($a.text() || card.find("h2,h3,.title").first().text() || "").trim();
-        const sku = (title.match(/[A-Z0-9]+(?:[-.][A-Z0-9]+)*/i) || [""])[0].toUpperCase();
-        items.push({
-          sku,
-          title,
-          url: absUrl(url, href),
-          image: img,
-          price: "",
-          moq: "",
-        });
-      });
-    }
+  return { url: listUrl, count: items.length, items };
+}
 
-    // 去重 + 截断
-    const seen = new Set();
-    const out = [];
-    for (const it of items) {
-      const key = it.url || it.title;
-      if (key && !seen.has(key)) { seen.add(key); out.push(it); }
-      if (out.length >= limit) break;
-    }
+/** API1：解析目录页，返回 JSON */
+app.get("/v1/api/catalog/parse", async (req, res) => {
+  try {
+    const listUrl = req.query.url;
+    const limit = Math.min(parseInt(req.query.limit || "50", 10), 500);
+    if (!listUrl) return res.status(400).json({ error: "missing url" });
 
-    return res.json({ source: url, count: out.length, items: out });
-  } catch (e) {
-    console.error(e);
-    return res.status(500).json({ error: String(e.message || e) });
+    const data = await parseCatalog(listUrl, limit);
+    res.json(data);
+  } catch (err) {
+    console.error("[parse]", err?.message);
+    res.status(500).json({ error: String(err?.message || err) });
   }
 });
 
-// -------- Export: Excel (with inline images) --------
-app.post("/v1/api/export/excel", async (req, res) => {
-  // 允许两种 payload：
-  // 1) { columns, rows }（前端自带列配置）
-  // 2) { rows } （我们固定列顺序）
-  const { rows: rawRows, columns } = req.body || {};
-  const rows = Array.isArray(rawRows) ? rawRows : [];
-
+/** API2：图片代理（前端/Excel 都统一走这里，避免 CORS） */
+app.get("/v1/api/img", async (req, res) => {
   try {
-    const wb = new ExcelJS.Workbook();
-    wb.creator = "MVP3";
-    wb.created = new Date();
+    const target = req.query.url;
+    if (!target) return res.status(400).send("missing url");
 
-    const ws = wb.addWorksheet("catalog", {
-      properties: { defaultRowHeight: 18 },
-      views: [{ state: "frozen", ySplit: 1 }],
+    const resp = await axios.get(target, {
+      responseType: "arraybuffer",
+      headers: { "User-Agent": UA, Referer: target },
+      timeout: 20000,
     });
 
-    // 固定列顺序（Item No. | Picture | Description | MOQ | Unit Price | Link）
+    const type = resp.headers["content-type"] || "image/jpeg";
+    res.setHeader("Content-Type", type);
+    res.setHeader("Cache-Control", "public, max-age=86400");
+    res.send(resp.data);
+  } catch (err) {
+    console.error("[img]", err?.message);
+    res.status(502).send("bad image");
+  }
+});
+
+/** API3：一键导出 Excel（服务端用 exceljs 嵌入“真实图片”） */
+app.get("/v1/api/catalog/export.xlsx", async (req, res) => {
+  try {
+    const listUrl = req.query.url;
+    const limit = Math.min(parseInt(req.query.limit || "50", 10), 500);
+    if (!listUrl) return res.status(400).send("missing url");
+
+    const { items } = await parseCatalog(listUrl, limit);
+
+    const wb = new ExcelJS.Workbook();
+    const ws = wb.addWorksheet("catalog");
+
+    // 表头
     ws.columns = [
-      { header: "Item No.",   key: "sku",   width: 18 },
-      { header: "Picture",    key: "image", width: 14 },
-      { header: "Description",key: "title", width: 60 },
-      { header: "MOQ",        key: "moq",   width: 12 },
-      { header: "Unit Price", key: "price", width: 14 },
-      { header: "Link",       key: "url",   width: 80 }
+      { header: "Item No.", key: "sku", width: 20 },
+      { header: "Picture", key: "pic", width: 14 },
+      { header: "Description", key: "title", width: 60 },
+      { header: "MOQ", key: "moq", width: 10 },
+      { header: "Unit Price", key: "price", width: 12 },
+      { header: "Link", key: "link", width: 80 },
     ];
 
-    // 表头加粗
-    ws.getRow(1).font = { bold: true };
+    // 行高用于放图片
+    const ROW_H = 62; // 大约 82px
+    ws.getRow(1).height = 22;
 
-    // 写入行（先写文本，图片稍后盖在单元格上）
-    rows.forEach((r) => {
-      ws.addRow({
-        sku:   r.sku || "",
-        image: r.image || "",
-        title: r.title || r.name || "",
-        moq:   r.moq   ?? "",
-        price: r.price ?? "",
-        url:   r.url   || r.link || "",
-      });
-    });
+    // 逐行写入（图片后置添加）
+    let rowStart = 2;
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      const r = ws.getRow(rowStart + i);
+      r.values = {
+        sku: it.sku || "",
+        pic: "", // 稍后 addImage
+        title: it.title || "",
+        moq: it.moq || "",
+        price: it.price ? `${it.price}${it.currency || ""}` : "",
+        link: it.url || "",
+      };
+      r.height = ROW_H;
 
-    // 链接超链接化 + 自动换行
-    for (let i = 2; i <= ws.rowCount; i++) {
-      const urlCell = ws.getCell(i, 6);
-      if (urlCell.value) {
-        urlCell.value = { text: "链接", hyperlink: String(urlCell.value) };
-        urlCell.font = { color: { argb: "FF1F4E79" }, underline: true };
+      // 链接超链接 & 文本
+      const cell = ws.getCell(rowStart + i, 6);
+      if (it.url) {
+        cell.value = { text: "链接", hyperlink: it.url };
+        cell.font = { color: { argb: "FF0000FF" }, underline: true };
       }
-      ws.getCell(i, 3).alignment = { wrapText: true };
-      ws.getRow(i).height = 68; // 给图片腾空间
     }
 
-    // 下载并嵌入图片（如果失败就跳过）
-    for (let i = 2; i <= ws.rowCount; i++) {
-      const url = ws.getCell(i, 2).value; // 第二列是 image url（临时存放）
-      if (!url) continue;
+    // 嵌入图片
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      if (!it.img) continue;
 
       try {
-        const buf = await fetchBuffer(url, { headers: { "user-agent": "Mozilla/5.0 MVP3/1.0" } });
-        const imgId = wb.addImage({ buffer: buf, extension: "jpeg" /* png 也能识别 */ });
-
-        // 把“真实图片”画到第 i 行第 2 列单元格范围内
-        ws.addImage(imgId, {
-          tl: { col: 1 + 0.15, row: i - 1 + 0.15 },   // 左上角（列/行从 0 开始）
-          ext: { width: 80, height: 60 },             // 图片显示尺寸
-          editAs: "oneCell",
+        const imgResp = await axios.get(it.img, {
+          responseType: "arraybuffer",
+          headers: { "User-Agent": UA, Referer: it.url || listUrl },
+          timeout: 20000,
         });
+        const ctype = (imgResp.headers["content-type"] || "").toLowerCase();
+        let ext = "jpeg";
+        if (ctype.includes("png")) ext = "png";
+        else if (ctype.includes("webp")) ext = "webp";
 
-        // 把图片列的“原始 URL”改成空字符串，避免显得杂乱
-        ws.getCell(i, 2).value = "";
-      } catch {
-        // 忽略个别图片失败
+        const id = wb.addImage({ buffer: imgResp.data, extension: ext });
+
+        // 图片放在第 2 列（B 列），第 i+2 行这个单元格区域
+        const rowIdx = rowStart + i;
+        ws.addImage(id, {
+          tl: { col: 1 + 0.2, row: rowIdx - 1 + 0.2 }, // 略微内缩
+          ext: { width: 80, height: 80 },
+        });
+      } catch (e) {
+        console.warn("[img-embed]", it.img, e.message);
       }
-
-      // 轻微节流，降低被目标站限速的概率
-      if (i % 12 === 0) await sleep(30);
     }
 
     // 输出
-    const buf = await wb.xlsx.writeBuffer();
-    res.setHeader("Content-Type",
-      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
-    res.setHeader("Content-Disposition",
-      `attachment; filename="catalog-preview-${Date.now()}.xlsx"`);
-    return res.send(Buffer.from(buf));
-  } catch (e) {
-    console.error(e);
-    return res.status(500).json({ error: String(e.message || e) });
+    const filename = `catalog-preview-${new Date()
+      .toISOString()
+      .slice(0, 19)
+      .replace(/[:T]/g, "")}.xlsx`;
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    );
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+
+    await wb.xlsx.write(res);
+    res.end();
+  } catch (err) {
+    console.error("[export]", err?.message);
+    res.status(500).send(String(err?.message || err));
   }
 });
 
-// -------- Export: simple PDF (optional, keeps your old button working) --------
-app.post("/v1/api/pdf", (req, res) => {
-  const { title = "Quote", text = "" } = req.body || {};
-  res.setHeader("Content-Type", "application/pdf");
-  const doc = new PDFDocument({ size: "A4", margin: 40 });
-  doc.pipe(res);
-  doc.fontSize(16).text(title, { underline: true });
-  doc.moveDown();
-  doc.fontSize(11).text(text || "(empty)");
-  doc.end();
-});
+app.get("/health", (_, res) => res.send("OK"));
 
-// -------- Start --------
 app.listen(PORT, () => {
-  console.log(`[mvp3-backend] listening on :${PORT}`);
+  console.log(`[mvp2] backend listening on :${PORT}`);
 });
