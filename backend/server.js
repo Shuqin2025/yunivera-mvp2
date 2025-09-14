@@ -7,12 +7,14 @@ const app = express();
 app.use(cors({ origin: "*", exposedHeaders: ["X-Lang"] }));
 
 // 健康端点：兼容多路径
-app.get(["/","/healthz","/health","/api/health"], (_req, res) => res.type("text/plain").send("ok"));
+app.get(["/", "/healthz", "/health", "/api/health"], (_req, res) =>
+  res.type("text/plain").send("ok")
+);
 
 app.get("/v1/api/__version", (_req, res) => {
   res.json({
-    version: "restore-mvp-2025-09-13-optim3",
-    note: "logging host/count/ms + image proxy + S-Impuls parser",
+    version: "restore-mvp-2025-09-14-imgprice",
+    note: "robust price selector + image proxy + S-Impuls parser",
   });
 });
 
@@ -24,7 +26,8 @@ async function fetchHtml(targetUrl) {
     headers: {
       "User-Agent": UA,
       "Accept-Language": "de,en;q=0.8,zh;q=0.6",
-      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+      Accept:
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
       Referer: targetUrl,
     },
     timeout: 25000,
@@ -34,11 +37,22 @@ async function fetchHtml(targetUrl) {
   return typeof data === "string" ? data : "";
 }
 
-function abs(base, maybe) { if (!maybe) return ""; try { return new URL(maybe, base).href; } catch { return ""; } }
-function text($el) { return ($el.text() || "").replace(/\s+/g, " ").trim(); }
+function abs(base, maybe) {
+  if (!maybe) return "";
+  try {
+    return new URL(maybe, base).href;
+  } catch {
+    return "";
+  }
+}
+function text($el) {
+  return ($el.text() || "").replace(/\s+/g, " ").trim();
+}
 function guessSkuFromTitle(title) {
   if (!title) return "";
-  const m = title.match(/\b[0-9]{4,}\b/) || title.match(/\b[0-9A-Z]{4,}(?:-[0-9A-Z]{2,})*\b/i);
+  const m =
+    title.match(/\b[0-9]{4,}\b/) ||
+    title.match(/\b[0-9A-Z]{4,}(?:-[0-9A-Z]{2,})*\b/i);
   return m ? m[0] : "";
 }
 
@@ -50,7 +64,11 @@ app.get("/v1/api/image", async (req, res) => {
     const r = await axios.get(url, {
       responseType: "arraybuffer",
       timeout: 20000,
-      headers: { "User-Agent": UA, Accept: "image/avif,image/webp,image/*,*/*;q=0.8", Referer: url },
+      headers: {
+        "User-Agent": UA,
+        Accept: "image/avif,image/webp,image/*,*/*;q=0.8",
+        Referer: url,
+      },
       validateStatus: (s) => s >= 200 && s < 400,
     });
     res.set("Content-Type", r.headers["content-type"] || "image/jpeg");
@@ -75,6 +93,20 @@ async function parseSImpulsCatalog(listUrl, limit = 50) {
   ];
 
   const items = [];
+  function pickImg($card) {
+    let $img =
+      $card.find(".image img").first().length
+        ? $card.find(".image img").first()
+        : $card.find("img").first();
+    let src =
+      $img.attr("data-src") ||
+      $img.attr("data-original") ||
+      ($img.attr("srcset") || "").split(" ").find((s) => s.startsWith("http")) ||
+      $img.attr("src") ||
+      "";
+    // 去掉 ?xx 尾巴，转绝对
+    return abs(listUrl, (src || "").split("?")[0]);
+  }
   function pushItem(aEl) {
     if (items.length >= limit) return;
     const $a = $(aEl);
@@ -82,50 +114,111 @@ async function parseSImpulsCatalog(listUrl, limit = 50) {
     if (!href || !href.includes("/product/")) return;
 
     const title = ($a.attr("title") || "").trim() || text($a);
-    let $card = $a.closest("div"); if ($card.length === 0) $card = $a.parent();
-    const $img = $card.find(".image img").first().length ? $card.find(".image img").first() : $card.find("img").first();
-    const imgSrc = $img.attr("data-src") || $img.attr("data-original") || $img.attr("src") || "";
-    const img = abs(listUrl, (imgSrc || "").split("?")[0]);
-    const priceTxt = text($card.find(".price, .product-price, .amount, .m-price").first()) || "";
-    const skuTxt   = text($card.find(".product-model, .model, .sku").first()) || guessSkuFromTitle(title);
+    let $card = $a.closest("div");
+    if ($card.length === 0) $card = $a.parent();
+    const img = pickImg($card);
+    const priceTxt =
+      text($card.find(".price, .product-price, .amount, .m-price").first()) || "";
+    const skuTxt =
+      text($card.find(".product-model, .model, .sku").first()) ||
+      guessSkuFromTitle(title);
 
     if (title && href) {
-      items.push({ sku: skuTxt, title, url: abs(listUrl, href), img, price: priceTxt || null, currency: "", moq: "" });
+      items.push({
+        sku: skuTxt,
+        title,
+        url: abs(listUrl, href),
+        img,
+        price: priceTxt || null,
+        currency: "",
+        moq: "",
+      });
     }
   }
 
-  if (cardRoots.length) cardRoots.find('a[href*="/product/"]').each((_i, a) => pushItem(a));
+  if (cardRoots.length)
+    cardRoots.find('a[href*="/product/"]').each((_i, a) => pushItem(a));
   if (items.length === 0) {
     for (const c of candidates) {
-      const $cards = $(c.item); if ($cards.length === 0) continue;
-      $cards.each((_i, el) => $(el).find('a[href*="/product/"]').each((_j, a) => pushItem(a)));
+      const $cards = $(c.item);
+      if ($cards.length === 0) continue;
+      $cards.each((_i, el) =>
+        $(el)
+          .find('a[href*="/product/"]')
+          .each((_j, a) => pushItem(a))
+      );
       if (items.length > 0) break;
     }
   }
   return items;
 }
 
-// ---- 详情页富化（保留能力，UI 已移除）----
+// ---- 价格标准化 ----
+function normalizePrice(str) {
+  if (!str) return "";
+  const s = String(str).replace(/\s+/g, " ").trim();
+  // 典型匹配：€ 12,34 / 12,34 € / 1.234,56 €
+  const m =
+    s.match(/€\s*\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2})/) ||
+    s.match(/\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2})\s*€/) ||
+    s.match(/\d+[.,]\d{2}/);
+  if (!m) return s;
+  let v = m[0].replace(/\s+/g, " ");
+  // 统一成 € 0,00 风格（仅在没有 € 时补）
+  if (!/[€]/.test(v)) v = "€ " + v;
+  return v;
+}
+
+// ---- 详情页富化（更稳的价格/MOQ 提取）----
 async function enrichDetail(item) {
   try {
     const html = await fetchHtml(item.url);
     const $ = cheerio.load(html);
-    const priceSel = ".price, .product-price, [itemprop='price'], .price-value, .price .amount";
-    const moqSel   = ".moq, .min-order, .minimum, .minbestellmenge, .minimum-order, .minimum__value";
-    const priceText = text($(priceSel).first());
-    const moqText   = text($(moqSel).first());
-    if (priceText) item.price = priceText;
+
+    // 价格选择器尽可能全面，优先 meta@content
+    const priceCandidates = [
+      "meta[itemprop='price']",                 // <meta itemprop="price" content="12,34">
+      "[itemprop='price']",
+      ".price .amount",
+      ".price .value",
+      ".product-price",
+      ".price-value",
+      ".woocommerce-Price-amount",
+      ".amount",
+      ".price",                                 // 兜底（后处理提取数字）
+    ];
+
+    let rawPrice = "";
+    for (const sel of priceCandidates) {
+      const $node = $(sel).first();
+      if ($node.length) {
+        rawPrice = $node.attr("content") || text($node);
+        if (rawPrice) break;
+      }
+    }
+
+    const moqSel =
+      ".moq, .min-order, .minimum, .minbestellmenge, .minimum-order, .minimum__value";
+    const moqText = text($(moqSel).first());
+
+    const norm = normalizePrice(rawPrice);
+    if (norm) item.price = norm;
     if (moqText) item.moq = moqText;
-  } catch { /* ignore */ }
+  } catch (e) {
+    // 忽略个别失败
+  }
 }
 
 // ---- 解析总路由（带日志）----
 app.get("/v1/api/catalog/parse", async (req, res) => {
   const listUrl = String(req.query.url || "").trim();
-  const limit   = Math.max(1, Math.min(parseInt(String(req.query.limit || "50"), 10) || 50, 200));
-  const enrich  = String(req.query.enrich || "").toLowerCase() === "true";
+  const limit = Math.max(
+    1,
+    Math.min(parseInt(String(req.query.limit || "50"), 10) || 50, 200)
+  );
+  const enrich = String(req.query.enrich || "").toLowerCase() === "true";
 
-  if (!listUrl) return res.status(400).json({ ok:false, error:"missing url" });
+  if (!listUrl) return res.status(400).json({ ok: false, error: "missing url" });
 
   const t0 = Date.now();
   try {
@@ -141,17 +234,26 @@ app.get("/v1/api/catalog/parse", async (req, res) => {
     }
 
     if (enrich && items.length) {
-      const N = Math.min(items.length, 20);
+      const N = Math.min(items.length, 20); // 只富化前 N 条，兼顾速度
       await Promise.all(items.slice(0, N).map(enrichDetail));
     }
 
-    const payload = { ok:true, url:listUrl, count: items.length, products: items, items };
+    const payload = { ok: true, url: listUrl, count: items.length, products: items, items };
     res.setHeader("X-Lang", "de");
-    console.log("[parse:done]", { host, count: items.length, ms: Date.now() - t0, enrich });
+    console.log("[parse:done]", {
+      host,
+      count: items.length,
+      ms: Date.now() - t0,
+      enrich,
+    });
     res.json(payload);
   } catch (err) {
-    console.error("[parse:fail]", { url:listUrl, ms: Date.now() - t0, err: String(err?.message || err) });
-    res.status(500).json({ ok:false, error: String(err?.message || err) });
+    console.error("[parse:fail]", {
+      url: listUrl,
+      ms: Date.now() - t0,
+      err: String(err?.message || err),
+    });
+    res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 });
 
