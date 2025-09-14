@@ -6,15 +6,15 @@ import * as cheerio from "cheerio";
 const app = express();
 app.use(cors({ origin: "*", exposedHeaders: ["X-Lang"] }));
 
-// 健康端点：兼容多路径
+// 健康端点：多路径兼容
 app.get(["/", "/healthz", "/health", "/api/health"], (_req, res) =>
   res.type("text/plain").send("ok")
 );
 
 app.get("/v1/api/__version", (_req, res) => {
   res.json({
-    version: "restore-mvp-2025-09-14-imgprice",
-    note: "robust price selector + image proxy + S-Impuls parser",
+    version: "restore-mvp-2025-09-14-imgprice+ldjson",
+    note: "price from JSON-LD + robust selectors; image proxy; S-Impuls parser",
   });
 });
 
@@ -39,15 +39,9 @@ async function fetchHtml(targetUrl) {
 
 function abs(base, maybe) {
   if (!maybe) return "";
-  try {
-    return new URL(maybe, base).href;
-  } catch {
-    return "";
-  }
+  try { return new URL(maybe, base).href; } catch { return ""; }
 }
-function text($el) {
-  return ($el.text() || "").replace(/\s+/g, " ").trim();
-}
+function text($el) { return ($el.text() || "").replace(/\s+/g, " ").trim(); }
 function guessSkuFromTitle(title) {
   if (!title) return "";
   const m =
@@ -56,7 +50,7 @@ function guessSkuFromTitle(title) {
   return m ? m[0] : "";
 }
 
-// ---- 图片代理（Excel 内嵌图使用）----
+// ---------- 图片代理（供 ExcelJS 取图） ----------
 app.get("/v1/api/image", async (req, res) => {
   const url = String(req.query.url || "").trim();
   if (!url) return res.status(400).send("missing url");
@@ -80,7 +74,7 @@ app.get("/v1/api/image", async (req, res) => {
   }
 });
 
-// ---- S-Impuls 列表解析 ----
+// ---------- S-Impuls 列表解析 ----------
 async function parseSImpulsCatalog(listUrl, limit = 50) {
   const html = await fetchHtml(listUrl);
   const $ = cheerio.load(html);
@@ -94,18 +88,16 @@ async function parseSImpulsCatalog(listUrl, limit = 50) {
 
   const items = [];
   function pickImg($card) {
-    let $img =
-      $card.find(".image img").first().length
-        ? $card.find(".image img").first()
-        : $card.find("img").first();
+    let $img = $card.find(".image img").first().length
+      ? $card.find(".image img").first()
+      : $card.find("img").first();
     let src =
       $img.attr("data-src") ||
       $img.attr("data-original") ||
-      ($img.attr("srcset") || "").split(" ").find((s) => s.startsWith("http")) ||
+      ($img.attr("srcset") || "").split(" ").find((s) => /^https?:/i.test(s)) ||
       $img.attr("src") ||
       "";
-    // 去掉 ?xx 尾巴，转绝对
-    return abs(listUrl, (src || "").split("?")[0]);
+    return abs(listUrl, (src || "").split("?")[0]); // 去掉参数，便于缓存与代理
   }
   function pushItem(aEl) {
     if (items.length >= limit) return;
@@ -114,108 +106,124 @@ async function parseSImpulsCatalog(listUrl, limit = 50) {
     if (!href || !href.includes("/product/")) return;
 
     const title = ($a.attr("title") || "").trim() || text($a);
-    let $card = $a.closest("div");
-    if ($card.length === 0) $card = $a.parent();
+    let $card = $a.closest("div"); if ($card.length === 0) $card = $a.parent();
     const img = pickImg($card);
     const priceTxt =
       text($card.find(".price, .product-price, .amount, .m-price").first()) || "";
     const skuTxt =
-      text($card.find(".product-model, .model, .sku").first()) ||
-      guessSkuFromTitle(title);
+      text($card.find(".product-model, .model, .sku").first()) || guessSkuFromTitle(title);
 
-    if (title && href) {
-      items.push({
-        sku: skuTxt,
-        title,
-        url: abs(listUrl, href),
-        img,
-        price: priceTxt || null,
-        currency: "",
-        moq: "",
-      });
-    }
+    items.push({
+      sku: skuTxt,
+      title,
+      url: abs(listUrl, href),
+      img,
+      price: priceTxt || null,
+      currency: "",
+      moq: "",
+    });
   }
 
-  if (cardRoots.length)
-    cardRoots.find('a[href*="/product/"]').each((_i, a) => pushItem(a));
+  if (cardRoots.length) cardRoots.find('a[href*="/product/"]').each((_i, a) => pushItem(a));
   if (items.length === 0) {
     for (const c of candidates) {
-      const $cards = $(c.item);
-      if ($cards.length === 0) continue;
-      $cards.each((_i, el) =>
-        $(el)
-          .find('a[href*="/product/"]')
-          .each((_j, a) => pushItem(a))
-      );
+      const $cards = $(c.item); if ($cards.length === 0) continue;
+      $cards.each((_i, el) => $(el).find('a[href*="/product/"]').each((_j, a) => pushItem(a)));
       if (items.length > 0) break;
     }
   }
   return items;
 }
 
-// ---- 价格标准化 ----
+// ---------- 价格标准化 ----------
 function normalizePrice(str) {
   if (!str) return "";
   const s = String(str).replace(/\s+/g, " ").trim();
-  // 典型匹配：€ 12,34 / 12,34 € / 1.234,56 €
+  // 常见：€ 1.234,56 / 1.234,56 € / 12,34
   const m =
     s.match(/€\s*\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2})/) ||
     s.match(/\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2})\s*€/) ||
     s.match(/\d+[.,]\d{2}/);
   if (!m) return s;
   let v = m[0].replace(/\s+/g, " ");
-  // 统一成 € 0,00 风格（仅在没有 € 时补）
-  if (!/[€]/.test(v)) v = "€ " + v;
+  if (!/[€]/.test(v)) v = "€ " + v; // 无 € 则补上
   return v;
 }
 
-// ---- 详情页富化（更稳的价格/MOQ 提取）----
+// ---------- 从 JSON-LD 里取价格（优先） ----------
+function priceFromJsonLd($) {
+  let price = "", currency = "€";
+  $('script[type="application/ld+json"]').each((_i, el) => {
+    try {
+      const raw = $(el).contents().text().trim();
+      if (!raw) return;
+      const data = JSON.parse(raw);
+      const arr = Array.isArray(data) ? data : [data];
+      for (const obj of arr) {
+        if (!obj) continue;
+        const t = obj["@type"];
+        const isProduct = t === "Product" || (Array.isArray(t) && t.includes("Product"));
+        if (!isProduct) continue;
+        let offers = obj.offers;
+        if (!offers) continue;
+        offers = Array.isArray(offers) ? offers[0] : offers;
+        const p = offers.price ?? offers.lowPrice ?? offers.highPrice;
+        if (p != null && p !== "") {
+          price = String(p);
+          currency = offers.priceCurrency || currency;
+          break;
+        }
+      }
+    } catch {}
+  });
+  if (price) {
+    if (/eur|€/i.test(currency)) currency = "€";
+    return normalizePrice(`${currency} ${price}`);
+  }
+  return "";
+}
+
+// ---------- 详情页富化（价格 & MOQ） ----------
 async function enrichDetail(item) {
   try {
     const html = await fetchHtml(item.url);
     const $ = cheerio.load(html);
 
-    // 价格选择器尽可能全面，优先 meta@content
-    const priceCandidates = [
-      "meta[itemprop='price']",                 // <meta itemprop="price" content="12,34">
-      "[itemprop='price']",
-      ".price .amount",
-      ".price .value",
-      ".product-price",
-      ".price-value",
-      ".woocommerce-Price-amount",
-      ".amount",
-      ".price",                                 // 兜底（后处理提取数字）
-    ];
+    // 1) 先从 JSON-LD 拿
+    let priceText = priceFromJsonLd($);
 
-    let rawPrice = "";
-    for (const sel of priceCandidates) {
-      const $node = $(sel).first();
-      if ($node.length) {
-        rawPrice = $node.attr("content") || text($node);
-        if (rawPrice) break;
-      }
+    // 2) JSON-LD 没有再走选择器
+    if (!priceText) {
+      const priceSel = [
+        "meta[itemprop='price']",
+        "[itemprop='price']",
+        ".woocommerce-Price-amount",
+        ".price .amount",
+        ".price .value",
+        ".product-price",
+        ".price-value",
+        ".amount",
+        ".price" // 兜底
+      ].join(", ");
+      const $node = $(priceSel).first();
+      const raw = ($node.attr("content") || text($node) || "").trim();
+      if (raw) priceText = normalizePrice(raw);
     }
 
-    const moqSel =
-      ".moq, .min-order, .minimum, .minbestellmenge, .minimum-order, .minimum__value";
+    const moqSel = ".moq, .min-order, .minimum, .minbestellmenge, .minimum-order, .minimum__value";
     const moqText = text($(moqSel).first());
 
-    const norm = normalizePrice(rawPrice);
-    if (norm) item.price = norm;
+    if (priceText) item.price = priceText;
     if (moqText) item.moq = moqText;
-  } catch (e) {
-    // 忽略个别失败
+  } catch {
+    // ignore
   }
 }
 
-// ---- 解析总路由（带日志）----
+// ---------- 解析总路由 ----------
 app.get("/v1/api/catalog/parse", async (req, res) => {
   const listUrl = String(req.query.url || "").trim();
-  const limit = Math.max(
-    1,
-    Math.min(parseInt(String(req.query.limit || "50"), 10) || 50, 200)
-  );
+  const limit = Math.max(1, Math.min(parseInt(String(req.query.limit || "50"), 10) || 50, 200));
   const enrich = String(req.query.enrich || "").toLowerCase() === "true";
 
   if (!listUrl) return res.status(400).json({ ok: false, error: "missing url" });
@@ -230,7 +238,7 @@ app.get("/v1/api/catalog/parse", async (req, res) => {
     if (host.includes("s-impuls-shop.de")) {
       items = await parseSImpulsCatalog(listUrl, limit);
     } else {
-      items = []; // 未来在这里扩展更多站点/兜底
+      items = []; // 未来扩展其它站点
     }
 
     if (enrich && items.length) {
@@ -240,19 +248,10 @@ app.get("/v1/api/catalog/parse", async (req, res) => {
 
     const payload = { ok: true, url: listUrl, count: items.length, products: items, items };
     res.setHeader("X-Lang", "de");
-    console.log("[parse:done]", {
-      host,
-      count: items.length,
-      ms: Date.now() - t0,
-      enrich,
-    });
+    console.log("[parse:done]", { host, count: items.length, ms: Date.now() - t0, enrich });
     res.json(payload);
   } catch (err) {
-    console.error("[parse:fail]", {
-      url: listUrl,
-      ms: Date.now() - t0,
-      err: String(err?.message || err),
-    });
+    console.error("[parse:fail]", { url: listUrl, ms: Date.now() - t0, err: String(err?.message || err) });
     res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 });
