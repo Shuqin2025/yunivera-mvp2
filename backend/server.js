@@ -6,15 +6,14 @@ import * as cheerio from "cheerio";
 const app = express();
 app.use(cors({ origin: "*", exposedHeaders: ["X-Lang"] }));
 
-// 健康端点（多路径兼容）
 app.get(["/", "/healthz", "/health", "/api/health"], (_req, res) =>
   res.type("text/plain").send("ok")
 );
 
 app.get("/v1/api/__version", (_req, res) => {
   res.json({
-    version: "mvp-universal-parse-2025-09-14",
-    note: "S-Impuls + WooCommerce + Generic anchors; limit up to 200; JSON-LD price enrich.",
+    version: "mvp-universal-parse-2025-09-15-auto-schmuck",
+    note: "Add auto-schmuck.com parser; harden generic parser; limit up to 200; JSON-LD price enrich.",
   });
 });
 
@@ -50,7 +49,7 @@ function guessSkuFromTitle(title) {
   return m ? m[0] : "";
 }
 
-// ---------- 图片代理（供前端 ExcelJS 取图） ----------
+// ---------- 图片代理 ----------
 app.get("/v1/api/image", async (req, res) => {
   const url = String(req.query.url || "").trim();
   if (!url) return res.status(400).send("missing url");
@@ -74,7 +73,130 @@ app.get("/v1/api/image", async (req, res) => {
   }
 });
 
-// ---------- S-Impuls 专用解析 ----------
+/* =========================
+ *  站点专用解析：auto-schmuck.com
+ *  ========================= */
+async function parseAutoSchmuck(listUrl, limit = 50) {
+  const html = await fetchHtml(listUrl);
+  const $ = cheerio.load(html);
+  const items = [];
+  const seen = new Set();
+
+  // 1) 优先：卡片上的 “ANZEIGEN” 按钮
+  $('a').filter((_, a) => /anzeigen/i.test(text($(a)))).each((_, a) => {
+    if (items.length >= limit) return false;
+    const $a = $(a);
+    let href = $a.attr("href") || "";
+    href = abs(listUrl, href);
+    if (!href || seen.has(href)) return;
+
+    // 找到包含图片/价格的父卡片
+    let $card = $a.closest("div");
+    let hop = 0;
+    while (hop < 6 && $card.length && !$card.find("img").length) {
+      $card = $card.parent();
+      hop++;
+    }
+    if (!$card.length) $card = $a.parent();
+
+    // 图片
+    const $img = $card.find("img").first();
+    const src =
+      $img.attr("data-src") ||
+      $img.attr("data-original") ||
+      ($img.attr("srcset") || "").split(" ").find((s) => /^https?:/i.test(s)) ||
+      $img.attr("src") ||
+      "";
+    const img = abs(listUrl, (src || "").split("?")[0]);
+
+    // 标题（优先不是按钮本身的 a / 再找 h3/h2）
+    const $titleA = $card
+      .find('a[href]')
+      .filter((_, el) => el !== a && !/anzeigen/i.test(text($(el))))
+      .first();
+    const title =
+      ($titleA.attr("title") || "").trim() ||
+      text($titleA) ||
+      text($card.find("h3,h2").first()) ||
+      text($a); // 兜底
+
+    // 价格（类名或全文匹配）
+    let priceTxt =
+      text($card.find(".price,.product-price,.price-tag,.artbox-price,.product-list-price").first());
+    if (!priceTxt) {
+      const m = $card.text().match(/\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2})\s*(?:€|EUR)/i);
+      if (m) priceTxt = m[0].replace(/\s+/g, " ");
+    }
+
+    if (!title || !href) return;
+    items.push({
+      sku: guessSkuFromTitle(title),
+      title,
+      url: href,
+      img,
+      price: priceTxt || null,
+      currency: "",
+      moq: "",
+    });
+    seen.add(href);
+  });
+
+  // 2) 兜底：扫描含价格样式的块，必须含 img + a[href]
+  if (items.length === 0) {
+    $("div,li,article").each((_, el) => {
+      if (items.length >= limit) return false;
+      const $card = $(el);
+      const textAll = $card.text();
+      if (!/\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2})\s*(?:€|EUR)/i.test(textAll)) return;
+      if (!$card.find("img").length || !$card.find("a[href]").length) return;
+
+      const $alink = $card
+        .find("a[href]")
+        .filter((_, al) => {
+          const href = $(al).attr("href") || "";
+          return !/(anmelden|login|filter|warenkorb|cart)/i.test(href);
+        })
+        .first();
+      const href = abs(listUrl, $alink.attr("href") || "");
+      if (!href || seen.has(href)) return;
+
+      const $img = $card.find("img").first();
+      const src =
+        $img.attr("data-src") ||
+        $img.attr("data-original") ||
+        ($img.attr("srcset") || "").split(" ").find((s) => /^https?:/i.test(s)) ||
+        $img.attr("src") ||
+        "";
+      const img = abs(listUrl, (src || "").split("?")[0]);
+
+      const title =
+        ($alink.attr("title") || "").trim() ||
+        text($card.find("h3,h2,a").first());
+
+      const m = textAll.match(/\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2})\s*(?:€|EUR)/i);
+      const priceTxt = m ? m[0].replace(/\s+/g, " ") : "";
+
+      if (title && href) {
+        items.push({
+          sku: guessSkuFromTitle(title),
+          title,
+          url: href,
+          img,
+          price: priceTxt || null,
+          currency: "",
+          moq: "",
+        });
+        seen.add(href);
+      }
+    });
+  }
+
+  return items.slice(0, limit);
+}
+
+/* =========================
+ *  S-Impuls（保留）
+ *  ========================= */
 async function parseSImpulsCatalog(listUrl, limit = 50) {
   const html = await fetchHtml(listUrl);
   const $ = cheerio.load(html);
@@ -97,7 +219,7 @@ async function parseSImpulsCatalog(listUrl, limit = 50) {
       ($img.attr("srcset") || "").split(" ").find((s) => /^https?:/i.test(s)) ||
       $img.attr("src") ||
       "";
-    return abs(listUrl, (src || "").split("?")[0]); // 去尾参，利于缓存与代理
+    return abs(listUrl, (src || "").split("?")[0]);
   }
   function pushItem(aEl) {
     if (items.length >= limit) return;
@@ -135,7 +257,9 @@ async function parseSImpulsCatalog(listUrl, limit = 50) {
   return items;
 }
 
-// ---------- WooCommerce 常规解析 ----------
+/* =========================
+ *  WooCommerce（保留）
+ *  ========================= */
 function parseWooFromHtml($, listUrl, limit = 50) {
   const items = [];
   const $cards = $("ul.products li.product");
@@ -185,19 +309,28 @@ function parseWooFromHtml($, listUrl, limit = 50) {
   return items;
 }
 
-// ---------- 通用回退解析（多语言路径 /product|/produkt|/artikel 等） ----------
+/* =========================
+ *  通用回退：强化过滤，避免抓到币种/筛选项
+ *  ========================= */
 function parseGenericFromHtml($, listUrl, limit = 50) {
   const items = [];
   const seen = new Set();
 
+  const stopWord = /^(EUR|USD|GBP|CHF|CNY|HKD|JPY|AUD|CAD)$/i;
+
   const anchors = $("a[href]").toArray().filter((a) => {
-    const href = $(a).attr("href") || "";
+    const $a = $(a);
+    const t = text($a);
+    if (!t || t.length <= 2 || stopWord.test(t)) return false;
+    const href = $a.attr("href") || "";
     try {
       const u = new URL(href, listUrl);
       const p = (u.pathname || "").toLowerCase();
-      return /(product|produkt|artikel|item|sku|detail)/.test(p) &&
-             !/\.(jpg|jpeg|png|webp|gif)$/i.test(p) &&
-             !/(add-to-cart|cart|login|wishlist|compare)/i.test(u.search + p);
+      // 允许更宽泛的详情路由，同时排除明显的过滤/登录/购物车
+      const isDetail = /(product|produkt|artikel|item|sku|detail|details|view)/.test(p);
+      const isBad = /\.(jpg|jpeg|png|webp|gif|svg)$/i.test(p) ||
+                    /(add-to-cart|cart|login|wishlist|compare|filter)/i.test(u.search + p);
+      return isDetail && !isBad;
     } catch { return false; }
   });
 
@@ -208,10 +341,13 @@ function parseGenericFromHtml($, listUrl, limit = 50) {
     try { href = new URL(href, listUrl).href; } catch { continue; }
     if (seen.has(href)) continue;
 
-    // 尝试取卡片
     let $card = $a.closest("li,article,div"); if (!$card.length) $card = $a.parent();
-    const title = ($a.attr("title") || "").trim() || text($card.find("h3,h2,a").first()) || text($a);
-    if (!title) continue;
+
+    // 必须有图片 or 价格特征，避免误收导航/筛选
+    const txtAll = $card.text();
+    const hasPrice = /\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2})\s*(?:€|EUR)/i.test(txtAll);
+    const hasImg = $card.find("img").length > 0;
+    if (!hasImg && !hasPrice) continue;
 
     const $img = $card.find("img").first();
     let src =
@@ -221,8 +357,12 @@ function parseGenericFromHtml($, listUrl, limit = 50) {
       $img.attr("src") || "";
     const img = abs(listUrl, (src || "").split("?")[0]);
 
+    const title = ($a.attr("title") || "").trim() || text($card.find("h3,h2,a").first()) || text($a);
     const priceTxt =
-      text($card.find(".price,.product-price,.amount,.money,.price--default").first()) || "";
+      text($card.find(".price,.product-price,.amount,.money,.price--default").first()) ||
+      (txtAll.match(/\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2})\s*(?:€|EUR)/i)?.[0] || "");
+
+    if (!title) continue;
 
     items.push({
       sku: guessSkuFromTitle(title),
@@ -239,7 +379,9 @@ function parseGenericFromHtml($, listUrl, limit = 50) {
   return items;
 }
 
-// ---------- 价格标准化 + JSON-LD 读取 ----------
+/* =========================
+ *  价格标准化 + JSON-LD
+ *  ========================= */
 function normalizePrice(str) {
   if (!str) return "";
   const s = String(str).replace(/\s+/g, " ").trim();
@@ -252,7 +394,6 @@ function normalizePrice(str) {
   if (!/[€]/.test(v)) v = "€ " + v;
   return v;
 }
-
 function priceFromJsonLd($) {
   let price = "", currency = "€";
   $('script[type="application/ld+json"]').each((_i, el) => {
@@ -283,8 +424,6 @@ function priceFromJsonLd($) {
   }
   return "";
 }
-
-// ---------- 详情页富化（通用） ----------
 async function enrichDetail(item) {
   try {
     const html = await fetchHtml(item.url);
@@ -316,31 +455,32 @@ async function enrichDetail(item) {
   } catch {}
 }
 
-// ---------- 统一解析入口：自动识别 ----------
+/* =========================
+ *  统一入口
+ *  ========================= */
 async function parseUniversalCatalog(listUrl, limit = 50) {
-  // 1) 主站识别（S-Impuls）
   try {
     const host = new URL(listUrl).hostname;
+
     if (host.includes("s-impuls-shop.de")) {
       return await parseSImpulsCatalog(listUrl, limit);
     }
+    if (host.includes("auto-schmuck.com")) {
+      return await parseAutoSchmuck(listUrl, limit);
+    }
   } catch {}
 
-  // 2) 其它站点：先拉 HTML 做特征识别
   const html = await fetchHtml(listUrl);
   const $ = cheerio.load(html);
 
-  // WooCommerce（最常见）
+  // WooCommerce
   const wcCards = $("ul.products li.product");
-  if (wcCards.length) {
-    return parseWooFromHtml($, listUrl, limit);
-  }
+  if (wcCards.length) return parseWooFromHtml($, listUrl, limit);
 
   // 通用回退
   return parseGenericFromHtml($, listUrl, limit);
 }
 
-// ---------- 路由 ----------
 app.get("/v1/api/catalog/parse", async (req, res) => {
   const listUrl = String(req.query.url || "").trim();
   const limit = Math.max(1, Math.min(parseInt(String(req.query.limit || "50"), 10) || 50, 200));
@@ -354,18 +494,13 @@ app.get("/v1/api/catalog/parse", async (req, res) => {
 
   const t0 = Date.now();
   try {
-    console.log("[parse:start]", { url: listUrl, limit, enrich, enrichCount });
-
     const items = await parseUniversalCatalog(listUrl, limit);
-
     if (enrich && items.length) {
       await Promise.all(items.slice(0, enrichCount).map(enrichDetail));
     }
-
-    const payload = { ok: true, url: listUrl, count: items.length, products: items, items };
     res.setHeader("X-Lang", "de");
-    console.log("[parse:done]", { count: items.length, ms: Date.now() - t0, enrich, enrichCount });
-    res.json(payload);
+    res.json({ ok: true, url: listUrl, count: items.length, products: items, items });
+    console.log("[parse:done]", { url: listUrl, count: items.length, ms: Date.now() - t0, enrich, enrichCount });
   } catch (err) {
     console.error("[parse:fail]", { url: listUrl, ms: Date.now() - t0, err: String(err?.message || err) });
     res.status(500).json({ ok: false, error: String(err?.message || err) });
