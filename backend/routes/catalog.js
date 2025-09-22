@@ -1,8 +1,14 @@
 // backend/routes/catalog.js
-// ESM 路由：支持 GET/POST /v1/api/catalog/parse?url=...
+// 统一支持 GET/POST  /v1/api/catalog/parse
+// - 自动选择站点适配器（例如 sinotronic）
+// - 通用解析（s-impuls / OpenCart 风格）兜底
+// - 返回 { ok, source, count, items: [...] }
 
 import { Router } from "express";
 import * as cheerio from "cheerio";
+
+// 站点适配器（按需添加）
+import parseSinotronic from "../adapters/sinotronic.js";
 
 const router = Router();
 
@@ -33,97 +39,135 @@ function abs(origin, href = "") {
   }
 }
 
-/**
- * 从 s-impuls-shop 目录页抽取商品
- * 站点模版可能更新，所以选择器做了多备选与兜底。
- */
-function extractProducts(html, pageUrl) {
-  const $ = cheerio.load(html);
+// ───────────────────── 适配器选择 ─────────────────────
+function pickAdapterByUrl(url) {
+  const host = (() => {
+    try {
+      return new URL(url).hostname.toLowerCase();
+    } catch {
+      return "";
+    }
+  })();
 
-  // 常见承载容器（多备选）
-  let items = $(
-    "div.product-layout, div.product-grid .product-thumb, div.product-thumb, .product-list .product-layout"
-  );
-
-  // 兜底：如果外层没命中，再尝试商品卡片内部 class
-  if (items.length === 0) {
-    items = $("div[class*='product']:has(a, img)");
+  if (/sinotronic/i.test(host)) {
+    // 适配 sinotronic-e.com、sinotronic.de 等
+    return async ($, pageUrl, { limit = 50 } = {}) => {
+      // 约定：适配器返回 items: [{sku,title,url,img,price,moq}]
+      const items = await parseSinotronic($, pageUrl, limit);
+      return items;
+    };
   }
 
-  const products = [];
-  items.each((_, el) => {
+  // 返回 undefined 走通用解析
+  return undefined;
+}
+
+// ───────────────────── 通用解析（s-impuls 等） ─────────────────────
+function extractCommonProducts($, pageUrl) {
+  // 常见承载容器（多备选，兼容 OpenCart/OC 洋葱结构）
+  let cards = $(
+    "div.product-layout, div.product-grid .product-thumb, div.product-thumb, .product-list .product-layout"
+  );
+  if (cards.length === 0) {
+    // 兜底：如果外层没命中，再尝试商品卡片内部 class
+    cards = $("div[class*='product']:has(a, img)");
+  }
+
+  const out = [];
+  cards.each((_, el) => {
     const root = $(el);
 
-    // 名称（多备选）
-    const name =
+    const title =
       root.find(".caption a, .name a, .product-name a, a[title]").first().text().trim() ||
       root.find("img[alt]").attr("alt") ||
-      root.find("a").first().text().trim();
+      root.find("a").first().text().trim() ||
+      "";
 
-    // 链接
     const href =
-      root.find(".caption a, .name a, .product-name a, a[href*='product_id'], a[href]")
+      root
+        .find(".caption a, .name a, .product-name a, a[href*='product_id'], a[href]")
         .first()
         .attr("href") || "";
 
-    // 价格（多备选：price-new / price / .price）
     const priceTxt =
       root.find(".price-new, .price .price-new, .price").first().text().replace(/\s+/g, " ").trim() ||
       "";
 
-    // 图片
     const img =
       root.find("img[data-src]").attr("data-src") ||
       root.find("img[src]").attr("src") ||
       "";
 
-    if (name || href) {
-      products.push({
-        title: name || "",
+    if (title || href) {
+      out.push({
+        sku: "",
+        title,
         url: abs(pageUrl, href),
-        sku: "", // 目录页通常无 SKU，留空
-        price: priceTxt || null,
-        currency: null,
-        img: img ? abs(pageUrl, img) : null,
-        preview: "",
+        img: img ? abs(pageUrl, img) : "",
+        price: priceTxt || "",
+        moq: "",
       });
     }
   });
 
-  // 去重（按 url）
+  // 去重（按 url 或 title）
   const seen = new Set();
   const unique = [];
-  for (const p of products) {
+  for (const p of out) {
     const key = p.url || p.title;
     if (!key || seen.has(key)) continue;
     seen.add(key);
     unique.push(p);
   }
-
   return unique;
 }
 
-async function handleParse(targetUrl) {
+// ───────────────────── 主处理 ─────────────────────
+async function handleParse(targetUrl, opts = {}) {
   const html = await fetchHtml(targetUrl);
-  const products = extractProducts(html, targetUrl);
+  const $ = cheerio.load(html);
+
+  // 优先用站点适配器
+  const adapter = pickAdapterByUrl(targetUrl);
+  let items;
+  if (typeof adapter === "function") {
+    items = await adapter($, targetUrl, opts);
+  } else {
+    items = extractCommonProducts($, targetUrl);
+  }
+
+  // 截断上限
+  const limit = Math.max(1, Math.min(Number(opts.limit || 50) || 50, 500));
+  if (items.length > limit) items = items.slice(0, limit);
 
   return {
     ok: true,
     source: targetUrl,
-    count: products.length,
-    products,
+    count: items.length,
+    items, // 统一叫 items；前端也兼容 products
+    products: items,
   };
 }
 
-// ---- 路由 ----
+// 读取参数（GET 的 query 或 POST 的 body）
+function readParams(req) {
+  const src = req.method === "GET" ? req.query : (req.body || {});
+  const url = String((src && src.url) || "").trim();
+  const limit = Number(src && src.limit) || 50;
+  const img = String((src && src.img) || "").trim(); // 目前不在后端做 base64（前端导出时会用 /image64）
+  const imgCount = Number(src && src.imgCount) || limit;
+  return { url, limit, img, imgCount };
+}
 
-// GET /v1/api/catalog/parse?url=...
+// ───────────────────── 路由 ─────────────────────
+
+// GET  /v1/api/catalog/parse?url=...
 router.get("/parse", async (req, res) => {
-  const url = String(req.query.url || "").trim();
+  const { url, limit, img, imgCount } = readParams(req);
   if (!url) return res.status(400).json({ ok: false, error: "MISSING_URL" });
 
   try {
-    const data = await handleParse(url);
+    const data = await handleParse(url, { limit, img, imgCount });
     res.json(data);
   } catch (err) {
     console.error("[catalog.parse][GET] error:", err);
@@ -131,13 +175,13 @@ router.get("/parse", async (req, res) => {
   }
 });
 
-// POST /v1/api/catalog/parse  body: { url }
+// POST /v1/api/catalog/parse   body: { url, limit, img, imgCount }
 router.post("/parse", async (req, res) => {
-  const url = String((req.body && req.body.url) || "").trim();
+  const { url, limit, img, imgCount } = readParams(req);
   if (!url) return res.status(400).json({ ok: false, error: "MISSING_URL" });
 
   try {
-    const data = await handleParse(url);
+    const data = await handleParse(url, { limit, img, imgCount });
     res.json(data);
   } catch (err) {
     console.error("[catalog.parse][POST] error:", err);
