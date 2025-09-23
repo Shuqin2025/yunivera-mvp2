@@ -1,192 +1,136 @@
 // backend/routes/catalog.js
-// 统一支持 GET/POST  /v1/api/catalog/parse
-// - 自动选择站点适配器（例如 sinotronic）
-// - 通用解析（s-impuls / OpenCart 风格）兜底
-// - 返回 { ok, source, count, items: [...] }
-
-import { Router } from "express";
+import express from "express";
+import fetch from "node-fetch";
 import * as cheerio from "cheerio";
+import iconv from "iconv-lite";
+import jschardet from "jschardet";
+import { URL as NodeURL } from "url";
 
-// 站点适配器（按需添加）
-import parseSinotronic from "../adapters/sinotronic.js";
+// 你的适配器（你已经创建了）
+import sinotronic from "../adapters/sinotronic.js";
 
-const router = Router();
+const router = express.Router();
 
-// 更像浏览器的请求头（不少站点需要这个才会返回完整 HTML）
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
 
-async function fetchHtml(targetUrl) {
-  const res = await fetch(targetUrl, {
+/** 智能获取文本：自动处理非 UTF-8 页面（gbk/gb2312 等） */
+async function fetchHtmlSmart(pageUrl) {
+  const res = await fetch(pageUrl, {
+    redirect: "follow",
     headers: {
-      "user-agent": UA,
-      "accept-language": "de,en;q=0.8,zh;q=0.7",
-      accept:
-        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+      "User-Agent": UA,
+      Accept:
+        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+      "Cache-Control": "no-cache",
     },
   });
+
   if (!res.ok) {
-    throw new Error(`HTTP ${res.status} when fetching ${targetUrl}`);
+    throw new Error(`fetch ${pageUrl} failed: ${res.status} ${res.statusText}`);
   }
-  return await res.text();
-}
 
-function abs(origin, href = "") {
+  // node-fetch@3：arrayBuffer
+  const buf = Buffer.from(await res.arrayBuffer());
+
+  // 1) 从 Content-Type 里拿 charset
+  const ctype = res.headers.get("content-type") || "";
+  const m = ctype.match(/charset=([^;]+)/i);
+  let enc = m && m[1] ? m[1].trim() : "";
+
+  // 2) 没有就自动探测
+  if (!enc) {
+    const det = jschardet.detect(buf);
+    if (det && det.encoding) enc = det.encoding;
+  }
+
+  // 3) 兜底用 utf-8
+  if (!enc) enc = "utf-8";
+
   try {
-    return new URL(href, origin).href;
+    return iconv.decode(buf, enc);
   } catch {
-    return href || origin;
+    // 保险：解码异常时直接按 utf-8
+    return buf.toString("utf-8");
   }
 }
 
-// ───────────────────── 适配器选择 ─────────────────────
-function pickAdapterByUrl(url) {
+/** 可选：把图片转 base64（只处理前 N 条，避免过慢） */
+async function embedImagesBase64(items, maxCount = 5) {
+  const tasks = items.slice(0, maxCount).map(async (it) => {
+    if (!it.img) return;
+    try {
+      const r = await fetch(it.img, {
+        headers: { "User-Agent": UA },
+      });
+      if (!r.ok) return;
+      const buf = Buffer.from(await r.arrayBuffer());
+      const mime = r.headers.get("content-type") || "image/jpeg";
+      it.img_b64 = `data:${mime};base64,${buf.toString("base64")}`;
+    } catch {
+      /* 忽略个别失败 */
+    }
+  });
+  await Promise.allSettled(tasks);
+}
+
+/** 统一的解析处理（GET 旧风格 & POST 新风格都会走它） */
+async function handleParse(req, res) {
+  const isGet = req.method === "GET";
+  const url = (isGet ? req.query.url : req.body?.url) || "";
+  const limitRaw = (isGet ? req.query.limit : req.body?.limit) ?? 50;
+  const imgOpt = (isGet ? req.query.img : req.body?.img) || "";
+  const imgCountRaw = (isGet ? req.query.imgCount : req.body?.imgCount) ?? 5;
+
+  const limit = Math.max(1, Number(limitRaw) || 50);
+  const imgCount = Math.max(0, Number(imgCountRaw) || 5);
+
+  if (!url) {
+    return res.status(400).json({ ok: false, error: "missing url" });
+  }
+
+  let html;
+  try {
+    html = await fetchHtmlSmart(url);
+  } catch (e) {
+    return res
+      .status(502)
+      .json({ ok: false, error: "fetch failed", detail: String(e.message) });
+  }
+
+  const $ = cheerio.load(html, { decodeEntities: false });
   const host = (() => {
     try {
-      return new URL(url).hostname.toLowerCase();
+      return new NodeURL(url).hostname || "";
     } catch {
       return "";
     }
   })();
 
+  // 根据域名选择适配器
+  let items = [];
   if (/sinotronic/i.test(host)) {
-    // 适配 sinotronic-e.com、sinotronic.de 等
-    return async ($, pageUrl, { limit = 50 } = {}) => {
-      // 约定：适配器返回 items: [{sku,title,url,img,price,moq}]
-      const items = await parseSinotronic($, pageUrl, limit);
-      return items;
-    };
-  }
-
-  // 返回 undefined 走通用解析
-  return undefined;
-}
-
-// ───────────────────── 通用解析（s-impuls 等） ─────────────────────
-function extractCommonProducts($, pageUrl) {
-  // 常见承载容器（多备选，兼容 OpenCart/OC 洋葱结构）
-  let cards = $(
-    "div.product-layout, div.product-grid .product-thumb, div.product-thumb, .product-list .product-layout"
-  );
-  if (cards.length === 0) {
-    // 兜底：如果外层没命中，再尝试商品卡片内部 class
-    cards = $("div[class*='product']:has(a, img)");
-  }
-
-  const out = [];
-  cards.each((_, el) => {
-    const root = $(el);
-
-    const title =
-      root.find(".caption a, .name a, .product-name a, a[title]").first().text().trim() ||
-      root.find("img[alt]").attr("alt") ||
-      root.find("a").first().text().trim() ||
-      "";
-
-    const href =
-      root
-        .find(".caption a, .name a, .product-name a, a[href*='product_id'], a[href]")
-        .first()
-        .attr("href") || "";
-
-    const priceTxt =
-      root.find(".price-new, .price .price-new, .price").first().text().replace(/\s+/g, " ").trim() ||
-      "";
-
-    const img =
-      root.find("img[data-src]").attr("data-src") ||
-      root.find("img[src]").attr("src") ||
-      "";
-
-    if (title || href) {
-      out.push({
-        sku: "",
-        title,
-        url: abs(pageUrl, href),
-        img: img ? abs(pageUrl, img) : "",
-        price: priceTxt || "",
-        moq: "",
-      });
-    }
-  });
-
-  // 去重（按 url 或 title）
-  const seen = new Set();
-  const unique = [];
-  for (const p of out) {
-    const key = p.url || p.title;
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    unique.push(p);
-  }
-  return unique;
-}
-
-// ───────────────────── 主处理 ─────────────────────
-async function handleParse(targetUrl, opts = {}) {
-  const html = await fetchHtml(targetUrl);
-  const $ = cheerio.load(html);
-
-  // 优先用站点适配器
-  const adapter = pickAdapterByUrl(targetUrl);
-  let items;
-  if (typeof adapter === "function") {
-    items = await adapter($, targetUrl, opts);
+    // 你的 sinotronic 适配器：函数签名 parse($, { url, limit })
+    items = await sinotronic($, { url, limit });
   } else {
-    items = extractCommonProducts($, targetUrl);
+    // 其它站点仍走你们原有/默认逻辑的话，可在这里继续分发或写一个兜底
+    // 为了避免误导，这里先空着，返回空数组即表示“无匹配适配器”
+    items = [];
   }
 
-  // 截断上限
-  const limit = Math.max(1, Math.min(Number(opts.limit || 50) || 50, 500));
-  if (items.length > limit) items = items.slice(0, limit);
+  // 可选：图片转 base64
+  if ((imgOpt || "").toLowerCase() === "base64" && items.length) {
+    await embedImagesBase64(items, imgCount);
+  }
 
-  return {
-    ok: true,
-    source: targetUrl,
-    count: items.length,
-    items, // 统一叫 items；前端也兼容 products
-    products: items,
-  };
+  return res.json({ ok: true, items });
 }
 
-// 读取参数（GET 的 query 或 POST 的 body）
-function readParams(req) {
-  const src = req.method === "GET" ? req.query : (req.body || {});
-  const url = String((src && src.url) || "").trim();
-  const limit = Number(src && src.limit) || 50;
-  const img = String((src && src.img) || "").trim(); // 目前不在后端做 base64（前端导出时会用 /image64）
-  const imgCount = Number(src && src.imgCount) || limit;
-  return { url, limit, img, imgCount };
-}
+// 新风格：POST
+router.post("/v1/api/catalog/parse", handleParse);
 
-// ───────────────────── 路由 ─────────────────────
-
-// GET  /v1/api/catalog/parse?url=...
-router.get("/parse", async (req, res) => {
-  const { url, limit, img, imgCount } = readParams(req);
-  if (!url) return res.status(400).json({ ok: false, error: "MISSING_URL" });
-
-  try {
-    const data = await handleParse(url, { limit, img, imgCount });
-    res.json(data);
-  } catch (err) {
-    console.error("[catalog.parse][GET] error:", err);
-    res.status(500).json({ ok: false, error: String(err?.message || err) });
-  }
-});
-
-// POST /v1/api/catalog/parse   body: { url, limit, img, imgCount }
-router.post("/parse", async (req, res) => {
-  const { url, limit, img, imgCount } = readParams(req);
-  if (!url) return res.status(400).json({ ok: false, error: "MISSING_URL" });
-
-  try {
-    const data = await handleParse(url, { limit, img, imgCount });
-    res.json(data);
-  } catch (err) {
-    console.error("[catalog.parse][POST] error:", err);
-    res.status(500).json({ ok: false, error: String(err?.message || err) });
-  }
-});
+// 旧前端风格：GET（自动走同一个处理器）
+router.get("/v1/api/catalog/parse", handleParse);
 
 export default router;
