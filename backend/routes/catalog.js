@@ -6,7 +6,7 @@ import iconv from "iconv-lite";
 import jschardet from "jschardet";
 import { URL as NodeURL } from "url";
 
-// 你的适配器（你已经创建了）
+// 你的适配器（ESM 默认导出）
 import sinotronic from "../adapters/sinotronic.js";
 
 const router = express.Router();
@@ -20,8 +20,7 @@ async function fetchHtmlSmart(pageUrl) {
     redirect: "follow",
     headers: {
       "User-Agent": UA,
-      Accept:
-        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
       "Cache-Control": "no-cache",
     },
@@ -34,7 +33,7 @@ async function fetchHtmlSmart(pageUrl) {
   // node-fetch@3：arrayBuffer
   const buf = Buffer.from(await res.arrayBuffer());
 
-  // 1) 从 Content-Type 里拿 charset
+  // 1) Content-Type 里的 charset
   const ctype = res.headers.get("content-type") || "";
   const m = ctype.match(/charset=([^;]+)/i);
   let enc = m && m[1] ? m[1].trim() : "";
@@ -45,13 +44,12 @@ async function fetchHtmlSmart(pageUrl) {
     if (det && det.encoding) enc = det.encoding;
   }
 
-  // 3) 兜底用 utf-8
+  // 3) 兜底 utf-8
   if (!enc) enc = "utf-8";
 
   try {
     return iconv.decode(buf, enc);
   } catch {
-    // 保险：解码异常时直接按 utf-8
     return buf.toString("utf-8");
   }
 }
@@ -61,15 +59,13 @@ async function embedImagesBase64(items, maxCount = 5) {
   const tasks = items.slice(0, maxCount).map(async (it) => {
     if (!it.img) return;
     try {
-      const r = await fetch(it.img, {
-        headers: { "User-Agent": UA },
-      });
+      const r = await fetch(it.img, { headers: { "User-Agent": UA } });
       if (!r.ok) return;
       const buf = Buffer.from(await r.arrayBuffer());
       const mime = r.headers.get("content-type") || "image/jpeg";
       it.img_b64 = `data:${mime};base64,${buf.toString("base64")}`;
     } catch {
-      /* 忽略个别失败 */
+      // 单个失败忽略
     }
   });
   await Promise.allSettled(tasks);
@@ -114,8 +110,7 @@ async function handleParse(req, res) {
     // 你的 sinotronic 适配器：函数签名 parse($, { url, limit })
     items = await sinotronic($, { url, limit });
   } else {
-    // 其它站点仍走你们原有/默认逻辑的话，可在这里继续分发或写一个兜底
-    // 为了避免误导，这里先空着，返回空数组即表示“无匹配适配器”
+    // 其它站点：你可以在这里继续分发到不同适配器
     items = [];
   }
 
