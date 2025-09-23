@@ -1,97 +1,96 @@
-// adapters/sinotronic.js
-import fetch from "node-fetch";
-import iconv from "iconv-lite";
-import * as cheerio from "cheerio";
-import { URL as NodeURL } from "url";
+// backend/adapters/sinotronic.js
+// 适配 sinotronic-e.com 的目录页，带多种备用选择器与懒加载图片处理
+const { URL } = require('url');
 
-function detectEncoding(headBuf) {
-  // 只扫前 2KB 查 meta charset，找不到就默认 utf-8
-  const s = headBuf.toString("ascii").toLowerCase();
-  const m = s.match(/charset=["']?([\w-]+)/i);
-  if (!m) return "utf-8";
-  const enc = m[1].replace(/_/g, "-");
-  // 常见别名统一
-  if (enc === "gb2312" || enc === "gbk") return "gbk";
-  return enc;
+function abs(base, href) {
+  try { return new URL(href || '', base).toString(); } catch { return href || ''; }
 }
 
-function abs(base, maybe) {
-  if (!maybe) return "";
-  try {
-    return new NodeURL(maybe, base).href;
-  } catch {
-    return maybe;
+function pickImg($img) {
+  if (!$img || !$img.length) return '';
+  const attrs = ['src', 'data-src', 'data-original', 'data-echo', 'data-lazy', 'data-img', 'data-url'];
+  for (const a of attrs) {
+    const v = ($img.attr(a) || '').trim();
+    if (v) return v;
   }
+  // 兼容 style="background-image:url(...)"
+  const m = ($img.attr('style') || '').match(/url\((.*?)\)/i);
+  return m && m[1] ? m[1].replace(/['"]/g, '') : '';
 }
 
-/**
- * 解析 sinotronic-e 的目录页（也可作为通用静态列表兜底）
- * @param {string} url
- * @param {number} limit
- * @returns {Promise<{items: Array}>}
- */
-export async function parse(url, limit = 50) {
-  const ua =
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
-  const res = await fetch(url, {
-    headers: {
-      "user-agent": ua,
-      "accept-language": "zh-CN,zh;q=0.9,en;q=0.8",
-      "cache-control": "no-cache",
-      pragma: "no-cache",
-    },
-  });
-  if (!res.ok) {
-    throw new Error(`fetch page ${res.status}`);
-  }
-  const buf = Buffer.from(await res.arrayBuffer());
-  const enc = detectEncoding(buf.subarray(0, 2048));
-  const html = iconv.decode(buf, enc);
+module.exports = function parseSinotronic($, ctx) {
+  const out = [];
+  const limit = Number(ctx.limit || 50);
+  const base = ctx.url;
 
-  const $ = cheerio.load(html);
-  const items = [];
+  // ① 主选择器：常见产品列表 li / item 卡片
+  const main = $(
+    [
+      'ul li:has(a)',            // 通用 ul>li
+      '.list li:has(a)',
+      '.prolist li:has(a)',
+      '.products li:has(a)',
+      '.product-list li:has(a)',
+      '.goods-list li:has(a)',
+      '.grid li:has(a)',
+      'div.product',             // 常见卡片
+      'div.goods',
+      '.product-item',
+      '.goods-item'
+    ].join(',')
+  );
 
-  // 尝试一些常见列表结构
-  // 1) 任意带图片的 <a>
-  $("a:has(img)").each((_, a) => {
-    if (items.length >= limit) return false;
-    const $a = $(a);
-    const $img = $a.find("img").first();
-    const title =
-      ($a.attr("title") || $img.attr("alt") || $a.text() || "").trim();
-    const href = abs(url, $a.attr("href"));
-    const img =
-      abs(url, $img.attr("data-src")) || abs(url, $img.attr("src")) || "";
-    // 极端情况下 title 为空就跳过
-    if (!title && !href) return;
-    items.push({
-      sku: title,          // 作为“货号/名称”
-      desc: "",            // 暂无可用描述就留空
-      minQty: "",          // 起订量未知留空
-      price: "",           // 单价未知留空
+  main.each((_, el) => {
+    if (out.length >= limit) return false;
+    const $el = $(el);
+    const $a = $el.find('a[href]').first();
+    const href = abs(base, $a.attr('href'));
+    if (!href) return;
+
+    const $img = $el.find('img').first();
+    let title =
+      ($img.attr('alt') || $a.attr('title') || $a.text() || '')
+        .replace(/\s+/g, ' ')
+        .trim();
+    if (!title) return;
+
+    const img = abs(base, pickImg($img));
+
+    out.push({
+      sku: title,
+      title,
+      url: href,
       img,
-      link: href,
+      price: '',
+      currency: '',
+      moq: ''
     });
   });
 
-  // 2) 如果还没抓到，兜底再找带文本的 <li>/<div> 里的链接
-  if (items.length === 0) {
-    $("li a, .product a, .list a").each((_, a) => {
-      if (items.length >= limit) return false;
+  // ② 兜底：整页所有 a[href]（过滤掉 # / javascript:）
+  if (out.length === 0) {
+    $('a[href]').each((_, a) => {
+      if (out.length >= limit) return false;
       const $a = $(a);
-      const text = ($a.attr("title") || $a.text() || "").trim();
-      const href = abs(url, $a.attr("href"));
-      if (!text || !href) return;
-      items.push({
+      const href = ($a.attr('href') || '').trim();
+      if (!href || /^(javascript:|#)/i.test(href)) return;
+
+      const text = ($a.text() || '').replace(/\s+/g, ' ').trim();
+      if (!text) return;
+
+      const img = abs(base, pickImg($a.find('img').first()));
+
+      out.push({
         sku: text,
-        desc: "",
-        minQty: "",
-        price: "",
-        img: "",
-        link: href,
+        title: text,
+        url: abs(base, href),
+        img,
+        price: '',
+        currency: '',
+        moq: ''
       });
     });
   }
 
-  return { items };
-}
+  return out;
+};
