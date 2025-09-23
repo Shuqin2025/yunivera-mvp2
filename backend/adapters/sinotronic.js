@@ -1,96 +1,134 @@
 // backend/adapters/sinotronic.js
-// 适配 sinotronic-e.com 的目录页，带多种备用选择器与懒加载图片处理
-const { URL } = require('url');
+// ESM 版本：适配 http://www.sinotronic-e.com 的静态目录页
+import { URL as NodeURL } from "url";
 
 function abs(base, href) {
-  try { return new URL(href || '', base).toString(); } catch { return href || ''; }
+  try {
+    return new NodeURL(href || "", base).toString();
+  } catch {
+    return href || "";
+  }
 }
 
 function pickImg($img) {
-  if (!$img || !$img.length) return '';
-  const attrs = ['src', 'data-src', 'data-original', 'data-echo', 'data-lazy', 'data-img', 'data-url'];
+  if (!$img || !$img.length) return "";
+  const attrs = [
+    "src",
+    "data-src",
+    "data-original",
+    "data-echo",
+    "data-lazy",
+    "data-img",
+    "data-url",
+  ];
   for (const a of attrs) {
-    const v = ($img.attr(a) || '').trim();
+    const v = ($img.attr(a) || "").trim();
     if (v) return v;
   }
   // 兼容 style="background-image:url(...)"
-  const m = ($img.attr('style') || '').match(/url\((.*?)\)/i);
-  return m && m[1] ? m[1].replace(/['"]/g, '') : '';
+  const m = ($img.attr("style") || "").match(/url\((.*?)\)/i);
+  return m && m[1] ? m[1].replace(/['"]/g, "") : "";
 }
 
-module.exports = function parseSinotronic($, ctx) {
-  const out = [];
-  const limit = Number(ctx.limit || 50);
-  const base = ctx.url;
+function normText(txt = "") {
+  return String(txt).replace(/\s+/g, " ").replace(/[\r\n\t]/g, " ").trim();
+}
 
-  // ① 主选择器：常见产品列表 li / item 卡片
-  const main = $(
-    [
-      'ul li:has(a)',            // 通用 ul>li
-      '.list li:has(a)',
-      '.prolist li:has(a)',
-      '.products li:has(a)',
-      '.product-list li:has(a)',
-      '.goods-list li:has(a)',
-      '.grid li:has(a)',
-      'div.product',             // 常见卡片
-      'div.goods',
-      '.product-item',
-      '.goods-item'
-    ].join(',')
+function isNavText(t) {
+  const x = t.toLowerCase();
+  return (
+    !x ||
+    x === "#" ||
+    /^javascript:/i.test(x) ||
+    /(首页|尾页|上一页|下一页|more|zurück|weiter|page)/i.test(x)
   );
+}
 
-  main.each((_, el) => {
+export default function parseSinotronic($, ctx = {}) {
+  const out = [];
+  const limit = Math.max(1, Number(ctx.limit || 50));
+  const base = ctx.url || "";
+
+  // ① 常见产品列表（li / 卡片）
+  const selectors = [
+    "ul li:has(a)", // 通用 ul>li
+    ".list li:has(a)",
+    ".prolist li:has(a)",
+    ".products li:has(a)",
+    ".product-list li:has(a)",
+    ".goods-list li:has(a)",
+    ".grid li:has(a)",
+    "div.product",
+    "div.goods",
+    ".product-item",
+    ".goods-item",
+    // 兼容静态表格类列表
+    "table tr:has(a)",
+  ].join(",");
+
+  $(selectors).each((_, el) => {
     if (out.length >= limit) return false;
+
     const $el = $(el);
-    const $a = $el.find('a[href]').first();
-    const href = abs(base, $a.attr('href'));
+    // 取第一个链接
+    const $a = $el.find("a[href]").first();
+    const href = abs(base, $a.attr("href"));
     if (!href) return;
 
-    const $img = $el.find('img').first();
+    // 候选标题：img@alt > a@title > a.text > 同行/同列文本
+    const $img = $el.find("img").first();
     let title =
-      ($img.attr('alt') || $a.attr('title') || $a.text() || '')
-        .replace(/\s+/g, ' ')
-        .trim();
-    if (!title) return;
+      normText($img.attr("alt")) ||
+      normText($a.attr("title")) ||
+      normText($a.text());
+
+    if (!title) {
+      // 再往周围找一找
+      title =
+        normText($el.text()) ||
+        normText($el.closest("tr").text()) ||
+        normText($a.closest("td").text());
+    }
+    title = normText(title);
+    if (!title || isNavText(title)) return;
 
     const img = abs(base, pickImg($img));
 
     out.push({
-      sku: title,
-      title,
+      sku: title, // 先把标题当货号展示
+      desc: title,
       url: href,
       img,
-      price: '',
-      currency: '',
-      moq: ''
+      price: "",
+      currency: "",
+      moq: "",
     });
   });
 
-  // ② 兜底：整页所有 a[href]（过滤掉 # / javascript:）
+  // ② 兜底：全页 a[href]（避免空军）
   if (out.length === 0) {
-    $('a[href]').each((_, a) => {
+    $("a[href]").each((_, a) => {
       if (out.length >= limit) return false;
       const $a = $(a);
-      const href = ($a.attr('href') || '').trim();
+      const href = ($a.attr("href") || "").trim();
       if (!href || /^(javascript:|#)/i.test(href)) return;
 
-      const text = ($a.text() || '').replace(/\s+/g, ' ').trim();
-      if (!text) return;
+      const text = normText($a.text());
+      if (!text || isNavText(text)) return;
 
-      const img = abs(base, pickImg($a.find('img').first()));
+      const img = abs(base, pickImg($a.find("img").first()));
 
       out.push({
         sku: text,
-        title: text,
+        desc: text,
         url: abs(base, href),
         img,
-        price: '',
-        currency: '',
-        moq: ''
+        price: "",
+        currency: "",
+        moq: "",
       });
     });
   }
 
-  return out;
-};
+  return out.slice(0, limit);
+}
