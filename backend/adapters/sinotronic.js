@@ -49,35 +49,30 @@ async function fetchHtml(url) {
   const res = await axios.get(url, {
     responseType: "arraybuffer",
     headers: {
-      // 给点像浏览器的头，减少被挡的概率
+      // 更像浏览器，降低被拦截概率
       "User-Agent":
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
       Accept:
         "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
       Referer: new URL(url).origin + "/",
     },
-    // 适度超时，避免长时间挂起
     timeout: 20000,
     validateStatus: () => true,
   });
 
   const buf = Buffer.from(res.data);
-  let charset =
-    normalizeCharset(res.headers["content-type"] || "") ||
-    normalizeCharset("");
+  let charset = normalizeCharset(res.headers["content-type"] || "");
 
-  // headers 没带就用内容探测
-  if (charset === "utf-8") {
-    try {
-      const head = buf.slice(0, 4096).toString("ascii");
-      const m =
-        head.match(/<meta[^>]+charset=["']?([\w-]+)["']?/i) ||
-        head.match(/charset=([\w-]+)/i);
-      if (m) charset = normalizeCharset(m[1]);
-    } catch {}
-  }
-  if (charset === "utf-8") {
-    // 兜底再探测一次
+  // 从内容里再探测一次
+  try {
+    const head = buf.slice(0, 4096).toString("ascii");
+    const m =
+      head.match(/<meta[^>]+charset=["']?([\w-]+)["']?/i) ||
+      head.match(/charset=([\w-]+)/i);
+    if (m) charset = normalizeCharset(m[1]);
+  } catch {}
+
+  if (!charset || charset === "utf-8") {
     try {
       const det = jschardet.detect(buf);
       if (det && det.encoding) charset = normalizeCharset(det.encoding);
@@ -95,7 +90,7 @@ export async function parse(url, { limit = 50 } = {}) {
 
   const items = [];
 
-  // 1) 主选择器：官方列表容器
+  // 1) 官方列表容器 (你页面右侧 HTML 片段显示：#productlist > li > a > img)
   $("#productlist li").each((_, li) => {
     const $li = $(li);
     const $a = $li.find("a").first();
@@ -112,8 +107,8 @@ export async function parse(url, { limit = 50 } = {}) {
 
     if (title || img || link) {
       items.push({
-        sku: title, // SKU/名称：该站并无明确货号，只能用标题
-        desc: "", // 该站列表也无描述，保持空
+        sku: title,     // 该站没有明确货号，只能用标题
+        desc: "",       // 列表无描述
         img,
         link,
         minQty: "",
@@ -124,38 +119,40 @@ export async function parse(url, { limit = 50 } = {}) {
 
   // 2) 备选结构（有些频道模板不同）
   if (items.length === 0) {
-    $(".productlist li, .proList li, .product_item").each((_, li) => {
-      const $li = $(li);
-      const $a = $li.find("a").first();
-      const $img = $li.find("img").first();
+    $(".productlist li, .proList li, .product_item, ul.productlist li").each(
+      (_, li) => {
+        const $li = $(li);
+        const $a = $li.find("a").first();
+        const $img = $li.find("img").first();
 
-      const link = abs(url, $a.attr("href"));
-      const img = abs(url, pickImg($img));
-      const title = pick(
-        $img.attr("alt"),
-        $img.attr("title"),
-        $a.attr("title"),
-        $a.text(),
-        $li.find("h3,h4").first().text()
-      );
+        const link = abs(url, $a.attr("href"));
+        const img = abs(url, pickImg($img));
+        const title = pick(
+          $img.attr("alt"),
+          $img.attr("title"),
+          $a.attr("title"),
+          $a.text(),
+          $li.find("h3,h4").first().text()
+        );
 
-      if (title || img || link) {
-        items.push({
-          sku: title,
-          desc: "",
-          img,
-          link,
-          minQty: "",
-          price: "",
-        });
+        if (title || img || link) {
+          items.push({
+            sku: title,
+            desc: "",
+            img,
+            link,
+            minQty: "",
+            price: "",
+          });
+        }
       }
-    });
+    );
   }
 
-  // 限制数量
+  // 限制数量，保持网关/前端预期结构
   const out = items.slice(0, Math.max(1, Number(limit) || 50));
   return { ok: true, url, count: out.length, items: out };
 }
 
-// 统一导出给路由用
 export default { matches, parse };
+
