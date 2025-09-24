@@ -57,7 +57,7 @@ async function fetchHtmlSmart(pageUrl) {
     if (det && det.encoding) enc = det.encoding;
   }
 
-  // 4) 按域名兜底（sinotronic 大概率是 gbk/gb2312）
+  // 4) 按域名兜底（sinotronic 大概率 gbk/gb2312）
   if (!enc && /sinotronic/i.test(u.hostname)) enc = "gbk";
 
   // 5) 没头绪就 utf-8
@@ -106,7 +106,15 @@ function extractCommonProducts($, pageUrl) {
     const href = abs(pageUrl, a.attr("href") || "");
     const img = abs(pageUrl, imgEl.attr("src") || "");
 
-    out.push({ sku: title, title, url: href, img, price: "", currency: "", moq: "" });
+    out.push({
+      sku: title,
+      title,
+      url: href,
+      img,
+      price: "",
+      currency: "",
+      moq: "",
+    });
   });
 
   return out;
@@ -194,7 +202,13 @@ async function handleParse(req, res) {
     );
   }
 
-  return res.json({ ok: true, source: targetUrl, count: items.length, items, products: items });
+  return res.json({
+    ok: true,
+    source: targetUrl,
+    count: items.length,
+    items,
+    products: items,
+  });
 }
 
 // 统一两个入口
