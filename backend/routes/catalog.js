@@ -6,15 +6,14 @@ import iconv from "iconv-lite";
 import jschardet from "jschardet";
 import { URL as NodeURL } from "url";
 
-// 站点适配器
-import parseSinotronic from "../adapters/sinotronic.js";
+// 站点适配器（ESM 导入为命名空间，以便调用 .parse）
+import * as sinotronic from "../adapters/sinotronic.js";
 
 const router = express.Router();
 
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
 
-/** 绝对化 URL */
 function abs(origin, href = "") {
   try {
     return new NodeURL(href, origin).href;
@@ -23,7 +22,7 @@ function abs(origin, href = "") {
   }
 }
 
-/** 抓取并智能转码（含编码探测 debug） */
+/** 抓取并智能转码（带编码 debug） */
 async function fetchHtmlSmart(pageUrl) {
   const u = new NodeURL(pageUrl);
   const origin = `${u.protocol}//${u.host}`;
@@ -32,46 +31,41 @@ async function fetchHtmlSmart(pageUrl) {
     redirect: "follow",
     headers: {
       "User-Agent": UA,
-      "Accept":
+      Accept:
         "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
       "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,de;q=0.7",
-      "Cache-Control": "no-cache",
       Referer: origin,
+      "Cache-Control": "no-cache",
     },
   });
-
-  if (!res.ok) {
-    throw new Error(`fetch ${pageUrl} failed: ${res.status} ${res.statusText}`);
-  }
+  if (!res.ok) throw new Error(`fetch ${pageUrl} failed: ${res.status}`);
 
   const buf = Buffer.from(await res.arrayBuffer());
 
-  // ── 编码探测（header/meta/jschardet/站点兜底/UTF-8） ──
   const ctype = res.headers.get("content-type") || "";
-  const m = ctype.match(/charset=([^;]+)/i);
-  const charsetFromHeader = m && m[1] ? m[1].trim() : "";
+  const m1 = ctype.match(/charset=([^;]+)/i);
+  const charsetFromHeader = m1?.[1]?.trim() || "";
 
-  const headSampleLatin1 = buf.slice(0, 4096).toString("latin1");
+  const headLatin1 = buf.slice(0, 4096).toString("latin1");
   const m2 =
-    headSampleLatin1.match(/<meta[^>]*charset=["']?([\w-]+)["']?/i) ||
-    headSampleLatin1.match(/charset=([\w-]+)/i);
-  const charsetFromMeta = m2 && m2[1] ? m2[1].trim() : "";
+    headLatin1.match(/<meta[^>]*charset=["']?([\w-]+)["']?/i) ||
+    headLatin1.match(/charset=([\w-]+)/i);
+  const charsetFromMeta = m2?.[1]?.trim() || "";
 
   const det = jschardet.detect(buf);
-  const charsetFromJschardet = det && det.encoding ? det.encoding : "";
+  const charsetFromJschardet = det?.encoding || "";
 
   let encoding =
     charsetFromHeader ||
     charsetFromMeta ||
     charsetFromJschardet ||
-    (/sinotronic/i.test(u.hostname) ? "gbk" : "") ||
+    (/sinotronic/i.test(u.hostname) ? "gb18030" : "") ||
     "utf-8";
 
   let html;
   try {
     html = iconv.decode(buf, encoding);
   } catch {
-    // 回退
     html = buf.toString("utf-8");
     encoding = "utf-8";
   }
@@ -82,24 +76,22 @@ async function fetchHtmlSmart(pageUrl) {
     debug: {
       origin,
       host: u.hostname,
+      contentType: ctype,
       charsetFromHeader,
       charsetFromMeta,
       charsetFromJschardet,
       finalEncoding: encoding,
-      contentType: ctype,
       htmlLen: buf.length,
     },
   };
 }
 
-/** 常见电商结构的兜底解析（OpenCart/Shopware 等） */
+/** 一般类站点的兜底提取（防守用） */
 function extractCommonProducts($, pageUrl) {
   let cards = $(
     "div.product-layout, div.product-grid .product-thumb, div.product-thumb, .product-list .product-layout"
   );
-  if (cards.length === 0) {
-    cards = $("div[class*='product']:has(a, img)");
-  }
+  if (cards.length === 0) cards = $("div[class*='product']:has(a, img)");
 
   const out = [];
   cards.each((_, el) => {
@@ -123,15 +115,12 @@ function extractCommonProducts($, pageUrl) {
       moq: "",
     });
   });
-
   return out;
 }
 
-/** 主处理器：GET/POST 共用 */
+/** GET/POST 共用 */
 async function handleParse(req, res) {
-  const isGet = req.method === "GET";
-  const src = isGet ? req.query : req.body || {};
-
+  const src = req.method === "GET" ? req.query : req.body || {};
   const targetUrl = String(src.url || "").trim();
   const limit = Math.max(1, Number(src.limit || 50) || 50);
   const imgOpt = String(src.img || "");
@@ -140,7 +129,7 @@ async function handleParse(req, res) {
 
   if (!targetUrl) return res.status(400).json({ ok: false, error: "missing url" });
 
-  // 1) 抓取 + 转码（含编码 debug）
+  // 1) 抓取 + 解码
   let html, encoding, fetchDbg;
   try {
     const r = await fetchHtmlSmart(targetUrl);
@@ -148,32 +137,19 @@ async function handleParse(req, res) {
     encoding = r.encoding;
     fetchDbg = r.debug;
   } catch (e) {
-    return res
-      .status(502)
-      .json({ ok: false, error: "fetch failed", detail: String(e.message || e) });
+    return res.status(502).json({ ok: false, error: "fetch failed", detail: String(e.message || e) });
   }
 
   // 2) 解析
   const $ = cheerio.load(html, { decodeEntities: false });
-  const host = (() => {
-    try {
-      return new NodeURL(targetUrl).hostname.toLowerCase();
-    } catch {
-      return "";
-    }
-  })();
+  const host = new NodeURL(targetUrl).hostname.toLowerCase();
 
   let items = [];
   let adapterDebug = null;
 
-  // 站点适配器优先（sinotronic）
   if (/sinotronic/i.test(host)) {
-    // 兼容两种返回：数组 或 {items, debug}
-    const r = await parseSinotronic($, {
-      url: targetUrl,
-      limit,
-      debug: needDebug,
-    });
+    // —— 关键修正：调用命名导出的 parse(url, opts) —— //
+    const r = await sinotronic.parse(targetUrl, { limit, debug: needDebug });
     if (Array.isArray(r)) {
       items = r;
     } else if (r && Array.isArray(r.items)) {
@@ -186,7 +162,7 @@ async function handleParse(req, res) {
 
   if (items.length > limit) items = items.slice(0, limit);
 
-  // 3) 可选：图片转 base64
+  // 3) 可选把前 N 张图片转 base64
   if ((imgOpt || "").toLowerCase() === "base64" && items.length) {
     const fetchImg = async (u) => {
       try {
@@ -214,27 +190,25 @@ async function handleParse(req, res) {
     items,
     products: items,
   };
-
   if (needDebug) {
     base.debug = {
-      ...fetchDbg, // 编码探测详情
+      ...fetchDbg,
       title: $("title").text(),
       a: $("a").length,
       img: $("img").length,
       li: $("li").length,
-      // 适配器的详细尝试过程（若适配器提供）
       ...(adapterDebug ? { ...adapterDebug } : {}),
       list_found: items.length > 0,
       item_count: items.length,
       first_item: items[0] || null,
       head_sample: html.slice(0, 800),
+      encoding,
     };
   }
 
-  return res.json(base);
+  res.json(base);
 }
 
-/** 路由注册（保持与你现有路径一致） */
 router.get("/v1/api/catalog/parse", handleParse);
 router.post("/v1/api/catalog/parse", handleParse);
 
