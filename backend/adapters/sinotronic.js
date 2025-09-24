@@ -1,184 +1,161 @@
 // backend/adapters/sinotronic.js
-// 适配 http://www.sinotronic-e.com 等“静态 HTML 目录页”
-// 目标：在无脚本、无懒加载执行的情况下，最大化提取 <a> + 可见文本/图片
-import { URL as NodeURL } from "url";
+import axios from "axios";
+import * as cheerio from "cheerio";
+import iconv from "iconv-lite";
+import jschardet from "jschardet";
 
-function abs(base, href) {
+/** 这个适配器是否匹配该域名 */
+export function matches(url) {
+  return /(^|\.)sinotronic-e\.com/i.test(new URL(url).hostname);
+}
+
+function normalizeCharset(s) {
+  if (!s) return "utf-8";
+  s = s.toLowerCase();
+  if (s.includes("gb2312") || s.includes("gbk")) return "gbk";
+  if (s.includes("big5")) return "big5";
+  return "utf-8";
+}
+
+/** 把相对地址转绝对 */
+function abs(base, maybeRelative) {
+  if (!maybeRelative) return "";
   try {
-    return new NodeURL(href || "", base || undefined).toString();
+    return new URL(maybeRelative, base).toString();
   } catch {
-    return href || "";
+    return maybeRelative;
   }
 }
 
-function normText(txt = "") {
-  return String(txt).replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim();
+/** 挑一个非空的字段 */
+function pick(...xs) {
+  for (const x of xs) if (x && String(x).trim()) return String(x).trim();
+  return "";
 }
 
-function pickImg($img) {
-  if (!$img || !$img.length) return "";
-  const attrs = [
-    "src",
-    "data-src",
-    "data-original",
-    "data-echo",
-    "data-lazy",
-    "data-img",
-    "data-url",
-  ];
-  for (const a of attrs) {
-    const v = ($img.attr(a) || "").trim();
-    if (v) return v;
-  }
-  // 兼容 style="background-image:url(...)"
-  const m = ($img.attr("style") || "").match(/url\((.*?)\)/i);
-  return m && m[1] ? m[1].replace(/['"]/g, "") : "";
-}
-
-function isJunkHref(href = "") {
-  const h = href.trim();
+/** 取图片字段（兼容懒加载） */
+function pickImg($el) {
   return (
-    !h ||
-    h === "#" ||
-    /^javascript:/i.test(h) ||
-    /^mailto:/i.test(h) ||
-    /^tel:/i.test(h)
+    $el.attr("src") ||
+    $el.attr("data-src") ||
+    $el.attr("data-original") ||
+    $el.attr("data-lazy") ||
+    ""
   );
 }
 
-function isNavText(t = "") {
-  const x = normText(t).toLowerCase();
-  return (
-    !x ||
-    x === "#" ||
-    /(首页|尾页|上一页|下一页|上一|下一|返回|更多|目录|导航|列表|page|pages|pager|prev|next|zurück|weiter|mehr)/i.test(
-      x
-    )
-  );
-}
-
-function push(out, base, text, href, img) {
-  const sku = normText(text);
-  const url = abs(base, href);
-  if (!sku || isNavText(sku) || isJunkHref(url)) return;
-
-  out.push({
-    sku,              // 先把标题/可见文本当作 sku
-    desc: sku,        // 简单复用为描述（静态页一般无结构化描述）
-    url,              // 详情链接
-    img: abs(base, img || ""),
-    price: "",        // 静态目录多半没有价格，留空
-    currency: "",
-    moq: "",
+/** 拉取并自动按 charset 解码为字符串 */
+async function fetchHtml(url) {
+  const res = await axios.get(url, {
+    responseType: "arraybuffer",
+    headers: {
+      // 给点像浏览器的头，减少被挡的概率
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
+      Accept:
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+      Referer: new URL(url).origin + "/",
+    },
+    // 适度超时，避免长时间挂起
+    timeout: 20000,
+    validateStatus: () => true,
   });
+
+  const buf = Buffer.from(res.data);
+  let charset =
+    normalizeCharset(res.headers["content-type"] || "") ||
+    normalizeCharset("");
+
+  // headers 没带就用内容探测
+  if (charset === "utf-8") {
+    try {
+      const head = buf.slice(0, 4096).toString("ascii");
+      const m =
+        head.match(/<meta[^>]+charset=["']?([\w-]+)["']?/i) ||
+        head.match(/charset=([\w-]+)/i);
+      if (m) charset = normalizeCharset(m[1]);
+    } catch {}
+  }
+  if (charset === "utf-8") {
+    // 兜底再探测一次
+    try {
+      const det = jschardet.detect(buf);
+      if (det && det.encoding) charset = normalizeCharset(det.encoding);
+    } catch {}
+  }
+
+  const html = iconv.decode(buf, charset || "utf-8");
+  return { html, status: res.status, charset };
 }
 
-export default function parseSinotronic($, ctx = {}) {
-  const out = [];
-  const base = ctx.url || $("base[href]").attr("href") || "";
-  const limit = Math.max(1, Number(ctx.limit || 50));
+/** 解析列表页 */
+export async function parse(url, { limit = 50 } = {}) {
+  const { html } = await fetchHtml(url);
+  const $ = cheerio.load(html, { decodeEntities: false });
 
-  // —— 1) 首选：常见产品卡片/列表示例（尽量覆盖各类“静态模板”）——
-  // 说明：优先在 li/card/table row 级别做提取，更容易拿到干净标题与图片
-  const blocks = [
-    // 典型 UL/LI、卡片式
-    "ul li:has(a)",
-    ".list li:has(a)",
-    ".lists li:has(a)",
-    ".prolist li:has(a)",
-    ".products li:has(a)",
-    ".product-list li:has(a)",
-    ".goods-list li:has(a)",
-    ".grid li:has(a)",
-    "li.product-item:has(a)",
-    "li.goods-item:has(a)",
-    "div.product:has(a)",
-    "div.goods:has(a)",
-    ".product-item:has(a)",
-    ".goods-item:has(a)",
+  const items = [];
 
-    // 典型 DL/DT/DD 结构
-    "dl:has(a) dd",
-    "dl:has(a) dt",
+  // 1) 主选择器：官方列表容器
+  $("#productlist li").each((_, li) => {
+    const $li = $(li);
+    const $a = $li.find("a").first();
+    const $img = $li.find("img").first();
 
-    // 老式 table 列表页（国内站常见）
-    "table tr:has(a)",
-    "table.list tr:has(a)",
-    "table[border] tr:has(a)",
-  ].join(",");
+    const link = abs(url, $a.attr("href"));
+    const img = abs(url, pickImg($img));
+    const title = pick(
+      $img.attr("alt"),
+      $img.attr("title"),
+      $a.attr("title"),
+      $a.text()
+    );
 
-  $(blocks).each((_, el) => {
-    if (out.length >= limit) return false;
-
-    const $el = $(el);
-    const $a = $el.find("a[href]").first();
-    const href = ($a.attr("href") || "").trim();
-    if (isJunkHref(href)) return;
-
-    // 标题优先级：img@alt > a@title > a.text > 同行/同列文本
-    const $img = $el.find("img").first();
-    let title =
-      normText($img.attr("alt")) ||
-      normText($a.attr("title")) ||
-      normText($a.text());
-
-    if (!title) {
-      title =
-        normText($el.text()) ||
-        normText($el.closest("tr").text()) ||
-        normText($a.closest("td").text());
+    if (title || img || link) {
+      items.push({
+        sku: title, // SKU/名称：该站并无明确货号，只能用标题
+        desc: "", // 该站列表也无描述，保持空
+        img,
+        link,
+        minQty: "",
+        price: "",
+      });
     }
-    if (!title || isNavText(title)) return;
-
-    const img = pickImg($img);
-    push(out, base, title, href, img);
   });
 
-  // —— 2) 强化兜底：主要内容区内的“纯文字链接” ——  
-  // 过滤 header/footer/nav/pager 等区域，尽量限定在主内容区
-  if (out.length < limit) {
-    const forbiddenAncestors =
-      "header, nav, footer, .nav, .navbar, .breadcrumb, .breadcrumbs, .footer, .pager, .pagination, .pagebar, .crumb";
-    const anchorScope =
-      "main, #main, #content, .content, .container, .wrap, .wrapper, .list, .lists, .newslist, .prolist, .products, .product-list, .product, .goods";
+  // 2) 备选结构（有些频道模板不同）
+  if (items.length === 0) {
+    $(".productlist li, .proList li, .product_item").each((_, li) => {
+      const $li = $(li);
+      const $a = $li.find("a").first();
+      const $img = $li.find("img").first();
 
-    $(`${anchorScope} a[href]`).each((_, a) => {
-      if (out.length >= limit) return false;
+      const link = abs(url, $a.attr("href"));
+      const img = abs(url, pickImg($img));
+      const title = pick(
+        $img.attr("alt"),
+        $img.attr("title"),
+        $a.attr("title"),
+        $a.text(),
+        $li.find("h3,h4").first().text()
+      );
 
-      const $a = $(a);
-      if ($a.closest(forbiddenAncestors).length) return;
-
-      const href = ($a.attr("href") || "").trim();
-      if (isJunkHref(href)) return;
-
-      // 就近文本/图片
-      const text =
-        normText($a.text()) ||
-        normText($a.closest("li, tr, dd, dt, p, div").text());
-      const img = pickImg($a.find("img").first());
-      push(out, base, text, href, img);
+      if (title || img || link) {
+        items.push({
+          sku: title,
+          desc: "",
+          img,
+          link,
+          minQty: "",
+          price: "",
+        });
+      }
     });
   }
 
-  // —— 3) 去重（优先按 url，退而求其次按 sku+img）——
-  if (out.length) {
-    const seenURL = new Set();
-    const seenKey = new Set();
-    const uniq = [];
-    for (const it of out) {
-      const u = it.url || "";
-      const k = `${(it.sku || "").toLowerCase()}|${(it.img || "").toLowerCase()}`;
-      if (u && !seenURL.has(u)) {
-        seenURL.add(u);
-        uniq.push(it);
-      } else if (!u && !seenKey.has(k)) {
-        seenKey.add(k);
-        uniq.push(it);
-      }
-      if (uniq.length >= limit) break;
-    }
-    return uniq.slice(0, limit);
-  }
-
-  return out.slice(0, limit);
+  // 限制数量
+  const out = items.slice(0, Math.max(1, Number(limit) || 50));
+  return { ok: true, url, count: out.length, items: out };
 }
+
+// 统一导出给路由用
+export default { matches, parse };
