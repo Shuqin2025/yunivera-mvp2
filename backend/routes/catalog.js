@@ -1,215 +1,248 @@
 // backend/routes/catalog.js
-import express from "express";
-import fetch from "node-fetch";
-import * as cheerio from "cheerio";
-import iconv from "iconv-lite";
-import jschardet from "jschardet";
-import { URL as NodeURL } from "url";
+// 统一：GET/POST /v1/api/catalog/parse
+// 关键点：按 gb18030 解码、兜底选择器、把 debug 透传出来
 
-// 站点适配器（ESM 导入为命名空间，以便调用 .parse）
-import * as sinotronic from "../adapters/sinotronic.js";
+import express from "express";
+import axios from "axios";
+import { load as cheerioLoad } from "cheerio";
+import jschardet from "jschardet";
+import iconv from "iconv-lite";
+
+// —— 工具 —— //
+const toAbs = (u, base) => {
+  try { return new URL(u, base).href; } catch { return u || ""; }
+};
+
+const pickAttr = ($el, list) => {
+  for (const k of list) {
+    const v = $el.attr(k);
+    if (v) return v;
+  }
+  return "";
+};
+
+const decodeBuffer = (buf) => {
+  // 先猜编码；gb18030 覆盖 GBK/GB2312
+  const head = buf.subarray(0, Math.min(buf.length, 2048));
+  const guess = jschardet.detect(head)?.encoding || "";
+  const enc = /gb/i.test(guess) ? "gb18030" : "utf-8";
+  const html = iconv.decode(buf, enc);
+  return { html, encoding: enc, guess };
+};
+
+// —— 兜底选择器（含你同事给出的 #productlist） —— //
+const CONTAINER_CANDIDATES = [
+  "#productlist",
+  ".productlist",
+  ".products-list",
+  ".products",
+  ".list-products",
+  "ul.products",
+  "#products",
+  "main .list",
+  "main ul",
+];
+
+const ITEM_CANDIDATES = [
+  "#productlist ul > li",
+  "li.product",
+  ".product",
+  ".product-item",
+  "ul.products > li",
+  ".items > li",
+  "li",
+];
+
+// —— 抽取条目 —— //
+function extractItems($, base, $items, limit, debug) {
+  const items = [];
+  $items.each((_, el) => {
+    if (items.length >= limit) return;
+
+    const $li = $(el);
+
+    // 图片：src / data-src / data-original
+    const $img = $li.find("img").first();
+    const imgRel = pickAttr($img, ["src", "data-src", "data-original"]);
+    const img = toAbs(imgRel, base);
+
+    // 链接 & 文本
+    const $a = $li.find("a").first();
+    const link = toAbs($a.attr("href") || "", base);
+
+    // 名称：img alt > a 文本 > li 文本
+    const title =
+      ($img.attr("alt") || "").trim() ||
+      ($a.text() || "").trim() ||
+      ($li.text() || "").trim();
+
+    if (!title && !link && !img) return; // 过滤完全空白的 li
+
+    items.push({
+      sku: title,      // 先用标题占位
+      desc: title,
+      minQty: "",
+      price: "",
+      img,
+      link,
+    });
+
+    if (items.length === 1 && debug) {
+      debug.first_item_html = $.html($li);
+    }
+  });
+  return items;
+}
 
 const router = express.Router();
 
-const UA =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
+// 兼容 GET/POST
+router.get("/parse", handler);
+router.post("/parse", handler);
 
-function abs(origin, href = "") {
+async function handler(req, res) {
   try {
-    return new NodeURL(href, origin).href;
-  } catch {
-    return href || origin;
-  }
-}
+    const isPost = req.method === "POST";
+    const qp = isPost ? req.body || {} : req.query || {};
 
-/** 抓取并智能转码（带编码 debug） */
-async function fetchHtmlSmart(pageUrl) {
-  const u = new NodeURL(pageUrl);
-  const origin = `${u.protocol}//${u.host}`;
+    const url = (qp.url || "").trim();
+    const limit = Math.max(1, Math.min(+(qp.limit || 50), 200));
+    const wantBase64 = (qp.img || "").toString().toLowerCase() === "base64";
+    const imgCount = +(qp.imgCount || 0);
+    const wantDebug = String(qp.debug || qp.debug1 || qp.debug_1 || "").length > 0
+      ? true
+      : String(qp.debug || "").trim() === "1";
 
-  const res = await fetch(pageUrl, {
-    redirect: "follow",
-    headers: {
-      "User-Agent": UA,
-      Accept:
-        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-      "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,de;q=0.7",
-      Referer: origin,
-      "Cache-Control": "no-cache",
-    },
-  });
-  if (!res.ok) throw new Error(`fetch ${pageUrl} failed: ${res.status}`);
+    if (!url) return res.json({ ok: false, error: "missing url" });
 
-  const buf = Buffer.from(await res.arrayBuffer());
-
-  const ctype = res.headers.get("content-type") || "";
-  const m1 = ctype.match(/charset=([^;]+)/i);
-  const charsetFromHeader = m1?.[1]?.trim() || "";
-
-  const headLatin1 = buf.slice(0, 4096).toString("latin1");
-  const m2 =
-    headLatin1.match(/<meta[^>]*charset=["']?([\w-]+)["']?/i) ||
-    headLatin1.match(/charset=([\w-]+)/i);
-  const charsetFromMeta = m2?.[1]?.trim() || "";
-
-  const det = jschardet.detect(buf);
-  const charsetFromJschardet = det?.encoding || "";
-
-  let encoding =
-    charsetFromHeader ||
-    charsetFromMeta ||
-    charsetFromJschardet ||
-    (/sinotronic/i.test(u.hostname) ? "gb18030" : "") ||
-    "utf-8";
-
-  let html;
-  try {
-    html = iconv.decode(buf, encoding);
-  } catch {
-    html = buf.toString("utf-8");
-    encoding = "utf-8";
-  }
-
-  return {
-    html,
-    encoding,
-    debug: {
-      origin,
-      host: u.hostname,
-      contentType: ctype,
-      charsetFromHeader,
-      charsetFromMeta,
-      charsetFromJschardet,
-      finalEncoding: encoding,
-      htmlLen: buf.length,
-    },
-  };
-}
-
-/** 一般类站点的兜底提取（防守用） */
-function extractCommonProducts($, pageUrl) {
-  let cards = $(
-    "div.product-layout, div.product-grid .product-thumb, div.product-thumb, .product-list .product-layout"
-  );
-  if (cards.length === 0) cards = $("div[class*='product']:has(a, img)");
-
-  const out = [];
-  cards.each((_, el) => {
-    const root = $(el);
-    const a = root.find("a[href]").first();
-    if (!a.length) return;
-
-    const imgEl = root.find("img").first();
-    const title = (imgEl.attr("alt") || a.attr("title") || a.text() || "")
-      .replace(/\s+/g, " ")
-      .trim();
-    if (!title) return;
-
-    out.push({
-      sku: title,
-      title,
-      url: abs(pageUrl, a.attr("href") || ""),
-      img: abs(pageUrl, imgEl.attr("src") || ""),
-      price: "",
-      currency: "",
-      moq: "",
+    // 拉取页面（二进制）再按编码解码
+    const resp = await axios.get(url, {
+      responseType: "arraybuffer",
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      },
     });
-  });
-  return out;
-}
 
-/** GET/POST 共用 */
-async function handleParse(req, res) {
-  const src = req.method === "GET" ? req.query : req.body || {};
-  const targetUrl = String(src.url || "").trim();
-  const limit = Math.max(1, Number(src.limit || 50) || 50);
-  const imgOpt = String(src.img || "");
-  const imgCount = Math.max(0, Number(src.imgCount || 5) || 5);
-  const needDebug = String(src.debug || "") !== "";
+    const { html, encoding, guess } = decodeBuffer(Buffer.from(resp.data));
+    const $ = cheerioLoad(html);
 
-  if (!targetUrl) return res.status(400).json({ ok: false, error: "missing url" });
+    // —— 选择容器 —— //
+    const debug = wantDebug
+      ? {
+          tried: { container: [], item: [] },
+          detected_encoding: encoding,
+          charset_guess: guess || "",
+        }
+      : null;
 
-  // 1) 抓取 + 解码
-  let html, encoding, fetchDbg;
-  try {
-    const r = await fetchHtmlSmart(targetUrl);
-    html = r.html;
-    encoding = r.encoding;
-    fetchDbg = r.debug;
-  } catch (e) {
-    return res.status(502).json({ ok: false, error: "fetch failed", detail: String(e.message || e) });
-  }
+    let $container = null;
+    let containerUsed = "";
+    let maxCount = -1;
 
-  // 2) 解析
-  const $ = cheerio.load(html, { decodeEntities: false });
-  const host = new NodeURL(targetUrl).hostname.toLowerCase();
-
-  let items = [];
-  let adapterDebug = null;
-
-  if (/sinotronic/i.test(host)) {
-    // —— 关键修正：调用命名导出的 parse(url, opts) —— //
-    const r = await sinotronic.parse(targetUrl, { limit, debug: needDebug });
-    if (Array.isArray(r)) {
-      items = r;
-    } else if (r && Array.isArray(r.items)) {
-      items = r.items;
-      adapterDebug = r.debug || null;
-    }
-  } else {
-    items = extractCommonProducts($, targetUrl);
-  }
-
-  if (items.length > limit) items = items.slice(0, limit);
-
-  // 3) 可选把前 N 张图片转 base64
-  if ((imgOpt || "").toLowerCase() === "base64" && items.length) {
-    const fetchImg = async (u) => {
-      try {
-        const r = await fetch(u, { headers: { "User-Agent": UA } });
-        if (!r.ok) return "";
-        const b = Buffer.from(await r.arrayBuffer());
-        const mime = r.headers.get("content-type") || "image/jpeg";
-        return `data:${mime};base64,${b.toString("base64")}`;
-      } catch {
-        return "";
+    for (const sel of CONTAINER_CANDIDATES) {
+      const cnt = $(sel).length;
+      if (wantDebug) debug.tried.container.push({ selector: sel, matched: cnt });
+      if (cnt > 0 && cnt > maxCount) {
+        maxCount = cnt;
+        $container = $(sel).first();
+        containerUsed = sel;
       }
-    };
-    await Promise.all(
-      items.slice(0, imgCount).map(async (it) => {
-        if (it.img) it.img_b64 = await fetchImg(it.img);
-      })
-    );
-  }
+    }
 
-  // 4) 输出（debug 透传）
-  const base = {
-    ok: true,
-    url: targetUrl,
-    count: items.length,
-    items,
-    products: items,
-  };
-  if (needDebug) {
-    base.debug = {
-      ...fetchDbg,
-      title: $("title").text(),
-      a: $("a").length,
-      img: $("img").length,
-      li: $("li").length,
-      ...(adapterDebug ? { ...adapterDebug } : {}),
-      list_found: items.length > 0,
-      item_count: items.length,
-      first_item: items[0] || null,
-      head_sample: html.slice(0, 800),
-      encoding,
-    };
-  }
+    // 如果容器没有命中，退化为 body
+    if (!$container || $container.length === 0) {
+      $container = $("body");
+      containerUsed = "body";
+    }
 
-  res.json(base);
+    // —— 选择条目 —— //
+    let itemUsed = "";
+    let $items = $();
+
+    for (const sel of ITEM_CANDIDATES) {
+      // 容器内找条目
+      const list = $container.find(sel);
+      const cnt = list.length;
+      if (wantDebug) debug.tried.item.push({ selector: sel, matched: cnt });
+      if (cnt > 0) {
+        itemUsed = sel;
+        $items = list;
+        break;
+      }
+    }
+
+    if ($items.length === 0) {
+      // 再尝试全局找一次
+      for (const sel of ITEM_CANDIDATES) {
+        const list = $(sel);
+        const cnt = list.length;
+        if (wantDebug) debug.tried.item.push({ selector: sel, matched: cnt });
+        if (cnt > 0) {
+          itemUsed = sel + " (global)";
+          $items = list;
+          break;
+        }
+      }
+    }
+
+    if (wantDebug) {
+      debug.container_matched = containerUsed;
+      debug.item_selector_used = itemUsed;
+      debug.item_count = $items.length || 0;
+    }
+
+    // —— 抽取 —— //
+    const origin = new URL(url).origin + "/";
+    let items = extractItems($, origin, $items, limit, debug);
+
+    // 兜底：如果还是 0，再把 #productlist 直接做一次固定提取
+    if (items.length === 0) {
+      const fallbackList = $("#productlist ul > li");
+      if (fallbackList.length) {
+        if (wantDebug && !itemUsed) {
+          debug.item_selector_used = "#productlist ul > li (fallback)";
+          debug.item_count = fallbackList.length;
+        }
+        items = extractItems($, origin, fallbackList, limit, debug);
+      }
+    }
+
+    // 是否要把图片转 base64（默认关，和你线上一致）
+    if (wantBase64 && items.length && imgCount > 0) {
+      const N = Math.min(imgCount, items.length);
+      await Promise.all(
+        items.slice(0, N).map(async (it) => {
+          if (!it.img) return;
+          try {
+            const r = await axios.get(it.img, { responseType: "arraybuffer" });
+            const b64 = Buffer.from(r.data).toString("base64");
+            const ext = (it.img.split(".").pop() || "jpg").toLowerCase();
+            it.img = `data:image/${ext};base64,${b64}`;
+          } catch {
+            /* ignore */
+          }
+        })
+      );
+    }
+
+    const payload = {
+      ok: true,
+      url,
+      count: items.length,
+      products: [], // 兼容老字段
+      items,        // 新前端用这个
+    };
+    if (wantDebug) payload.debug = debug;
+
+    res.json(payload);
+  } catch (err) {
+    res.status(200).json({
+      ok: false,
+      error: String(err && err.message ? err.message : err),
+    });
+  }
 }
-
-router.get("/v1/api/catalog/parse", handleParse);
-router.post("/v1/api/catalog/parse", handleParse);
 
 export default router;
