@@ -6,180 +6,199 @@ import iconv from "iconv-lite";
 import jschardet from "jschardet";
 import { URL as NodeURL } from "url";
 
-import sinotronic from "../adapters/sinotronic.js";
+// 站点适配器
+import parseSinotronic from "../adapters/sinotronic.js";
 
 const router = express.Router();
 
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
 
-// --------- utils ----------
-function abs(base, href) {
-  try {
-    return new NodeURL(href || "", base).toString();
-  } catch {
-    return href || "";
-  }
-}
-function norm(t = "") {
-  return String(t).replace(/\s+/g, " ").replace(/[\r\n\t]/g, " ").trim();
-}
-function looksNav(t = "") {
-  const x = t.toLowerCase();
-  return (
-    !x ||
-    x === "#" ||
-    /^javascript:/i.test(x) ||
-    /(首页|尾页|上一页|下一页|more|zurück|weiter|page)/i.test(x)
-  );
-}
-
+/** 智能抓取 HTML：自动补 UA/Referer，自动转码（gbk/gb2312 等） */
 async function fetchHtmlSmart(pageUrl) {
-  const r = await fetch(pageUrl, {
+  const u = new NodeURL(pageUrl);
+  const origin = `${u.protocol}//${u.host}`;
+
+  const res = await fetch(pageUrl, {
     redirect: "follow",
     headers: {
       "User-Agent": UA,
-      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+      "Accept":
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+      "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,de;q=0.7",
       "Cache-Control": "no-cache",
+      Referer: origin,
     },
   });
-  if (!r.ok) throw new Error(`fetch ${pageUrl} failed: ${r.status} ${r.statusText}`);
-  const buf = Buffer.from(await r.arrayBuffer());
-  let enc = "";
-  const ct = r.headers.get("content-type") || "";
-  const m = ct.match(/charset=([^;]+)/i);
-  if (m && m[1]) enc = m[1].trim();
+
+  if (!res.ok) {
+    throw new Error(`fetch ${pageUrl} failed: ${res.status} ${res.statusText}`);
+  }
+
+  const buf = Buffer.from(await res.arrayBuffer());
+
+  // 1) Content-Type -> charset
+  const ctype = res.headers.get("content-type") || "";
+  const m = ctype.match(/charset=([^;]+)/i);
+  let enc = m && m[1] ? m[1].trim() : "";
+
+  // 2) meta charset
+  if (!enc) {
+    const headSample = buf.slice(0, 4096).toString("latin1");
+    const m2 =
+      headSample.match(/<meta[^>]*charset=["']?([\w-]+)["']?/i) ||
+      headSample.match(/charset=([\w-]+)/i);
+    if (m2 && m2[1]) enc = m2[1].trim();
+  }
+
+  // 3) jschardet 探测
   if (!enc) {
     const det = jschardet.detect(buf);
-    if (det?.encoding) enc = det.encoding;
+    if (det && det.encoding) enc = det.encoding;
   }
+
+  // 4) 按域名兜底（sinotronic 大概率是 gbk/gb2312）
+  if (!enc && /sinotronic/i.test(u.hostname)) enc = "gbk";
+
+  // 5) 没头绪就 utf-8
   if (!enc) enc = "utf-8";
-  try {
-    return iconv.decode(buf, enc);
-  } catch {
-    return buf.toString("utf-8");
-  }
-}
-
-// 通用兜底：永不空军
-function universalExtract($, base, limit = 50) {
-  const out = [];
-
-  // 先从 li / tr 容器里抓
-  $("li, tr").each((_, el) => {
-    if (out.length >= limit) return false;
-    const $el = $(el);
-    const $a = $el.find("a[href]").first();
-    const href = ($a.attr("href") || "").trim();
-    if (!href || looksNav(href)) return;
-    const text =
-      norm($a.attr("title")) ||
-      norm($a.text()) ||
-      norm($el.text());
-    const title = norm(text);
-    if (!title || looksNav(title)) return;
-    out.push({
-      sku: title,
-      desc: title,
-      url: abs(base, href),
-      img: "",
-      price: "",
-      currency: "",
-      moq: "",
-    });
-  });
-
-  // 还是 0，再全页 a[href]
-  if (out.length === 0) {
-    $("a[href]").each((_, el) => {
-      if (out.length >= limit) return false;
-      const $a = $(el);
-      const href = ($a.attr("href") || "").trim();
-      if (!href || /^(javascript:|#)/i.test(href)) return;
-      const title = norm($a.text()) || norm($a.attr("title"));
-      if (!title || looksNav(title)) return;
-      out.push({
-        sku: title,
-        desc: title,
-        url: abs(base, href),
-        img: "",
-        price: "",
-        currency: "",
-        moq: "",
-      });
-    });
-  }
-
-  return out.slice(0, limit);
-}
-
-// 探针：统计命中情况
-function buildProbe($) {
-  const defs = {
-    "ul>li a": $("ul li a").length,
-    ".list li a": $(".list li a").length,
-    ".prolist li a": $(".prolist li a").length,
-    "table tr a": $("table tr a").length,
-    "all a[href]": $("a[href]").length,
-  };
-  const samples = [];
-  $("a[href]").slice(0, 10).each((_, a) => {
-    const $a = $(a);
-    samples.push({
-      text: norm($a.text()),
-      href: $a.attr("href"),
-      title: norm($a.attr("title") || ""),
-    });
-  });
-  return { defs, samples };
-}
-
-async function handleParse(req, res) {
-  const isGet = req.method === "GET";
-  const url = (isGet ? req.query.url : req.body?.url) || "";
-  const limit = Math.max(1, Number(isGet ? req.query.limit : req.body?.limit) || 50);
-  const imgOpt = (isGet ? req.query.img : req.body?.img) || "";
-  const imgCount = Math.max(0, Number(isGet ? req.query.imgCount : req.body?.imgCount) || 5);
-  const debug = (isGet ? req.query.debug : req.body?.debug) ? true : false;
-
-  if (!url) return res.status(400).json({ ok: false, error: "missing url" });
 
   let html;
   try {
-    html = await fetchHtmlSmart(url);
+    html = iconv.decode(buf, enc);
+  } catch {
+    html = buf.toString("utf-8");
+  }
+
+  return { html, encoding: enc };
+}
+
+function abs(origin, href = "") {
+  try {
+    return new NodeURL(href, origin).href;
+  } catch {
+    return href || origin;
+  }
+}
+
+// —— 通用解析（OpenCart 等）——
+function extractCommonProducts($, pageUrl) {
+  let cards = $(
+    "div.product-layout, div.product-grid .product-thumb, div.product-thumb, .product-list .product-layout"
+  );
+  if (cards.length === 0) {
+    cards = $("div[class*='product']:has(a, img)");
+  }
+
+  const out = [];
+  cards.each((_, el) => {
+    const root = $(el);
+    const a = root.find("a[href]").first();
+    if (!a.length) return;
+
+    const imgEl = root.find("img").first();
+    const title =
+      (imgEl.attr("alt") || a.attr("title") || a.text() || "")
+        .replace(/\s+/g, " ")
+        .trim();
+    if (!title) return;
+
+    const href = abs(pageUrl, a.attr("href") || "");
+    const img = abs(pageUrl, imgEl.attr("src") || "");
+
+    out.push({ sku: title, title, url: href, img, price: "", currency: "", moq: "" });
+  });
+
+  return out;
+}
+
+// —— 主处理器（GET/POST 共用）——
+async function handleParse(req, res) {
+  const isGet = req.method === "GET";
+  const src = isGet ? req.query : (req.body || {});
+  const targetUrl = String(src.url || "").trim();
+  const limit = Math.max(1, Number(src.limit || 50) || 50);
+  const imgOpt = String(src.img || "");
+  const imgCount = Math.max(0, Number(src.imgCount || 5) || 5);
+  const debug = String(src.debug || "");
+
+  if (!targetUrl) {
+    return res.status(400).json({ ok: false, error: "missing url" });
+  }
+
+  // 抓取 + 转码
+  let html, encoding;
+  try {
+    const r = await fetchHtmlSmart(targetUrl);
+    html = r.html;
+    encoding = r.encoding;
   } catch (e) {
-    return res.status(502).json({ ok: false, error: "fetch failed", detail: String(e.message) });
+    return res
+      .status(502)
+      .json({ ok: false, error: "fetch failed", detail: String(e.message || e) });
   }
 
   const $ = cheerio.load(html, { decodeEntities: false });
-  const host = (() => { try { return new NodeURL(url).hostname || ""; } catch { return ""; } })();
+
+  // 临时诊断：?debug=1 返回页面统计，便于定位“抓到没”
+  if (debug) {
+    return res.json({
+      ok: true,
+      debug: {
+        encoding,
+        title: $("title").text(),
+        a: $("a").length,
+        img: $("img").length,
+        li: $("li").length,
+        tr: $("tr").length,
+        sample: html.slice(0, 1200),
+      },
+    });
+  }
+
+  // 适配器优先
+  const host = (() => {
+    try {
+      return new NodeURL(targetUrl).hostname.toLowerCase();
+    } catch {
+      return "";
+    }
+  })();
 
   let items = [];
   if (/sinotronic/i.test(host)) {
-    items = await sinotronic($, { url, limit });
+    items = await parseSinotronic($, { url: targetUrl, limit });
+  } else {
+    items = extractCommonProducts($, targetUrl);
   }
 
-  // 兜底
-  if (!items || items.length === 0) {
-    items = universalExtract($, url, limit);
-  }
+  if (items.length > limit) items = items.slice(0, limit);
 
-  const payload = { ok: true, items };
-
-  if (debug) {
-    payload.probe = buildProbe($);
-    payload.meta = {
-      host,
-      htmlLength: html.length,
-      gotItems: items.length,
+  // 可选：图片 base64
+  if ((imgOpt || "").toLowerCase() === "base64" && items.length) {
+    const fetchImg = async (u) => {
+      try {
+        const r = await fetch(u, { headers: { "User-Agent": UA } });
+        if (!r.ok) return "";
+        const b = Buffer.from(await r.arrayBuffer());
+        const mime = r.headers.get("content-type") || "image/jpeg";
+        return `data:${mime};base64,${b.toString("base64")}`;
+      } catch {
+        return "";
+      }
     };
+    await Promise.all(
+      items.slice(0, imgCount).map(async (it) => {
+        if (it.img) it.img_b64 = await fetchImg(it.img);
+      })
+    );
   }
 
-  return res.json(payload);
+  return res.json({ ok: true, source: targetUrl, count: items.length, items, products: items });
 }
 
-router.post("/v1/api/catalog/parse", handleParse);
+// 统一两个入口
 router.get("/v1/api/catalog/parse", handleParse);
+router.post("/v1/api/catalog/parse", handleParse);
 
 export default router;
