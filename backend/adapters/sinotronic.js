@@ -1,6 +1,6 @@
 // backend/adapters/sinotronic.js
 // 适配 http://www.sinotronic-e.com 等“静态 HTML 目录页”
-// 设计目标：在无脚本、无懒加载执行的情况下，最大化提取 <a> + 可见文本/图片
+// 目标：在无脚本、无懒加载执行的情况下，最大化提取 <a> + 可见文本/图片
 import { URL as NodeURL } from "url";
 
 function abs(base, href) {
@@ -51,7 +51,7 @@ function isNavText(t = "") {
   return (
     !x ||
     x === "#" ||
-    /(首页|尾页|上一页|下一页|上一|下一|返回|更多|目录|导航|列表|page|prev|next|zurück|weiter|mehr)/i.test(
+    /(首页|尾页|上一页|下一页|上一|下一|返回|更多|目录|导航|列表|page|pages|pager|prev|next|zurück|weiter|mehr)/i.test(
       x
     )
   );
@@ -63,11 +63,11 @@ function push(out, base, text, href, img) {
   if (!sku || isNavText(sku) || isJunkHref(url)) return;
 
   out.push({
-    sku, // 先把标题/可见文本做 sku
-    desc: sku,
-    url,
+    sku,              // 先把标题/可见文本当作 sku
+    desc: sku,        // 简单复用为描述（静态页一般无结构化描述）
+    url,              // 详情链接
     img: abs(base, img || ""),
-    price: "",
+    price: "",        // 静态目录多半没有价格，留空
     currency: "",
     moq: "",
   });
@@ -75,15 +75,16 @@ function push(out, base, text, href, img) {
 
 export default function parseSinotronic($, ctx = {}) {
   const out = [];
-  const base = ctx.url || "";
+  const base = ctx.url || $("base[href]").attr("href") || "";
   const limit = Math.max(1, Number(ctx.limit || 50));
 
   // —— 1) 首选：常见产品卡片/列表示例（尽量覆盖各类“静态模板”）——
-  // 说明：优先在 li/card/table row 级别上做提取，能拿到更干净的标题与图片
+  // 说明：优先在 li/card/table row 级别做提取，更容易拿到干净标题与图片
   const blocks = [
     // 典型 UL/LI、卡片式
     "ul li:has(a)",
     ".list li:has(a)",
+    ".lists li:has(a)",
     ".prolist li:has(a)",
     ".products li:has(a)",
     ".product-list li:has(a)",
@@ -100,7 +101,7 @@ export default function parseSinotronic($, ctx = {}) {
     "dl:has(a) dd",
     "dl:has(a) dt",
 
-    // 老式 table 列表页
+    // 老式 table 列表页（国内站常见）
     "table tr:has(a)",
     "table.list tr:has(a)",
     "table[border] tr:has(a)",
@@ -127,30 +128,30 @@ export default function parseSinotronic($, ctx = {}) {
         normText($el.closest("tr").text()) ||
         normText($a.closest("td").text());
     }
-
     if (!title || isNavText(title)) return;
 
     const img = pickImg($img);
     push(out, base, title, href, img);
   });
 
-  // —— 2) 强化：列表区内的 “纯文字链接” 兜底（避免空军）——
-  // 过滤 header/footer/nav/pager 等区域，尽量限定在主要内容区
+  // —— 2) 强化兜底：主要内容区内的“纯文字链接” ——  
+  // 过滤 header/footer/nav/pager 等区域，尽量限定在主内容区
   if (out.length < limit) {
     const forbiddenAncestors =
       "header, nav, footer, .nav, .navbar, .breadcrumb, .breadcrumbs, .footer, .pager, .pagination, .pagebar, .crumb";
     const anchorScope =
-      "main, #main, #content, .content, .container, .wrap, .wrapper, .list, .lists, .newslist, .prolist, .products, .product-list";
+      "main, #main, #content, .content, .container, .wrap, .wrapper, .list, .lists, .newslist, .prolist, .products, .product-list, .product, .goods";
 
     $(`${anchorScope} a[href]`).each((_, a) => {
       if (out.length >= limit) return false;
+
       const $a = $(a);
       if ($a.closest(forbiddenAncestors).length) return;
 
       const href = ($a.attr("href") || "").trim();
       if (isJunkHref(href)) return;
 
-      // 取文本 + 可能的就近图片
+      // 就近文本/图片
       const text =
         normText($a.text()) ||
         normText($a.closest("li, tr, dd, dt, p, div").text());
@@ -159,7 +160,7 @@ export default function parseSinotronic($, ctx = {}) {
     });
   }
 
-  // —— 3) 去重（按 url 首要、退而求其次按 sku）——
+  // —— 3) 去重（优先按 url，退而求其次按 sku+img）——
   if (out.length) {
     const seenURL = new Set();
     const seenKey = new Set();
