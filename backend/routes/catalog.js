@@ -81,7 +81,7 @@ function abs(origin, href = "") {
   }
 }
 
-// —— 通用解析（OpenCart 等）——
+// —— 通用解析（OpenCart / Shopware 等常见结构兜底）——
 function extractCommonProducts($, pageUrl) {
   let cards = $(
     "div.product-layout, div.product-grid .product-thumb, div.product-thumb, .product-list .product-layout"
