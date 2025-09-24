@@ -1,218 +1,155 @@
 // backend/routes/catalog.js
-import express from "express";
-import fetch from "node-fetch";
-import * as cheerio from "cheerio";
-import iconv from "iconv-lite";
-import jschardet from "jschardet";
-import { URL as NodeURL } from "url";
+// ESM 风格（package.json: "type":"module"）
+// 作用：/v1/api/catalog/parse —— 目录页解析（支持 GET/POST、debug 透传、GB18030 解码、兜底选择器）
+//
+// 依赖：axios cheerio iconv-lite jschardet （你已安装）
+// 说明：为兼容挂载方式，路由同时注册「/parse」和「/v1/api/catalog/parse」
 
-// 站点适配器
-import parseSinotronic from "../adapters/sinotronic.js";
+import express from 'express';
+import axios from 'axios';
+import * as iconv from 'iconv-lite';
+import jschardet from 'jschardet';
+import cheerio from 'cheerio';
 
 const router = express.Router();
 
-const UA =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
+// —— 兜底容器/条目选择器（含 sinotronic 专用）—————
+const CONTAINER_SEL = [
+  '#productlist',                                  // ← 目标站必加
+  '.product-list', '.product_list', '.productlist',
+  '.pro_list', '.plist', '.listing-container', '.productbox', '.productBox',
+  '.content-listing', '.products-list', '.product-items', '.productBoxs'
+];
 
-/** 智能抓取 HTML：自动补 UA/Referer，自动转码（gbk/gb2312 等） */
-async function fetchHtmlSmart(pageUrl) {
-  const u = new NodeURL(pageUrl);
-  const origin = `${u.protocol}//${u.host}`;
+const ITEM_SEL = [
+  '#productlist ul > li',                          // ← 目标站必加
+  '.product-list li', '.product_list li', '.productlist li',
+  '.pro_list li', '.plist li', '.listing-container li',
+  '.productBox li', '.products-list li', '.product-items li'
+];
 
-  const res = await fetch(pageUrl, {
-    redirect: "follow",
-    headers: {
-      "User-Agent": UA,
-      "Accept":
-        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-      "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8,de;q=0.7",
-      "Cache-Control": "no-cache",
-      Referer: origin,
-    },
-  });
-
-  if (!res.ok) {
-    throw new Error(`fetch ${pageUrl} failed: ${res.status} ${res.statusText}`);
-  }
-
-  const buf = Buffer.from(await res.arrayBuffer());
-
-  // 1) Content-Type -> charset
-  const ctype = res.headers.get("content-type") || "";
-  const m = ctype.match(/charset=([^;]+)/i);
-  let enc = m && m[1] ? m[1].trim() : "";
-
-  // 2) meta charset
-  if (!enc) {
-    const headSample = buf.slice(0, 4096).toString("latin1");
-    const m2 =
-      headSample.match(/<meta[^>]*charset=["']?([\w-]+)["']?/i) ||
-      headSample.match(/charset=([\w-]+)/i);
-    if (m2 && m2[1]) enc = m2[1].trim();
-  }
-
-  // 3) jschardet 探测
-  if (!enc) {
-    const det = jschardet.detect(buf);
-    if (det && det.encoding) enc = det.encoding;
-  }
-
-  // 4) 按域名兜底（sinotronic 大概率 gbk/gb2312）
-  if (!enc && /sinotronic/i.test(u.hostname)) enc = "gbk";
-
-  // 5) 没头绪就 utf-8
-  if (!enc) enc = "utf-8";
-
-  let html;
-  try {
-    html = iconv.decode(buf, enc);
-  } catch {
-    html = buf.toString("utf-8");
-  }
-
-  return { html, encoding: enc };
-}
-
-function abs(origin, href = "") {
-  try {
-    return new NodeURL(href, origin).href;
-  } catch {
-    return href || origin;
-  }
-}
-
-// —— 通用解析（OpenCart / Shopware 等常见结构兜底）——
-function extractCommonProducts($, pageUrl) {
-  let cards = $(
-    "div.product-layout, div.product-grid .product-thumb, div.product-thumb, .product-list .product-layout"
+// 兼容懒加载图片：优先 src，其次 data-* 常见字段
+function getImgSrc($el) {
+  return (
+    $el.attr('src') ||
+    $el.attr('data-src') ||
+    $el.attr('data-original') ||
+    $el.attr('data-lazy') ||
+    ''
   );
-  if (cards.length === 0) {
-    cards = $("div[class*='product']:has(a, img)");
-  }
-
-  const out = [];
-  cards.each((_, el) => {
-    const root = $(el);
-    const a = root.find("a[href]").first();
-    if (!a.length) return;
-
-    const imgEl = root.find("img").first();
-    const title =
-      (imgEl.attr("alt") || a.attr("title") || a.text() || "")
-        .replace(/\s+/g, " ")
-        .trim();
-    if (!title) return;
-
-    const href = abs(pageUrl, a.attr("href") || "");
-    const img = abs(pageUrl, imgEl.attr("src") || "");
-
-    out.push({
-      sku: title,
-      title,
-      url: href,
-      img,
-      price: "",
-      currency: "",
-      moq: "",
-    });
-  });
-
-  return out;
 }
 
-// —— 主处理器（GET/POST 共用）——
-async function handleParse(req, res) {
-  const isGet = req.method === "GET";
-  const src = isGet ? req.query : (req.body || {});
-  const targetUrl = String(src.url || "").trim();
-  const limit = Math.max(1, Number(src.limit || 50) || 50);
-  const imgOpt = String(src.img || "");
-  const imgCount = Math.max(0, Number(src.imgCount || 5) || 5);
-  const debug = String(src.debug || "");
-
-  if (!targetUrl) {
-    return res.status(400).json({ ok: false, error: "missing url" });
-  }
-
-  // 抓取 + 转码
-  let html, encoding;
+// 补全相对链接/图片为绝对 URL
+function toAbs(base, href = '') {
   try {
-    const r = await fetchHtmlSmart(targetUrl);
-    html = r.html;
-    encoding = r.encoding;
-  } catch (e) {
-    return res
-      .status(502)
-      .json({ ok: false, error: "fetch failed", detail: String(e.message || e) });
+    if (!href) return '';
+    return new URL(href, base).href;
+  } catch {
+    return href || '';
   }
-
-  const $ = cheerio.load(html, { decodeEntities: false });
-
-  // 临时诊断：?debug=1 返回页面统计，便于定位“抓到没”
-  if (debug) {
-    return res.json({
-      ok: true,
-      debug: {
-        encoding,
-        title: $("title").text(),
-        a: $("a").length,
-        img: $("img").length,
-        li: $("li").length,
-        tr: $("tr").length,
-        sample: html.slice(0, 1200),
-      },
-    });
-  }
-
-  // 适配器优先
-  const host = (() => {
-    try {
-      return new NodeURL(targetUrl).hostname.toLowerCase();
-    } catch {
-      return "";
-    }
-  })();
-
-  let items = [];
-  if (/sinotronic/i.test(host)) {
-    items = await parseSinotronic($, { url: targetUrl, limit });
-  } else {
-    items = extractCommonProducts($, targetUrl);
-  }
-
-  if (items.length > limit) items = items.slice(0, limit);
-
-  // 可选：图片 base64
-  if ((imgOpt || "").toLowerCase() === "base64" && items.length) {
-    const fetchImg = async (u) => {
-      try {
-        const r = await fetch(u, { headers: { "User-Agent": UA } });
-        if (!r.ok) return "";
-        const b = Buffer.from(await r.arrayBuffer());
-        const mime = r.headers.get("content-type") || "image/jpeg";
-        return `data:${mime};base64,${b.toString("base64")}`;
-      } catch {
-        return "";
-      }
-    };
-    await Promise.all(
-      items.slice(0, imgCount).map(async (it) => {
-        if (it.img) it.img_b64 = await fetchImg(it.img);
-      })
-    );
-  }
-
-  return res.json({
-    ok: true,
-    source: targetUrl,
-    count: items.length,
-    items,
-    products: items,
-  });
 }
 
-// 统一两个入口
-router.get("/v1/api/catalog/parse", handleParse);
-router.post("/v1/api/catalog/parse", handleParse);
+async function handleParse(req, res) {
+  try {
+    const isPost = req.method === 'POST';
+    const url   = isPost ? (req.body?.url || '')   : (req.query?.url || '');
+    const limit = +(isPost ? req.body?.limit : req.query?.limit) || 50;
+    const wantDebug = !!(isPost ? req.body?.debug : req.query?.debug);
+
+    if (!url) {
+      return res.status(200).json({ ok: false, error: 'missing url', count: 0, items: [] });
+    }
+
+    // ---------- 1) 抓页面（arraybuffer）并识别编码 ----------
+    const resp = await axios.get(url, { responseType: 'arraybuffer', timeout: 20000, headers: {
+      // 某些站点更乐意返回 HTML
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36'
+    }});
+
+    const encDetected = (jschardet.detect(resp.data).encoding || 'utf-8').toLowerCase();
+    // 遇到 gbk/gb2312/gb18030 等都按 gb18030 解码
+    const useGb = /gb/.test(encDetected);
+    const html = iconv.decode(Buffer.from(resp.data), useGb ? 'gb18030' : 'utf-8');
+
+    // ---------- 2) 解析 DOM ----------
+    const $ = cheerio.load(html, { decodeEntities: false });
+
+    // 找到第一个命中的容器
+    const containerSel = CONTAINER_SEL.find(sel => $(sel).length > 0) || null;
+    const listFound = !!containerSel;
+    const $ctn = containerSel ? $(containerSel).first() : null;
+
+    // 在容器内确定条目选择器
+    let itemSel = null;
+    if ($ctn) {
+      itemSel = ITEM_SEL.find(sel => $ctn.find(sel).length > 0) || ITEM_SEL[0];
+    }
+
+    const base = new URL(url).origin;
+    const items = [];
+
+    if ($ctn && itemSel) {
+      $ctn.find(itemSel).slice(0, limit).each((i, li) => {
+        const $li = $(li);
+        const $a = $li.find('a').first();
+        const $img = $a.find('img').first().length ? $a.find('img').first() : $li.find('img').first();
+
+        const link = toAbs(base, $a.attr('href'));
+        const picRel = getImgSrc($img);
+        const image = toAbs(base, picRel);
+
+        // 标题优先取图片 alt，其次 a.title；再不行就取 li 文本
+        const title = ($img.attr('alt') || $a.attr('title') || $li.text() || '').trim().replace(/\s+/g, ' ');
+
+        if (title || image || link) {
+          items.push({
+            index: i + 1,
+            sku: title,       // 先把标题放在 sku，前端已有映射
+            desc: '',         // 静态页一般列表无详细描述，这里空置
+            minQty: '',       // 无
+            price: '',        // 列表价多数缺失，保持空
+            img: image,
+            link
+          });
+        }
+      });
+    }
+
+    // ---------- 3) 输出 ----------
+    const payload = {
+      ok: true,
+      url,
+      count: items.length,
+      items
+    };
+
+    if (wantDebug) {
+      payload.debug = {
+        requested_url: url,
+        detected_encoding: encDetected,
+        used_encoding: useGb ? 'gb18030' : 'utf-8',
+        list_found: listFound,
+        container_matched: containerSel,
+        item_selector_used: itemSel || null,
+        tried: {
+          container: CONTAINER_SEL,
+          item: ITEM_SEL
+        },
+        item_count: items.length,
+        first_item_html: $ctn && itemSel ? $ctn.find(itemSel).first().html()?.slice(0, 300) : null
+      };
+    }
+
+    return res.status(200).json(payload);
+  } catch (err) {
+    // 为了前端统一处理，错误也返回 200，但 ok=false
+    return res.status(200).json({ ok: false, error: String(err), count: 0, items: [] });
+  }
+}
+
+// 同时注册两条路径，兼容是否在 server.js 挂载到 /v1/api/catalog
+router.all('/parse', handleParse);
+router.all('/v1/api/catalog/parse', handleParse);
 
 export default router;
