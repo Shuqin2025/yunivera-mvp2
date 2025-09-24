@@ -1,158 +1,78 @@
 // backend/adapters/sinotronic.js
-import axios from "axios";
-import * as cheerio from "cheerio";
-import iconv from "iconv-lite";
-import jschardet from "jschardet";
+import { URL as NodeURL } from "url";
 
-/** 这个适配器是否匹配该域名 */
-export function matches(url) {
-  return /(^|\.)sinotronic-e\.com/i.test(new URL(url).hostname);
-}
-
-function normalizeCharset(s) {
-  if (!s) return "utf-8";
-  s = s.toLowerCase();
-  if (s.includes("gb2312") || s.includes("gbk")) return "gbk";
-  if (s.includes("big5")) return "big5";
-  return "utf-8";
-}
-
-/** 把相对地址转绝对 */
-function abs(base, maybeRelative) {
-  if (!maybeRelative) return "";
-  try {
-    return new URL(maybeRelative, base).toString();
-  } catch {
-    return maybeRelative;
-  }
-}
-
-/** 挑一个非空的字段 */
-function pick(...xs) {
-  for (const x of xs) if (x && String(x).trim()) return String(x).trim();
-  return "";
-}
-
-/** 取图片字段（兼容懒加载） */
-function pickImg($el) {
-  return (
-    $el.attr("src") ||
-    $el.attr("data-src") ||
-    $el.attr("data-original") ||
-    $el.attr("data-lazy") ||
-    ""
-  );
-}
-
-/** 拉取并自动按 charset 解码为字符串 */
-async function fetchHtml(url) {
-  const res = await axios.get(url, {
-    responseType: "arraybuffer",
-    headers: {
-      // 更像浏览器，降低被拦截概率
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
-      Accept:
-        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-      Referer: new URL(url).origin + "/",
-    },
-    timeout: 20000,
-    validateStatus: () => true,
-  });
-
-  const buf = Buffer.from(res.data);
-  let charset = normalizeCharset(res.headers["content-type"] || "");
-
-  // 从内容里再探测一次
-  try {
-    const head = buf.slice(0, 4096).toString("ascii");
-    const m =
-      head.match(/<meta[^>]+charset=["']?([\w-]+)["']?/i) ||
-      head.match(/charset=([\w-]+)/i);
-    if (m) charset = normalizeCharset(m[1]);
-  } catch {}
-
-  if (!charset || charset === "utf-8") {
+/**
+ * 解析 http://www.sinotronic-e.com/list/?11_1.html 这类静态频道页
+ * - 列表容器：#productlist ul > li
+ * - a[href] 为详情链接，img[src] 为缩略图
+ * - 需要把相对路径补全为绝对 URL
+ */
+export default function parseSinotronic($, { url, limit = 50 } = {}) {
+  const base = (() => {
     try {
-      const det = jschardet.detect(buf);
-      if (det && det.encoding) charset = normalizeCharset(det.encoding);
-    } catch {}
+      return new NodeURL(url).origin;
+    } catch {
+      return "http://www.sinotronic-e.com";
+    }
+  })();
+
+  const abs = (href = "") => {
+    try {
+      return new NodeURL(href || "", base).href;
+    } catch {
+      return href || base;
+    }
+  };
+
+  // 1) 优先使用权威选择器；给一组兜底，避免模板小改就失效
+  let $items = $("#productlist ul > li");
+  if ($items.length === 0) {
+    $items = $(".editor#productlist li, .productlist li, .list li"); // 兜底
   }
 
-  const html = iconv.decode(buf, charset || "utf-8");
-  return { html, status: res.status, charset };
-}
+  const out = [];
+  $items.each((i, li) => {
+    if (out.length >= limit) return false; // break
 
-/** 解析列表页 */
-export async function parse(url, { limit = 50 } = {}) {
-  const { html } = await fetchHtml(url);
-  const $ = cheerio.load(html, { decodeEntities: false });
-
-  const items = [];
-
-  // 1) 官方列表容器 (你页面右侧 HTML 片段显示：#productlist > li > a > img)
-  $("#productlist li").each((_, li) => {
     const $li = $(li);
-    const $a = $li.find("a").first();
+    const $a = $li.find("a[href]").first();
+    if ($a.length === 0) return;
+
+    // 图片：先找 <img src>；常见兜底 data-src / data-original
     const $img = $li.find("img").first();
+    const imgRaw =
+      $img.attr("src") ||
+      $img.attr("data-src") ||
+      $img.attr("data-original") ||
+      "";
+    const hrefRaw = $a.attr("href") || "";
 
-    const link = abs(url, $a.attr("href"));
-    const img = abs(url, pickImg($img));
-    const title = pick(
-      $img.attr("alt"),
-      $img.attr("title"),
-      $a.attr("title"),
-      $a.text()
-    );
+    // 标题/描述：img@alt > a@title > 文本
+    let title =
+      ($img.attr("alt") || $a.attr("title") || $li.text() || "")
+        .replace(/\s+/g, " ")
+        .trim();
 
-    if (title || img || link) {
-      items.push({
-        sku: title,     // 该站没有明确货号，只能用标题
-        desc: "",       // 列表无描述
-        img,
-        link,
-        minQty: "",
-        price: "",
-      });
+    if (!title) {
+      // 兜底一个可读的 sku
+      try {
+        const u = new NodeURL(hrefRaw, base);
+        title = decodeURIComponent(u.pathname.split("/").filter(Boolean).pop() || "");
+      } catch {
+        title = hrefRaw || "item";
+      }
     }
+
+    out.push({
+      sku: title,               // 先用标题顶上
+      title,                    // 同步放在 title
+      url: abs(hrefRaw),        // 详情链接（绝对）
+      img: imgRaw ? abs(imgRaw) : "", // 缩略图（绝对）
+      price: "",                // 此站频道页无价，保留空字段
+      currency: "",
+      moq: ""
+    });
   });
 
-  // 2) 备选结构（有些频道模板不同）
-  if (items.length === 0) {
-    $(".productlist li, .proList li, .product_item, ul.productlist li").each(
-      (_, li) => {
-        const $li = $(li);
-        const $a = $li.find("a").first();
-        const $img = $li.find("img").first();
-
-        const link = abs(url, $a.attr("href"));
-        const img = abs(url, pickImg($img));
-        const title = pick(
-          $img.attr("alt"),
-          $img.attr("title"),
-          $a.attr("title"),
-          $a.text(),
-          $li.find("h3,h4").first().text()
-        );
-
-        if (title || img || link) {
-          items.push({
-            sku: title,
-            desc: "",
-            img,
-            link,
-            minQty: "",
-            price: "",
-          });
-        }
-      }
-    );
-  }
-
-  // 限制数量，保持网关/前端预期结构
-  const out = items.slice(0, Math.max(1, Number(limit) || 50));
-  return { ok: true, url, count: out.length, items: out };
+  return out;
 }
-
-export default { matches, parse };
-
