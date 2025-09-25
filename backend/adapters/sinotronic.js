@@ -28,19 +28,19 @@ const decodeBuffer = (buf) => {
 };
 
 const CONTAINER_CANDIDATES = ["#productlist", ".productlist", "main", "body"];
-const ITEM_CANDIDATES = ["#productlist ul > li", ".product", "li"];
+const ITEM_CANDIDATES      = ["#productlist ul > li", ".product", "li"];
 
 function extractItems($, base, $items, limit, debug) {
   const items = [];
   $items.each((_, el) => {
     if (items.length >= limit) return;
 
-    const $li = $(el);
+    const $li  = $(el);
     const $img = $li.find("img").first();
     const imgRel = pickAttr($img, ["src", "data-src", "data-original"]);
-    const img = toAbs(imgRel, base);
+    const img    = toAbs(imgRel, base);
 
-    const $a = $li.find("a").first();
+    const $a   = $li.find("a").first();
     const link = toAbs($a.attr("href") || "", base);
 
     const title =
@@ -75,7 +75,7 @@ export default async function parseSinotronic(url, opts = {}) {
   } = opts;
 
   const wantBase64 = String(img).toLowerCase() === "base64";
-  const wantDebug  = ["1","true","yes","on"].includes(String(rawDebug).toLowerCase());
+  const wantDebug  = ["1","true","yes","on", "true"].includes(String(rawDebug).toLowerCase());
 
   const resp = await axios.get(url, {
     responseType: "arraybuffer",
@@ -87,7 +87,7 @@ export default async function parseSinotronic(url, opts = {}) {
   });
 
   const { html, encoding, guess } = decodeBuffer(Buffer.from(resp.data));
-  const $ = cheerioLoad(html);
+  const $ = cheerioLoad(html, { decodeEntities: false });
 
   const debug = wantDebug ? {
     tried: { container: [], item: [] },
@@ -110,7 +110,7 @@ export default async function parseSinotronic(url, opts = {}) {
   let usedItemSel = "";
   for (const sel of ITEM_CANDIDATES) {
     const list = $ctn.find(sel);
-    const cnt = list.length;
+    const cnt  = list.length;
     if (wantDebug) debug.tried.item.push({ selector: sel, matched: cnt });
     if (cnt) { $items = list; usedItemSel = sel; break; }
   }
