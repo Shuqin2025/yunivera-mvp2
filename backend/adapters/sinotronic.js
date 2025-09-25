@@ -44,7 +44,7 @@ function abs(origin, href = "") {
 }
 const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
 
-/** 适配器主函数：传入 url（路由已经抓调试信息，这里再抓一次最稳） */
+/** 适配器主函数 */
 export async function parse(inputUrl, options = {}) {
   const { limit = 50, debug = false } = options;
 
