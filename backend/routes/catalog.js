@@ -1,8 +1,8 @@
 // backend/routes/catalog.js
-// 统一目录解析路由：支持 GET/POST /v1/api/catalog/parse
+// 统一目录解析：支持 GET/POST /v1/api/catalog/parse
 // - 自动探测并解码页面（UTF-8/GBK/GB2312 → gb18030 兜底）
-// - 站点专用适配（sinotronic-e）+ 兜底解析（通用选择器）
-// - 返回 debug 信息（debug=1 时）
+// - 站点适配（sinotronic-e）+ 通用兜底解析
+// - debug=1 时透传详细调试信息，便于核对 DOM
 
 import { Router } from 'express';
 import axios from 'axios';
@@ -10,14 +10,14 @@ import * as cheerio from 'cheerio';
 import jschardet from 'jschardet';
 import iconv from 'iconv-lite';
 
-// 站点适配器
+// 站点适配器（需存在 ../adapters/sinotronic.js，导出 { test(url), parse($, url, {limit, debug}) }）
 import sinotronic from '../adapters/sinotronic.js';
 
 const router = Router();
 
-// 兜底容器/条目选择器（通用）
+// -------- 兜底选择器（含你的同事建议） --------
 const CONTAINER_FALLBACK = [
-  '#productlist',          // <- 你和同事要求的兜底
+  '#productlist',      // ✅ 明确兜底
   '.productlist',
   '.listBox',
   '.list',
@@ -28,23 +28,31 @@ const CONTAINER_FALLBACK = [
 ];
 
 const ITEM_FALLBACK = [
-  '#productlist ul > li',  // <- 你和同事要求的兜底
+  '#productlist ul > li',  // ✅ 明确兜底
   'ul.products > li',
-  'ul > li',
   '.product',
   '.product-item',
   '.productItem',
   '.product-box',
+  'ul > li',
   'li',
 ];
 
-// 拉取并解码 HTML
-async function fetchHtml(url, debugWanted) {
+// -------- 工具函数 --------
+const absolutize = (href, baseUrl) => {
+  if (!href) return '';
+  try { return new URL(href, baseUrl).href; } catch { return href; }
+};
+
+const toBool = (v) =>
+  v === 1 || v === '1' || String(v).toLowerCase() === 'true';
+
+// 拉取并解码 HTML（gb 系列统一 gb18030）
+async function fetchHtml(url, wantDebug) {
   const res = await axios.get(url, {
     responseType: 'arraybuffer',
     timeout: 20000,
     headers: {
-      // 模拟常见浏览器（很多外贸站点会做 UA 简单判断）
       'User-Agent':
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',
       'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -53,177 +61,160 @@ async function fetchHtml(url, debugWanted) {
     validateStatus: () => true,
   });
 
-  const buf = Buffer.from(res.data);
-  let detected = jschardet.detect(buf)?.encoding || '';
-  if (detected) detected = detected.toLowerCase();
+  const buf = Buffer.from(res.data || []);
+  let enc = (jschardet.detect(buf)?.encoding || '').toLowerCase();
+  const use = !enc || enc === 'ascii' ? 'utf-8' : (enc.includes('gb') ? 'gb18030' : (iconv.encodingExists(enc) ? enc : 'utf-8'));
+  const html = iconv.decode(buf, use);
 
-  // gb 系列统一用 gb18030 解码最保险
-  const useEnc =
-    !detected || detected === 'ascii'
-      ? 'utf-8'
-      : detected.includes('gb')
-      ? 'gb18030'
-      : iconv.encodingExists(detected)
-      ? detected
-      : 'utf-8';
-
-  const html = iconv.decode(buf, useEnc);
-
-  const debugPart = debugWanted ? { detected_encoding: useEnc, http_status: res.status } : undefined;
-
-  return { html, detected_encoding: useEnc, status: res.status, debugPart };
+  return {
+    html,
+    status: res.status,
+    debugFetch: wantDebug ? { detected_encoding: use, http_status: res.status, content_length: buf.length } : undefined,
+  };
 }
 
-// 兜底解析（通用 cheerio 规则）
+// 通用兜底解析（cheerio）
 function genericExtract($, baseUrl, { limit = 50, debug = false } = {}) {
   const tried = { container: [], item: [] };
 
-  // 找容器
-  let $container = cheerio.load('<div></div>')('div'); // 空占位
-  for (const c of CONTAINER_FALLBACK) {
-    tried.container.push(c);
-    const hit = $(c);
-    if (hit.length) {
-      $container = hit.first();
-      break;
-    }
+  // 1) 找容器
+  let $container = null;
+  for (const sel of CONTAINER_FALLBACK) {
+    tried.container.push(sel);
+    const hit = $(sel);
+    if (hit.length) { $container = hit.first(); break; }
   }
-  if ($container.length === 0) $container = $('body');
+  if (!$container) $container = $('body');
 
-  // 找条目
-  let $items = cheerio.load('<div></div>')('div'); // 空
+  // 2) 找条目
+  let $items = cheerio.load('<i/>')('i'); // 空集
   let itemSelectorUsed = '';
-  for (const s of ITEM_FALLBACK) {
-    tried.item.push(s);
-    const hit = $container.find(s);
-    if (hit.length) {
-      $items = hit;
-      itemSelectorUsed = s;
-      break;
-    }
+  for (const sel of ITEM_FALLBACK) {
+    tried.item.push(sel);
+    const hit = $container.find(sel);
+    if (hit.length) { $items = hit; itemSelectorUsed = sel; break; }
   }
   if ($items.length === 0) {
-    // 再次粗暴兜底
     tried.item.push('li');
     $items = $container.find('li');
     itemSelectorUsed = 'li';
   }
 
-  const absolutize = (href) => {
-    if (!href) return '';
-    try { return new URL(href, baseUrl).href; } catch { return href; }
-  };
-
+  // 3) 抽取
   const items = [];
   $items.each((i, el) => {
     if (items.length >= limit) return false;
+    const $$ = $(el);
 
-    const $el = $(el);
+    // 链接
+    const $a = $$.find('a[href]').first();
+    const link = absolutize($a.attr('href'), baseUrl);
 
-    // 链接：a[href]
-    const $a = $el.find('a[href]').first();
-    const link = absolutize($a.attr('href'));
-
-    // 图片：img[src] / 懒加载 data-src / data-original
-    let src =
-      $el.find('img[src]').attr('src') ||
-      $el.find('img[data-src]').attr('data-src') ||
-      $el.find('img[data-original]').attr('data-original') ||
+    // 图片：src / data-src / data-original
+    const imgSrc =
+      $$.find('img[src]').attr('src') ||
+      $$.find('img[data-src]').attr('data-src') ||
+      $$.find('img[data-original]').attr('data-original') ||
       '';
-    const img = absolutize(src);
+    const img = absolutize(imgSrc, baseUrl);
 
-    // 标题：img@alt > h1~h6 > a > 纯文本
+    // 标题：img@alt > h1~h6 > a > 文本
     let title =
-      ($el.find('img').attr('alt') || '').trim() ||
-      $el.find('h1,h2,h3,h4,h5,h6').first().text().trim() ||
+      ($$.find('img').attr('alt') || '').trim() ||
+      $$.find('h1,h2,h3,h4,h5,h6').first().text().trim() ||
       ($a.text() || '').trim() ||
-      $el.text().trim();
-
+      $$.text().trim();
     title = title.replace(/\s+/g, ' ').trim();
     const sku = title;
 
     if (title || link || img) {
-      items.push({
-        sku,
-        desc: title,
-        minQty: '',
-        price: '',
-        img,
-        link,
-      });
+      items.push({ sku, desc: title, minQty: '', price: '', img, link });
     }
   });
 
-  const debugPart = debug
-    ? {
-        container_matched: $container.length,
-        item_selector_used: itemSelectorUsed,
-        item_count: $items.length,
-        first_item_html: $items.first().html() || null,
-        tried,
-      }
-    : undefined;
+  const debugPart = debug ? {
+    tried,
+    container_matched: $container.length,
+    item_selector_used: itemSelectorUsed,
+    item_count: $items.length,
+    first_item_html: $items.first().html() || null,
+  } : undefined;
 
   return { items, debugPart };
 }
 
-// 主解析：选适配器 -> 否则走通用
+// 选择适配器→否则兜底
 function runExtract(url, html, { limit = 50, debug = false } = {}) {
   const $ = cheerio.load(html, { decodeEntities: false });
 
   let used = 'generic';
   let items = [];
-  let debugFromAdapter;
+  let debugPart;
 
-  if (sinotronic.test(url)) {
+  // 1) 站点适配（如果命中）
+  if (sinotronic?.test?.(url)) {
     const out = sinotronic.parse($, url, { limit, debug });
     items = out.items || [];
-    debugFromAdapter = out.debugPart;
+    if (debug && out.debugPart) debugPart = out.debugPart;
     used = 'sinotronic-e';
   }
 
+  // 2) 如果没抓到，再兜底
   if (items.length === 0) {
     const out = genericExtract($, url, { limit, debug });
-    if (!items.length) items = out.items || [];
-    if (debug && !debugFromAdapter) debugFromAdapter = out.debugPart;
-    if (items.length && used === 'generic') used = 'generic';
+    items = out.items || [];
+    if (debug && !debugPart) debugPart = out.debugPart;
+    used = items.length ? used : 'generic';
   }
 
-  return { items, adapter_used: used, debugPart: debug ? debugFromAdapter : undefined };
+  return { items, adapter_used: used, debugPart };
 }
 
 // ------------------- 路由 -------------------
-
 router.all('/parse', async (req, res) => {
   try {
     const isGet = req.method === 'GET';
     const url = (isGet ? req.query.url : req.body?.url) || '';
 
-    if (!url) {
-      return res.status(400).json({ ok: false, error: 'missing url' });
-    }
+    if (!url) return res.status(400).json({ ok: false, error: 'missing url' });
 
-    const limitRaw = (isGet ? req.query.limit : req.body?.limit) ?? 50;
-    const limit = Math.max(0, parseInt(limitRaw, 10) || 50);
+    const limitRaw = (isGet ? req.query.limit : req.body?.limit);
+    const limit = Math.max(1, parseInt(limitRaw ?? 50, 10) || 50);
 
-    // debug=1 / true 时开启
-    const debugWantedRaw = (isGet ? req.query.debug : req.body?.debug);
-    const debugWanted =
-      debugWantedRaw === 1 ||
-      debugWantedRaw === '1' ||
-      String(debugWantedRaw).toLowerCase() === 'true';
+    const debugWanted = toBool(isGet ? req.query.debug : req.body?.debug);
 
-    // 拉取 & 解码
-    const { html, detected_encoding, status, debugPart: fetchDebug } = await fetchHtml(url, debugWanted);
+    // 1) 拉取并解码
+    const { html, status, debugFetch } = await fetchHtml(url, debugWanted);
     if (!html || status >= 400) {
-      const resp = { ok: false, url, status, error: 'fetch failed' };
-      if (debugWanted) resp.debug = { ...(fetchDebug || {}), step: 'fetch' };
-      return res.status(200).json(resp);
+      const fail = { ok: false, url, status, error: 'fetch failed' };
+      if (debugWanted) fail.debug = { ...(debugFetch || {}), step: 'fetch' };
+      return res.status(200).json(fail);
     }
 
-    // 解析
+    // 2) 解析
     const { items, adapter_used, debugPart } = runExtract(url, html, { limit, debug: debugWanted });
 
+    // 3) 输出（兼容旧前端：保留 products 字段）
     const payload = {
       ok: true,
-     
+      url,
+      count: items.length,
+      products: [],
+      items,
+    };
+
+    if (debugWanted) {
+      payload.debug = {
+        ...(debugFetch || {}),
+        adapter_used,
+        ...(debugPart || {}),
+      };
+    }
+
+    return res.status(200).json(payload);
+  } catch (err) {
+    return res.status(200).json({ ok: false, error: String(err && err.message || err) });
+  }
+});
+
+export default router;
