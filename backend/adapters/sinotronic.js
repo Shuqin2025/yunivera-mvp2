@@ -1,168 +1,151 @@
 // backend/adapters/sinotronic.js
-// 适配 http://www.sinotronic-e.com/ 这类纯静态 HTML（GBK/GB2312）
+// 站点适配：sinotronic-e.com 静态 HTML 列表页
+// 功能：gb18030 解码 + 兜底选择器 + debug
 
 import axios from "axios";
-import * as cheerio from "cheerio";
+import { load as cheerioLoad } from "cheerio";
 import jschardet from "jschardet";
 import iconv from "iconv-lite";
-import { URL as NodeURL } from "url";
 
-const UA =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
+const toAbs = (u, base) => {
+  try { return new URL(u, base).href; } catch { return u || ""; }
+};
 
-export function canHandle(inputUrl = "") {
-  try {
-    const u = new NodeURL(inputUrl);
-    return /(^|\.)sinotronic-e\.com$/i.test(u.hostname);
-  } catch {
-    return false;
+const pickAttr = ($el, list) => {
+  for (const k of list) {
+    const v = $el.attr(k);
+    if (v) return v;
   }
-}
+  return "";
+};
 
-async function fetchHtmlWithDecode(url) {
-  const resp = await axios.get(url, {
-    responseType: "arraybuffer",
-    headers: { "User-Agent": UA, "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8" },
-    timeout: 20000,
-    validateStatus: (s) => s >= 200 && s < 400,
-  });
-
-  const buf = Buffer.from(resp.data);
-  let enc = "utf-8";
-  const det = jschardet.detect(buf);
-  if (det?.encoding?.toLowerCase().includes("gb")) enc = "gb18030";
+const decodeBuffer = (buf) => {
+  const head = buf.subarray(0, Math.min(buf.length, 2048));
+  const guess = jschardet.detect(head)?.encoding || "";
+  const enc = /gb/i.test(guess) ? "gb18030" : "utf-8";
   const html = iconv.decode(buf, enc);
-  return { html, encoding: enc, status: resp.status };
-}
+  return { html, encoding: enc, guess };
+};
 
-function abs(origin, href = "") {
-  try {
-    return new NodeURL(href, origin).href;
-  } catch {
-    return href || "";
-  }
-}
-const norm = (s) => (s || "").replace(/\s+/g, " ").trim();
+const CONTAINER_CANDIDATES = ["#productlist", ".productlist", "main", "body"];
+const ITEM_CANDIDATES = ["#productlist ul > li", ".product", "li"];
 
-/** 适配器主函数 */
-export async function parse(inputUrl, options = {}) {
-  const { limit = 50, debug = false } = options;
+function extractItems($, base, $items, limit, debug) {
+  const items = [];
+  $items.each((_, el) => {
+    if (items.length >= limit) return;
 
-  const dbg = {
-    tried: { container: [], item: [] },
-    detected_encoding: "",
-    container_matched: "",
-    item_selector_used: "",
-    first_item_html: "",
-    item_count: 0,
-  };
+    const $li = $(el);
+    const $img = $li.find("img").first();
+    const imgRel = pickAttr($img, ["src", "data-src", "data-original"]);
+    const img = toAbs(imgRel, base);
 
-  const { html, encoding } = await fetchHtmlWithDecode(inputUrl);
-  dbg.detected_encoding = encoding;
+    const $a = $li.find("a").first();
+    const link = toAbs($a.attr("href") || "", base);
 
-  const $ = cheerio.load(html, { decodeEntities: false });
-  const base = new NodeURL(inputUrl).origin;
+    const title =
+      ($img.attr("alt") || "").trim() ||
+      ($a.text() || "").trim() ||
+      ($li.text() || "").trim();
 
-  // —— 容器兜底（把你们核对的放前面）——
-  const CONTAINERS = [
-    "#productlist",
-    ".editor#productlist",
-    ".productlist",
-    "#productList",
-    ".product-list",
-    ".list",
-    ".lists",
-    ".contentlist",
-    "ul.prolist",
-    "ul.products",
-  ];
+    if (!title && !img && !link) return;
 
-  // —— 条目兜底 ——（优先你给的）
-  const ITEM_FALLBACK = [
-    "#productlist ul > li",
-    "ul > li",
-    ".product",
-    ".product_item",
-    ".product-box",
-    ".productbox",
-    ".list-item",
-    ".pro-item",
-    ".item",
-  ];
-
-  let $container = null;
-  for (const sel of CONTAINERS) {
-    dbg.tried.container.push(sel);
-    const hit = $(sel);
-    if (hit && hit.length) {
-      $container = hit.first();
-      dbg.container_matched = sel;
-      break;
-    }
-  }
-  if (!$container) {
-    $container = $("body");
-    dbg.container_matched = "body";
-  }
-
-  let $items = $();
-  for (const isel of ITEM_FALLBACK) {
-    dbg.tried.item.push(isel);
-    const found = $container.find(isel);
-    if (found && found.length) {
-      $items = found;
-      dbg.item_selector_used = isel;
-      break;
-    }
-  }
-  if (!$items || !$items.length) {
-    const fallback = $container.find("li");
-    if (fallback && fallback.length) {
-      $items = fallback;
-      dbg.item_selector_used = "li (fallback)";
-    }
-  }
-
-  const out = [];
-  $items.each((i, el) => {
-    if (out.length >= Number(limit || 50)) return false;
-
-    const it = $(el);
-    if (!dbg.first_item_html) dbg.first_item_html = $.html(it).slice(0, 2000);
-
-    const a = it.find("a[href]").first();
-    const href = abs(base, a.attr("href") || "");
-
-    const img = it.find("img").first();
-    let imgSrc = img.attr("src") || img.attr("data-src") || img.attr("data-original") || "";
-    imgSrc = abs(base, imgSrc);
-
-    const title = norm(
-      img.attr("alt") ||
-        a.attr("title") ||
-        a.text() ||
-        it.find("h3,h4,h5").first().text() ||
-        it.text()
-    );
-
-    if (!title && !href && !imgSrc) return;
-
-    out.push({
+    items.push({
       sku: title,
       desc: title,
       minQty: "",
       price: "",
-      img: imgSrc,
-      link: href || inputUrl,
+      img,
+      link,
     });
+
+    if (debug && items.length === 1) {
+      debug.first_item_html = $.html($li);
+    }
   });
-
-  dbg.item_count = out.length;
-
-  const payload = { ok: true, url: inputUrl, products: [], items: out };
-  if (debug) payload.debug = dbg;
-  return payload;
+  return items;
 }
 
-// 也提供默认导出（兼容旧写法）
-export default { canHandle, parse };
+export default async function parseSinotronic(url, opts = {}) {
+  const {
+    limit = 50,
+    img = "",
+    imgCount = 0,
+    debug: rawDebug = false,
+  } = opts;
+
+  const wantBase64 = String(img).toLowerCase() === "base64";
+  const wantDebug  = ["1","true","yes","on"].includes(String(rawDebug).toLowerCase());
+
+  const resp = await axios.get(url, {
+    responseType: "arraybuffer",
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    },
+  });
+
+  const { html, encoding, guess } = decodeBuffer(Buffer.from(resp.data));
+  const $ = cheerioLoad(html);
+
+  const debug = wantDebug ? {
+    tried: { container: [], item: [] },
+    detected_encoding: encoding,
+    charset_guess: guess || ""
+  } : null;
+
+  // 选容器
+  let $ctn = null;
+  let usedCtn = "";
+  for (const sel of CONTAINER_CANDIDATES) {
+    const cnt = $(sel).length;
+    if (wantDebug) debug.tried.container.push({ selector: sel, matched: cnt });
+    if (cnt) { $ctn = $(sel).first(); usedCtn = sel; break; }
+  }
+  if (!$ctn) { $ctn = $("body"); usedCtn = "body"; }
+
+  // 选条目
+  let $items = $();
+  let usedItemSel = "";
+  for (const sel of ITEM_CANDIDATES) {
+    const list = $ctn.find(sel);
+    const cnt = list.length;
+    if (wantDebug) debug.tried.item.push({ selector: sel, matched: cnt });
+    if (cnt) { $items = list; usedItemSel = sel; break; }
+  }
+  if (!$items.length) {
+    const list = $("#productlist ul > li");
+    if (list.length) { $items = list; usedItemSel = "#productlist ul > li (fallback)"; }
+  }
+
+  if (wantDebug) {
+    debug.container_matched  = usedCtn;
+    debug.item_selector_used = usedItemSel;
+    debug.item_count         = $items.length || 0;
+  }
+
+  // 抽取
+  const origin = new URL(url).origin + "/";
+  let items = extractItems($, origin, $items, limit, debug);
+
+  // 可选：转 base64（默认关闭）
+  if (wantBase64 && items.length && imgCount > 0) {
+    const N = Math.min(imgCount, items.length);
+    await Promise.all(
+      items.slice(0, N).map(async (it) => {
+        if (!it.img) return;
+        try {
+          const r = await axios.get(it.img, { responseType: "arraybuffer" });
+          const b64 = Buffer.from(r.data).toString("base64");
+          const ext = (it.img.split(".").pop() || "jpg").toLowerCase();
+          it.img = `data:image/${ext};base64,${b64}`;
+        } catch { /* ignore */ }
+      })
+    );
+  }
+
+  const payload = { ok: true, url, count: items.length, products: [], items };
+  if (wantDebug) payload.debug = debug;
+  return payload;
+}
