@@ -1,196 +1,247 @@
 // backend/routes/catalog.js
-const express = require("express");
-const axios = require("axios");
-const cheerio = require("cheerio");
-const jschardet = require("jschardet");
-const iconv = require("iconv-lite");
-const { URL: NodeURL } = require("url");
+// 统一：GET/POST /v1/api/catalog/parse
+// 关键点：按 gb18030 解码、兜底选择器、把 debug 透传出来
 
-const router = express.Router();
+import express from "express";
+import axios from "axios";
+import { load as cheerioLoad } from "cheerio";
+import jschardet from "jschardet";
+import iconv from "iconv-lite";
 
-// ---------- helpers ----------
-const UA =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
+// —— 工具 —— //
+const toAbs = (u, base) => {
+  try { return new URL(u, base).href; } catch { return u || ""; }
+};
 
-function abs(base, href) {
-  try {
-    return new NodeURL(href || "", base).toString();
-  } catch {
-    return href || "";
-  }
-}
-
-async function downloadPage(url) {
-  const res = await axios.get(url, {
-    responseType: "arraybuffer",
-    headers: {
-      "User-Agent": UA,
-      "Accept-Language": "zh-CN,zh;q=0.8,en;q=0.7",
-      Accept:
-        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    },
-    timeout: 20000,
-    maxRedirects: 5,
-    validateStatus: (s) => s >= 200 && s < 400,
-  });
-
-  const buf = Buffer.from(res.data);
-  let enc = "utf-8";
-  try {
-    const det = jschardet.detect(buf);
-    if (det?.encoding) enc = det.encoding.toLowerCase();
-  } catch {}
-  if (/gbk|gb2312/.test(enc)) enc = "gb18030";
-
-  let html;
-  try {
-    html = iconv.decode(buf, enc);
-  } catch {
-    html = buf.toString();
-  }
-  return { html, encoding: enc, status: res.status };
-}
-
-function pickAttr($el, names) {
-  for (const n of names) {
-    const v = ($el.attr(n) || "").trim();
+const pickAttr = ($el, list) => {
+  for (const k of list) {
+    const v = $el.attr(k);
     if (v) return v;
   }
   return "";
+};
+
+const decodeBuffer = (buf) => {
+  // 先猜编码；gb18030 覆盖 GBK/GB2312
+  const head = buf.subarray(0, Math.min(buf.length, 2048));
+  const guess = jschardet.detect(head)?.encoding || "";
+  const enc = /gb/i.test(guess) ? "gb18030" : "utf-8";
+  const html = iconv.decode(buf, enc);
+  return { html, encoding: enc, guess };
+};
+
+// —— 兜底选择器（含 #productlist） —— //
+const CONTAINER_CANDIDATES = [
+  "#productlist",
+  ".productlist",
+  ".products-list",
+  ".products",
+  ".list-products",
+  "ul.products",
+  "#products",
+  "main .list",
+  "main ul",
+];
+
+const ITEM_CANDIDATES = [
+  "#productlist ul > li",
+  "li.product",
+  ".product",
+  ".product-item",
+  "ul.products > li",
+  ".items > li",
+  "li",
+];
+
+// —— 抽取条目 —— //
+function extractItems($, base, $items, limit, debug) {
+  const items = [];
+  $items.each((_, el) => {
+    if (items.length >= limit) return;
+
+    const $li = $(el);
+
+    // 图片：src / data-src / data-original
+    const $img = $li.find("img").first();
+    const imgRel = pickAttr($img, ["src", "data-src", "data-original"]);
+    const img = toAbs(imgRel, base);
+
+    // 链接 & 文本
+    const $a = $li.find("a").first();
+    const link = toAbs($a.attr("href") || "", base);
+
+    // 名称：img alt > a 文本 > li 文本
+    const title =
+      ($img.attr("alt") || "").trim() ||
+      ($a.text() || "").trim() ||
+      ($li.text() || "").trim();
+
+    if (!title && !link && !img) return; // 过滤空白 li
+
+    items.push({
+      sku: title,      // 先用标题占位
+      desc: title,
+      minQty: "",
+      price: "",
+      img,
+      link,
+    });
+
+    if (items.length === 1 && debug) {
+      debug.first_item_html = $.html($li);
+    }
+  });
+  return items;
 }
 
-function parseList(html, baseUrl, { limit = 50, debug = false } = {}) {
-  const $ = cheerio.load(html, { decodeEntities: false });
+const router = express.Router();
 
-  // 兜底容器/条目选择器（按你同事建议）
-  const tried = { container: [], item: [] };
-  const containerSelectors = [
-    "#productlist",
-    ".productlist",
-    ".listing-container",
-    ".products",
-    "main",
-    "body",
-  ];
-  let $container = null;
-  for (const sel of containerSelectors) {
-    tried.container.push(sel);
-    const $c = $(sel).first();
-    if ($c.length) {
-      $container = $c;
-      break;
-    }
-  }
-  if (!$container) $container = $("body");
+// 兼容 GET/POST
+router.get("/parse", handler);
+router.post("/parse", handler);
 
-  const itemSelectors = [
-    "#productlist ul > li",
-    ".product-box, .product, .product__item",
-    "ul > li",
-    "li",
-  ];
-
-  let items = [];
-  let itemSelectorUsed = "";
-  for (const sel of itemSelectors) {
-    tried.item.push(sel);
-    const $cands = $container.find(sel);
-    if ($cands.length) {
-      itemSelectorUsed = sel;
-      $cands.slice(0, limit).each((i, el) => {
-        const $el = $(el);
-        const $a = $el.find("a[href]").first();
-        const href = $a.attr("href") || "";
-        const $img = $el.find("img").first();
-        const imgSrc = pickAttr($img, [
-          "src",
-          "data-src",
-          "data-original",
-          "data-lazy",
-          "data-img",
-        ]);
-
-        const title =
-          pickAttr($a, ["title"]) ||
-          pickAttr($img, ["alt"]) ||
-          $el.find("h3,h4,.title").first().text().trim() ||
-          $a.text().trim() ||
-          $el.text().trim().split("\n")[0].trim();
-
-        items.push({
-          sku: title,
-          desc: title,
-          minQty: "",
-          price: "",
-          img: imgSrc ? abs(baseUrl, imgSrc) : "",
-          link: href ? abs(baseUrl, href) : abs(baseUrl, $a.attr("href") || ""),
-        });
-      });
-      break;
-    }
-  }
-
-  const out = {
-    ok: true,
-    url: baseUrl,
-    count: items.length,
-    products: [],
-    items,
-  };
-
-  if (debug) {
-    out.debug = {
-      container_matched: !!$container?.length,
-      item_selector_used: itemSelectorUsed,
-      item_count: items.length,
-      tried,
-      // 方便你肉眼校对
-      first_item_html:
-        items.length && itemSelectorUsed
-          ? $.html($container.find(itemSelectorUsed).first())
-          : "",
-    };
-  }
-
-  return out;
-}
-
-// ---------- main handlers ----------
-async function handleParse(req, res) {
+async function handler(req, res) {
   try {
     const isPost = req.method === "POST";
-    const q = isPost ? req.body || {} : req.query || {};
-    const url = (q.url || "").trim();
-    const limit = Math.max(
-      1,
-      Math.min(parseInt(q.limit || "50", 10) || 50, 200),
-    );
-    const debug =
-      q.debug === 1 || q.debug === "1" || q.debug === true || q.debug === "true";
+    const qp = isPost ? req.body || {} : req.query || {};
 
-    if (!url) {
-      return res.status(400).json({ ok: false, error: "missing url" });
+    const url = (qp.url || "").trim();
+    const limit = Math.max(1, Math.min(+(qp.limit || 50), 200));
+    const wantBase64 = (qp.img || "").toString().toLowerCase() === "base64";
+    const imgCount = +(qp.imgCount || 0);
+    const rawDebug = qp.debug ?? qp.debug1 ?? qp.debug_1;
+    const wantDebug = ["1", "true", "yes", "on"].includes(String(rawDebug ?? "").toLowerCase());
+
+    if (!url) return res.json({ ok: false, error: "missing url" });
+
+    // 拉取页面（二进制）再按编码解码
+    const resp = await axios.get(url, {
+      responseType: "arraybuffer",
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      },
+    });
+
+    const { html, encoding, guess } = decodeBuffer(Buffer.from(resp.data));
+    const $ = cheerioLoad(html);
+
+    // —— 选择容器 —— //
+    const debug = wantDebug
+      ? {
+          tried: { container: [], item: [] },
+          detected_encoding: encoding,
+          charset_guess: guess || "",
+        }
+      : null;
+
+    let $container = null;
+    let containerUsed = "";
+    let maxCount = -1;
+
+    for (const sel of CONTAINER_CANDIDATES) {
+      const cnt = $(sel).length;
+      if (wantDebug) debug.tried.container.push({ selector: sel, matched: cnt });
+      if (cnt > 0 && cnt > maxCount) {
+        maxCount = cnt;
+        $container = $(sel).first();
+        containerUsed = sel;
+      }
     }
 
-    const t0 = Date.now();
-    const { html, encoding } = await downloadPage(url);
-    const out = parseList(html, url, { limit, debug });
-    out.ms = Date.now() - t0;
-
-    if (debug) {
-      out.debug = out.debug || {};
-      out.debug.detected_encoding = encoding;
+    // 如果容器没有命中，退化为 body
+    if (!$container || $container.length === 0) {
+      $container = $("body");
+      containerUsed = "body";
     }
 
-    return res.json(out);
+    // —— 选择条目 —— //
+    let itemUsed = "";
+    let $items = $();
+
+    for (const sel of ITEM_CANDIDATES) {
+      // 容器内找条目
+      const list = $container.find(sel);
+      const cnt = list.length;
+      if (wantDebug) debug.tried.item.push({ selector: sel, matched: cnt });
+      if (cnt > 0) {
+        itemUsed = sel;
+        $items = list;
+        break;
+      }
+    }
+
+    if ($items.length === 0) {
+      // 再尝试全局找一次
+      for (const sel of ITEM_CANDIDATES) {
+        const list = $(sel);
+        const cnt = list.length;
+        if (wantDebug) debug.tried.item.push({ selector: sel, matched: cnt });
+        if (cnt > 0) {
+          itemUsed = sel + " (global)";
+          $items = list;
+          break;
+        }
+      }
+    }
+
+    if (wantDebug) {
+      debug.container_matched = containerUsed;
+      debug.item_selector_used = itemUsed;
+      debug.item_count = $items.length || 0;
+    }
+
+    // —— 抽取 —— //
+    const origin = new URL(url).origin + "/";
+    let items = extractItems($, origin, $items, limit, debug);
+
+    // 兜底：如果还是 0，再把 #productlist 直接做一次固定提取
+    if (items.length === 0) {
+      const fallbackList = $("#productlist ul > li");
+      if (fallbackList.length) {
+        if (wantDebug && !itemUsed) {
+          debug.item_selector_used = "#productlist ul > li (fallback)";
+          debug.item_count = fallbackList.length;
+        }
+        items = extractItems($, origin, fallbackList, limit, debug);
+      }
+    }
+
+    // 是否把图片转 base64（默认关）
+    if (wantBase64 && items.length && imgCount > 0) {
+      const N = Math.min(imgCount, items.length);
+      await Promise.all(
+        items.slice(0, N).map(async (it) => {
+          if (!it.img) return;
+          try {
+            const r = await axios.get(it.img, { responseType: "arraybuffer" });
+            const b64 = Buffer.from(r.data).toString("base64");
+            const ext = (it.img.split(".").pop() || "jpg").toLowerCase();
+            it.img = `data:image/${ext};base64,${b64}`;
+          } catch {
+            /* ignore */
+          }
+        })
+      );
+    }
+
+    const payload = {
+      ok: true,
+      url,
+      count: items.length,
+      products: [], // 兼容老字段
+      items,        // 新前端用这个
+    };
+    if (wantDebug) payload.debug = debug;
+
+    res.json(payload);
   } catch (err) {
-    return res
-      .status(500)
-      .json({ ok: false, error: err?.message || "parse failed" });
+    res.status(200).json({
+      ok: false,
+      error: String(err && err.message ? err.message : err),
+    });
   }
 }
 
-router.get("/v1/api/catalog/parse", handleParse);
-router.post("/v1/api/catalog/parse", handleParse);
-
-module.exports = router;
+export default router;
