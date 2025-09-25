@@ -1,181 +1,229 @@
 // backend/routes/catalog.js
-// 统一：GET/POST /v1/api/catalog/parse
-// 关键点：gb18030 解码、兜底选择器、把 debug 透传出来；优先命中 sinotronic 适配器
+// 统一目录解析路由：支持 GET/POST /v1/api/catalog/parse
+// - 自动探测并解码页面（UTF-8/GBK/GB2312 → gb18030 兜底）
+// - 站点专用适配（sinotronic-e）+ 兜底解析（通用选择器）
+// - 返回 debug 信息（debug=1 时）
 
-import express from "express";
-import axios from "axios";
-import { load as cheerioLoad } from "cheerio";
-import jschardet from "jschardet";
-import iconv from "iconv-lite";
-import parseSinotronic from "../adapters/sinotronic.js";
+import { Router } from 'express';
+import axios from 'axios';
+import * as cheerio from 'cheerio';
+import jschardet from 'jschardet';
+import iconv from 'iconv-lite';
 
-// —— 工具 —— //
-const toAbs = (u, base) => { try { return new URL(u, base).href; } catch { return u || ""; } };
-const pickAttr = ($el, list) => { for (const k of list) { const v = $el.attr(k); if (v) return v; } return ""; };
-const decodeBuffer = (buf) => {
-  const head = buf.subarray(0, Math.min(buf.length, 2048));
-  const guess = jschardet.detect(head)?.encoding || "";
-  const enc = /gb/i.test(guess) ? "gb18030" : "utf-8";
-  const html = iconv.decode(buf, enc);
-  return { html, encoding: enc, guess };
-};
+// 站点适配器
+import sinotronic from '../adapters/sinotronic.js';
 
-// —— 兜底选择器（含 #productlist） —— //
-const CONTAINER_CANDIDATES = [
-  "#productlist", ".productlist", ".products-list", ".products",
-  ".list-products", "ul.products", "#products", "main .list", "main ul",
-];
-const ITEM_CANDIDATES = [
-  "#productlist ul > li", "li.product", ".product", ".product-item",
-  "ul.products > li", ".items > li", "li",
+const router = Router();
+
+// 兜底容器/条目选择器（通用）
+const CONTAINER_FALLBACK = [
+  '#productlist',          // <- 你和同事要求的兜底
+  '.productlist',
+  '.listBox',
+  '.list',
+  '.products',
+  '.product-list',
+  'main',
+  'body',
 ];
 
-// —— 抽取条目 —— //
-function extractItems($, base, $items, limit, debug) {
+const ITEM_FALLBACK = [
+  '#productlist ul > li',  // <- 你和同事要求的兜底
+  'ul.products > li',
+  'ul > li',
+  '.product',
+  '.product-item',
+  '.productItem',
+  '.product-box',
+  'li',
+];
+
+// 拉取并解码 HTML
+async function fetchHtml(url, debugWanted) {
+  const res = await axios.get(url, {
+    responseType: 'arraybuffer',
+    timeout: 20000,
+    headers: {
+      // 模拟常见浏览器（很多外贸站点会做 UA 简单判断）
+      'User-Agent':
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+    },
+    validateStatus: () => true,
+  });
+
+  const buf = Buffer.from(res.data);
+  let detected = jschardet.detect(buf)?.encoding || '';
+  if (detected) detected = detected.toLowerCase();
+
+  // gb 系列统一用 gb18030 解码最保险
+  const useEnc =
+    !detected || detected === 'ascii'
+      ? 'utf-8'
+      : detected.includes('gb')
+      ? 'gb18030'
+      : iconv.encodingExists(detected)
+      ? detected
+      : 'utf-8';
+
+  const html = iconv.decode(buf, useEnc);
+
+  const debugPart = debugWanted ? { detected_encoding: useEnc, http_status: res.status } : undefined;
+
+  return { html, detected_encoding: useEnc, status: res.status, debugPart };
+}
+
+// 兜底解析（通用 cheerio 规则）
+function genericExtract($, baseUrl, { limit = 50, debug = false } = {}) {
+  const tried = { container: [], item: [] };
+
+  // 找容器
+  let $container = cheerio.load('<div></div>')('div'); // 空占位
+  for (const c of CONTAINER_FALLBACK) {
+    tried.container.push(c);
+    const hit = $(c);
+    if (hit.length) {
+      $container = hit.first();
+      break;
+    }
+  }
+  if ($container.length === 0) $container = $('body');
+
+  // 找条目
+  let $items = cheerio.load('<div></div>')('div'); // 空
+  let itemSelectorUsed = '';
+  for (const s of ITEM_FALLBACK) {
+    tried.item.push(s);
+    const hit = $container.find(s);
+    if (hit.length) {
+      $items = hit;
+      itemSelectorUsed = s;
+      break;
+    }
+  }
+  if ($items.length === 0) {
+    // 再次粗暴兜底
+    tried.item.push('li');
+    $items = $container.find('li');
+    itemSelectorUsed = 'li';
+  }
+
+  const absolutize = (href) => {
+    if (!href) return '';
+    try { return new URL(href, baseUrl).href; } catch { return href; }
+  };
+
   const items = [];
-  $items.each((_, el) => {
-    if (items.length >= limit) return;
-    const $li = $(el);
+  $items.each((i, el) => {
+    if (items.length >= limit) return false;
 
-    const $img = $li.find("img").first();
-    const imgRel = pickAttr($img, ["src", "data-src", "data-original"]);
-    const img = toAbs(imgRel, base);
+    const $el = $(el);
 
-    const $a = $li.find("a").first();
-    const link = toAbs($a.attr("href") || "", base);
+    // 链接：a[href]
+    const $a = $el.find('a[href]').first();
+    const link = absolutize($a.attr('href'));
 
-    const title =
-      ($img.attr("alt") || "").trim() ||
-      ($a.text() || "").trim() ||
-      ($li.text() || "").trim();
+    // 图片：img[src] / 懒加载 data-src / data-original
+    let src =
+      $el.find('img[src]').attr('src') ||
+      $el.find('img[data-src]').attr('data-src') ||
+      $el.find('img[data-original]').attr('data-original') ||
+      '';
+    const img = absolutize(src);
 
-    if (!title && !link && !img) return;
+    // 标题：img@alt > h1~h6 > a > 纯文本
+    let title =
+      ($el.find('img').attr('alt') || '').trim() ||
+      $el.find('h1,h2,h3,h4,h5,h6').first().text().trim() ||
+      ($a.text() || '').trim() ||
+      $el.text().trim();
 
-    items.push({ sku: title, desc: title, minQty: "", price: "", img, link });
+    title = title.replace(/\s+/g, ' ').trim();
+    const sku = title;
 
-    if (items.length === 1 && debug) {
-      debug.first_item_html = $.html($li);
+    if (title || link || img) {
+      items.push({
+        sku,
+        desc: title,
+        minQty: '',
+        price: '',
+        img,
+        link,
+      });
     }
   });
-  return items;
+
+  const debugPart = debug
+    ? {
+        container_matched: $container.length,
+        item_selector_used: itemSelectorUsed,
+        item_count: $items.length,
+        first_item_html: $items.first().html() || null,
+        tried,
+      }
+    : undefined;
+
+  return { items, debugPart };
 }
 
-const router = express.Router();
+// 主解析：选适配器 -> 否则走通用
+function runExtract(url, html, { limit = 50, debug = false } = {}) {
+  const $ = cheerio.load(html, { decodeEntities: false });
 
-// 兼容 GET/POST
-router.get("/parse", handler);
-router.post("/parse", handler);
+  let used = 'generic';
+  let items = [];
+  let debugFromAdapter;
 
-async function handler(req, res) {
-  try {
-    const isPost = req.method === "POST";
-    const qp = isPost ? (req.body || {}) : (req.query || {});
-
-    const url        = (qp.url || "").trim();
-    const limit      = Math.max(1, Math.min(+(qp.limit || 50), 200));
-    const wantBase64 = (qp.img || "").toString().toLowerCase() === "base64";
-    const imgCount   = +(qp.imgCount || 0);
-    const rawDebug   = qp.debug ?? qp.debug1 ?? qp.debug_1;
-    const wantDebug  = ["1", "true", "yes", "on"].includes(String(rawDebug ?? "").toLowerCase());
-
-    if (!url) return res.json({ ok: false, error: "missing url" });
-
-    // —— 先看是否命中 sinotronic 专用适配器 —— //
-    let host = "";
-    try { host = new URL(url).hostname || ""; } catch {}
-    if (host.includes("sinotronic-e.com")) {
-      const payload = await parseSinotronic(url, { limit, img: qp.img, imgCount, debug: wantDebug ? "1" : "" });
-      return res.json(payload);
-    }
-
-    // —— 通用解析（作为兜底） —— //
-    const resp = await axios.get(url, {
-      responseType: "arraybuffer",
-      headers: {
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
-        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      },
-    });
-
-    const { html, encoding, guess } = decodeBuffer(Buffer.from(resp.data));
-    const $ = cheerioLoad(html, { decodeEntities: false });
-
-    const debug = wantDebug
-      ? { tried: { container: [], item: [] }, detected_encoding: encoding, charset_guess: guess || "" }
-      : null;
-
-    // 选容器
-    let $container = null, containerUsed = "", maxCount = -1;
-    for (const sel of CONTAINER_CANDIDATES) {
-      const cnt = $(sel).length;
-      if (wantDebug) debug.tried.container.push({ selector: sel, matched: cnt });
-      if (cnt > 0 && cnt > maxCount) { maxCount = cnt; $container = $(sel).first(); containerUsed = sel; }
-    }
-    if (!$container || $container.length === 0) { $container = $("body"); containerUsed = "body"; }
-
-    // 选条目
-    let itemUsed = "";
-    let $items = $();
-    for (const sel of ITEM_CANDIDATES) {
-      const list = $container.find(sel);
-      const cnt = list.length;
-      if (wantDebug) debug.tried.item.push({ selector: sel, matched: cnt });
-      if (cnt > 0) { itemUsed = sel; $items = list; break; }
-    }
-    if ($items.length === 0) {
-      for (const sel of ITEM_CANDIDATES) {
-        const list = $(sel);
-        const cnt = list.length;
-        if (wantDebug) debug.tried.item.push({ selector: sel, matched: cnt });
-        if (cnt > 0) { itemUsed = sel + " (global)"; $items = list; break; }
-      }
-    }
-    if (wantDebug) {
-      debug.container_matched = containerUsed;
-      debug.item_selector_used = itemUsed;
-      debug.item_count = $items.length || 0;
-    }
-
-    // 抽取
-    const origin = new URL(url).origin + "/";
-    let items = extractItems($, origin, $items, limit, debug);
-
-    // 再兜底一次 #productlist
-    if (items.length === 0) {
-      const fallbackList = $("#productlist ul > li");
-      if (fallbackList.length) {
-        if (wantDebug && !itemUsed) {
-          debug.item_selector_used = "#productlist ul > li (fallback)";
-          debug.item_count = fallbackList.length;
-        }
-        items = extractItems($, origin, fallbackList, limit, debug);
-      }
-    }
-
-    // 可选：转 base64
-    if (wantBase64 && items.length && imgCount > 0) {
-      const N = Math.min(imgCount, items.length);
-      await Promise.all(
-        items.slice(0, N).map(async (it) => {
-          if (!it.img) return;
-          try {
-            const r = await axios.get(it.img, { responseType: "arraybuffer" });
-            const b64 = Buffer.from(r.data).toString("base64");
-            const ext = (it.img.split(".").pop() || "jpg").toLowerCase();
-            it.img = `data:image/${ext};base64,${b64}`;
-          } catch { /* ignore */ }
-        })
-      );
-    }
-
-    const payload = { ok: true, url, count: items.length, products: [], items };
-    if (wantDebug) payload.debug = debug;
-    res.json(payload);
-
-  } catch (err) {
-    res.status(200).json({ ok: false, error: String(err && err.message ? err.message : err) });
+  if (sinotronic.test(url)) {
+    const out = sinotronic.parse($, url, { limit, debug });
+    items = out.items || [];
+    debugFromAdapter = out.debugPart;
+    used = 'sinotronic-e';
   }
+
+  if (items.length === 0) {
+    const out = genericExtract($, url, { limit, debug });
+    if (!items.length) items = out.items || [];
+    if (debug && !debugFromAdapter) debugFromAdapter = out.debugPart;
+    if (items.length && used === 'generic') used = 'generic';
+  }
+
+  return { items, adapter_used: used, debugPart: debug ? debugFromAdapter : undefined };
 }
 
-export default router;
+// ------------------- 路由 -------------------
+
+router.all('/parse', async (req, res) => {
+  try {
+    const isGet = req.method === 'GET';
+    const url = (isGet ? req.query.url : req.body?.url) || '';
+
+    if (!url) {
+      return res.status(400).json({ ok: false, error: 'missing url' });
+    }
+
+    const limitRaw = (isGet ? req.query.limit : req.body?.limit) ?? 50;
+    const limit = Math.max(0, parseInt(limitRaw, 10) || 50);
+
+    // debug=1 / true 时开启
+    const debugWantedRaw = (isGet ? req.query.debug : req.body?.debug);
+    const debugWanted =
+      debugWantedRaw === 1 ||
+      debugWantedRaw === '1' ||
+      String(debugWantedRaw).toLowerCase() === 'true';
+
+    // 拉取 & 解码
+    const { html, detected_encoding, status, debugPart: fetchDebug } = await fetchHtml(url, debugWanted);
+    if (!html || status >= 400) {
+      const resp = { ok: false, url, status, error: 'fetch failed' };
+      if (debugWanted) resp.debug = { ...(fetchDebug || {}), step: 'fetch' };
+      return res.status(200).json(resp);
+    }
+
+    // 解析
+    const { items, adapter_used, debugPart } = runExtract(url, html, { limit, debug: debugWanted });
+
+    const payload = {
+      ok: true,
+     
