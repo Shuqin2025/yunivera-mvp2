@@ -1,55 +1,48 @@
+// backend/adapters/sinotronic.js
 // 站点适配：sinotronic-e.com 静态 HTML 列表页
-// 功能：gb18030 解码 + 兜底选择器 + debug 透出
+// 说明：本适配器只做 DOM 解析，不发请求；由 routes/catalog.js 统一抓取与解码
 
-import axios from "axios";
-import { load as cheerioLoad } from "cheerio";
-import jschardet from "jschardet";
-import iconv from "iconv-lite";
+const CONTAINER_CANDIDATES = ["#productlist", ".productlist", "main", "body"];
+// 优先相对选择器，避免“容器内再找自己”；随后全局兜底
+const ITEM_CANDIDATES = ["ul > li", "li", ".product", "#productlist ul > li"];
 
 const toAbs = (u, base) => {
-  try { return new URL(u, base).href; } catch { return u || ""; }
+  if (!u) return "";
+  try {
+    return new URL(u, base).href;
+  } catch {
+    return u || "";
+  }
 };
 
-const pickAttr = ($el, list) => {
-  for (const k of list) {
+const pickAttr = ($el, attrs) => {
+  for (const k of attrs) {
     const v = $el.attr(k);
     if (v) return v;
   }
   return "";
 };
 
-const decodeBuffer = (buf) => {
-  const head = buf.subarray(0, Math.min(buf.length, 2048));
-  const guess = jschardet.detect(head)?.encoding || "";
-  const enc = /gb/i.test(guess) ? "gb18030" : "utf-8";
-  const html = iconv.decode(buf, enc);
-  return { html, encoding: enc, guess };
-};
-
-// 容器与条目的兜底
-const CONTAINER_CANDIDATES = ["#productlist", ".productlist", "main", "body"];
-// 注意：优先相对选择器，避免“容器内再找自己”的空集问题
-const ITEM_CANDIDATES      = ["ul > li", "li", ".product", "#productlist ul > li"];
-
-function extractItems($, base, $items, limit, debug) {
+function extractItems($, baseUrl, $items, limit, wantDebug, debugObj) {
   const items = [];
-  $items.each((_, el) => {
-    if (items.length >= limit) return;
-    const $li  = $(el);
 
-    const $img   = $li.find("img").first();
+  $items.each((_, li) => {
+    if (items.length >= limit) return false;
+
+    const $li = $(li);
+
+    const $img = $li.find("img").first();
     const imgRel = pickAttr($img, ["src", "data-src", "data-original"]);
-    const img    = toAbs(imgRel, base);
+    const img = toAbs(imgRel, baseUrl);
 
-    const $a   = $li.find("a").first();
-    const link = toAbs($a.attr("href") || "", base);
+    const $a = $li.find("a[href]").first();
+    const link = toAbs($a.attr("href") || "", baseUrl);
 
     const title =
       ($img.attr("alt") || "").trim() ||
       ($a.text() || "").trim() ||
       ($li.text() || "").trim();
 
-    // 至少要有个字段，不然忽略
     if (!title && !img && !link) return;
 
     items.push({
@@ -61,89 +54,80 @@ function extractItems($, base, $items, limit, debug) {
       link,
     });
 
-    if (debug && items.length === 1) {
-      debug.first_item_html = $.html($li);
+    if (wantDebug && items.length === 1) {
+      debugObj.first_item_html = $.html($li);
     }
   });
+
   return items;
 }
 
-export default async function parseSinotronic(url, opts = {}) {
-  const {
-    limit = 50,
-    img = "",
-    imgCount = 0,
-    debug: rawDebug = false,
-  } = opts;
+export default {
+  test(url) {
+    return /https?:\/\/(www\.)?sinotronic-e\.com\//i.test(url);
+  },
 
-  const wantBase64 = String(img).toLowerCase() === "base64";
-  const wantDebug  = ["1", "true", "yes", "on"].includes(String(rawDebug).toLowerCase());
+  /**
+   * @param {$} $           cheerio 实例（调用方已抓取并解码）
+   * @param {string} url    页面 URL
+   * @param {object} opts   { limit?: number, debug?: boolean }
+   */
+  parse($, url, opts = {}) {
+    const { limit = 50, debug: rawDebug = false } = opts;
+    const wantDebug =
+      rawDebug === 1 ||
+      rawDebug === "1" ||
+      String(rawDebug).toLowerCase() === "true";
 
-  const resp = await axios.get(url, {
-    responseType: "arraybuffer",
-    headers: {
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
-      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    },
-  });
+    const debug = wantDebug
+      ? { tried: { container: [], item: [] } }
+      : undefined;
 
-  const { html, encoding, guess } = decodeBuffer(Buffer.from(resp.data));
-  const $ = cheerioLoad(html, { decodeEntities: false });
+    // 1) 选容器
+    let $ctn = $();
+    let usedCtn = "";
+    for (const sel of CONTAINER_CANDIDATES) {
+      const cnt = $(sel).length;
+      if (wantDebug) debug.tried.container.push({ selector: sel, matched: cnt });
+      if (cnt) {
+        $ctn = $(sel).first();
+        usedCtn = sel;
+        break;
+      }
+    }
+    if (!$ctn.length) {
+      $ctn = $("body");
+      usedCtn = "body";
+    }
 
-  const debug = wantDebug ? {
-    tried: { container: [], item: [] },
-    detected_encoding: encoding,
-    charset_guess: guess || ""
-  } : null;
+    // 2) 选条目：容器内优先使用相对选择器；若没命中，再全局兜底
+    let $items = $();
+    let usedItemSel = "";
+    for (const sel of ITEM_CANDIDATES) {
+      let list = sel.startsWith("#") ? $(sel) : $ctn.find(sel);
+      if (!list.length) list = $(sel);
+      const cnt = list.length;
+      if (wantDebug) debug.tried.item.push({ selector: sel, matched: cnt });
+      if (cnt) {
+        $items = list;
+        usedItemSel = sel;
+        break;
+      }
+    }
 
-  // 1) 选容器
-  let $ctn = null;
-  let usedCtn = "";
-  for (const sel of CONTAINER_CANDIDATES) {
-    const cnt = $(sel).length;
-    if (wantDebug) debug.tried.container.push({ selector: sel, matched: cnt });
-    if (cnt) { $ctn = $(sel).first(); usedCtn = sel; break; }
-  }
-  if (!$ctn) { $ctn = $("body"); usedCtn = "body"; }
+    if (wantDebug) {
+      debug.container_matched = usedCtn;
+      debug.item_selector_used = usedItemSel || "";
+      debug.item_count = $items.length || 0;
+    }
 
-  // 2) 选条目：先在容器内找相对选择器；若不命中，再全局找一次
-  let $items = $();
-  let usedItemSel = "";
-  for (const sel of ITEM_CANDIDATES) {
-    let list = $ctn.find(sel);        // 容器内查找（适合相对选择器）
-    if (!list.length) list = $(sel);  // 全局兜底（适合带 # 的全局选择器）
-    const cnt = list.length;
-    if (wantDebug) debug.tried.item.push({ selector: sel, matched: cnt });
-    if (cnt) { $items = list; usedItemSel = sel; break; }
-  }
+    // 3) 抽取
+    const base = new URL(url).origin + "/";
+    const items = extractItems($, base, $items, limit, wantDebug, debug || {});
 
-  if (wantDebug) {
-    debug.container_matched  = usedCtn;
-    debug.item_selector_used = usedItemSel || "";
-    debug.item_count         = $items.length || 0;
-  }
-
-  // 3) 抽取
-  const origin = new URL(url).origin + "/";
-  let items = extractItems($, origin, $items, limit, debug);
-
-  // 4) 可选：图片转 base64
-  if (wantBase64 && items.length && imgCount > 0) {
-    const N = Math.min(imgCount, items.length);
-    await Promise.all(
-      items.slice(0, N).map(async (it) => {
-        if (!it.img) return;
-        try {
-          const r = await axios.get(it.img, { responseType: "arraybuffer" });
-          const b64 = Buffer.from(r.data).toString("base64");
-          const ext = (it.img.split(".").pop() || "jpg").toLowerCase();
-          it.img = `data:image/${ext};base64,${b64}`;
-        } catch { /* ignore */ }
-      })
-    );
-  }
-
-  const payload = { ok: true, url, count: items.length, products: [], items };
-  if (wantDebug) payload.debug = debug;
-  return payload;
-}
+    return {
+      items,
+      debugPart: wantDebug ? debug : undefined,
+    };
+  },
+};
