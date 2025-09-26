@@ -1,8 +1,8 @@
 // backend/routes/catalog.js
 // 统一目录解析：GET/POST /v1/api/catalog/parse
-// - axios(arraybuffer) + jschardet + iconv-lite：自动探测，gb* → gb18030 兜底
-// - 内置站点适配（sinotronic-e），失败则走通用兜底
-// - debug=1 时回传完整 debug 信息，便于排查
+// - axios(arraybuffer) + jschardet + iconv-lite 自动探测与解码（gb* → gb18030）
+// - 命中站点适配器（sinotronic）否则走通用兜底
+// - debug=1 时回传完整调试信息
 
 import { Router } from "express";
 import axios from "axios";
@@ -15,29 +15,18 @@ import sinotronic from "../adapters/sinotronic.js";
 
 const router = Router();
 
-// ---------- 通用兜底选择器 ----------
+// ---------------- 通用兜底选择器 ----------------
 const CONTAINER_FALLBACK = [
-  "#productlist",     // 你们确认的容器
-  ".productlist",
-  ".listBox",
-  ".products",
-  ".product-list",
-  "main",
-  "body",
+  "#productlist", ".productlist", ".listBox", ".products", ".product-list",
+  "main", "body",
 ];
 
 const ITEM_FALLBACK = [
-  "#productlist ul > li", // 你们确认的条目
-  "ul.products > li",
-  "ul > li",
-  ".product",
-  ".product-item",
-  ".productItem",
-  ".product-box",
-  "li",
+  "#productlist ul > li", "ul.products > li", "ul > li",
+  ".product", ".product-item", ".productItem", ".product-box", "li",
 ];
 
-// ---------- 拉取并解码 HTML ----------
+// ---------------- 抓取并解码 HTML ----------------
 async function fetchHtml(url, wantDebug) {
   const res = await axios.get(url, {
     responseType: "arraybuffer",
@@ -52,77 +41,51 @@ async function fetchHtml(url, wantDebug) {
   });
 
   const buf = Buffer.from(res.data);
-  let encGuess = (jschardet.detect(buf)?.encoding || "").toLowerCase();
-
-  // gb 系列一律用 gb18030 最稳妥；没有就用 utf-8
+  const guess = (jschardet.detect(buf)?.encoding || "").toLowerCase();
   const useEnc =
-    !encGuess || encGuess === "ascii"
-      ? "utf-8"
-      : encGuess.includes("gb")
-      ? "gb18030"
-      : iconv.encodingExists(encGuess)
-      ? encGuess
-      : "utf-8";
+    !guess || guess === "ascii" ? "utf-8"
+      : guess.includes("gb") ? "gb18030"
+      : iconv.encodingExists(guess) ? guess : "utf-8";
 
   const html = iconv.decode(buf, useEnc);
 
-  const debugFetch =
-    wantDebug ? { http_status: res.status, detected_encoding: useEnc } : undefined;
+  const debugFetch = wantDebug
+    ? { http_status: res.status, detected_encoding: useEnc }
+    : undefined;
 
   return { html, status: res.status, detected_encoding: useEnc, debugFetch };
 }
 
-// ---------- 通用兜底提取 ----------
+// ---------------- 通用兜底抽取 ----------------
 function genericExtract($, baseUrl, { limit = 50, debug = false } = {}) {
   const tried = { container: [], item: [] };
 
   // 1) 容器
-  let $container = $();
-  let usedContainer = "";
+  let $container = $(), usedContainer = "";
   for (const sel of CONTAINER_FALLBACK) {
     tried.container.push(sel);
     const hit = $(sel);
-    if (hit.length) {
-      $container = hit.first();
-      usedContainer = sel;
-      break;
-    }
+    if (hit.length) { $container = hit.first(); usedContainer = sel; break; }
   }
-  if (!$container.length) {
-    $container = $("body");
-    usedContainer = "body";
-  }
+  if (!$container.length) { $container = $("body"); usedContainer = "body"; }
 
-  // 2) 条目（优先容器内相对选择器，再全局兜底）
-  let $items = $();
-  let itemSelectorUsed = "";
+  // 2) 条目：容器内相对优先，失败再全局兜底
+  let $items = $(), itemSelectorUsed = "";
   for (const sel of ITEM_FALLBACK) {
     let list = sel.startsWith("#") ? $(sel) : $container.find(sel);
     if (!list.length) list = $(sel);
     tried.item.push(sel);
-    if (list.length) {
-      $items = list;
-      itemSelectorUsed = sel;
-      break;
-    }
+    if (list.length) { $items = list; itemSelectorUsed = sel; break; }
   }
-  if (!$items.length) {
-    tried.item.push("li");
-    $items = $container.find("li");
-    itemSelectorUsed = "li";
-  }
+  if (!$items.length) { tried.item.push("li"); $items = $container.find("li"); itemSelectorUsed = "li"; }
 
   const absolutize = (href) => {
     if (!href) return "";
-    try {
-      return new URL(href, baseUrl).href;
-    } catch {
-      return href;
-    }
+    try { return new URL(href, baseUrl).href; } catch { return href; }
   };
 
   const items = [];
-  $items.each((i, el) => {
+  $items.each((_, el) => {
     if (items.length >= limit) return false;
     const $el = $(el);
 
@@ -132,8 +95,7 @@ function genericExtract($, baseUrl, { limit = 50, debug = false } = {}) {
     const imgRel =
       $el.find("img[src]").attr("src") ||
       $el.find("img[data-src]").attr("data-src") ||
-      $el.find("img[data-original]").attr("data-original") ||
-      "";
+      $el.find("img[data-original]").attr("data-original") || "";
     const img = absolutize(imgRel);
 
     let title =
@@ -143,40 +105,27 @@ function genericExtract($, baseUrl, { limit = 50, debug = false } = {}) {
       $el.text().trim();
 
     title = title.replace(/\s+/g, " ").trim();
-    const sku = title;
+    if (!title && !img && !link) return;
 
-    if (title || link || img) {
-      items.push({
-        sku,
-        desc: title,
-        minQty: "",
-        price: "",
-        img,
-        link,
-      });
-    }
+    items.push({ sku: title, desc: title, minQty: "", price: "", img, link });
   });
 
-  const debugPart = debug
-    ? {
-        tried,
-        container_matched: usedContainer,
-        item_selector_used: itemSelectorUsed,
-        item_count: $items.length,
-        first_item_html: $items.first().html() || null,
-      }
-    : undefined;
+  const debugPart = debug ? {
+    tried,
+    container_matched: usedContainer,
+    item_selector_used: itemSelectorUsed,
+    item_count: $items.length,
+    first_item_html: $items.first().html() || null,
+  } : undefined;
 
   return { items, debugPart };
 }
 
-// ---------- 运行解析（适配器优先，其次兜底） ----------
+// ---------------- 跑适配器/兜底 ----------------
 function runExtract(url, html, { limit = 50, debug = false } = {}) {
   const $ = cheerio.load(html, { decodeEntities: false });
 
-  let used = "generic";
-  let items = [];
-  let debugPart;
+  let used = "generic", items = [], debugPart;
 
   if (sinotronic.test(url)) {
     const out = sinotronic.parse($, url, { limit, debug });
@@ -195,88 +144,52 @@ function runExtract(url, html, { limit = 50, debug = false } = {}) {
   return { items, adapter_used: used, debugPart };
 }
 
-// ---------- 路由 ----------
+// ---------------- 路由 ----------------
 router.all("/parse", async (req, res) => {
   try {
     const isGet = req.method === "GET";
-    const url = (isGet ? req.query.url : req.body?.url) || "";
+    const qp = isGet ? req.query : req.body || {};
 
-    if (!url) {
-      return res.status(400).json({ ok: false, error: "missing url" });
-    }
+    const url = String(qp.url || "").trim();
+    if (!url) return res.status(400).json({ ok: false, error: "missing url" });
 
-    const limitRaw = (isGet ? req.query.limit : req.body?.limit) ?? 50;
-    const limit = Math.max(0, parseInt(limitRaw, 10) || 50);
+    const limit = Math.max(1, parseInt(qp.limit ?? 50, 10) || 50);
 
-    const imgMode = String(isGet ? req.query.img : req.body?.img || "").toLowerCase(); // "base64" | ""
-    const imgCount = Math.max(
-      0,
-      parseInt(isGet ? req.query.imgCount : req.body?.imgCount, 10) || 0
-    );
+    const imgMode = String(qp.img || "").toLowerCase();     // "base64" | ""
+    const imgCount = Math.max(0, parseInt(qp.imgCount ?? 0, 10) || 0);
 
-    const debugRaw = isGet ? req.query.debug : req.body?.debug;
-    const debug =
-      debugRaw === 1 ||
-      debugRaw === "1" ||
-      String(debugRaw).toLowerCase() === "true";
+    const rawDebug = qp.debug ?? qp.debug1 ?? qp.debug_1;
+    const wantDebug = ["1","true","yes","on"].includes(String(rawDebug ?? "").toLowerCase());
 
-    // 抓取 & 解码
-    const { html, status, detected_encoding, debugFetch } = await fetchHtml(
-      url,
-      debug
-    );
+    // 1) 抓取 + 解码
+    const { html, status, detected_encoding, debugFetch } = await fetchHtml(url, wantDebug);
     if (!html || status >= 400) {
       const payload = { ok: false, url, status, error: "fetch failed" };
-      if (debug) payload.debug = { ...(debugFetch || {}), step: "fetch" };
+      if (wantDebug) payload.debug = { ...(debugFetch || {}), step: "fetch" };
       return res.status(200).json(payload);
     }
 
-    // 解析
-    const { items, adapter_used, debugPart } = runExtract(url, html, {
-      limit,
-      debug,
-    });
+    // 2) 解析
+    const { items, adapter_used, debugPart } = runExtract(url, html, { limit, debug: wantDebug });
 
-    // 可选：前 N 张图转 base64
+    // 3) 可选：前 N 张图转 base64（不影响主逻辑）
     if (imgMode === "base64" && items.length && imgCount > 0) {
       const N = Math.min(imgCount, items.length);
-      await Promise.all(
-        items.slice(0, N).map(async (it) => {
-          if (!it.img) return;
-          try {
-            const r = await axios.get(it.img, { responseType: "arraybuffer" });
-            const ext = (it.img.split(".").pop() || "jpg").toLowerCase();
-            it.img = `data:image/${ext};base64,${Buffer.from(r.data).toString(
-              "base64"
-            )}`;
-          } catch {
-            // ignore
-          }
-        })
-      );
+      await Promise.all(items.slice(0, N).map(async it => {
+        if (!it.img) return;
+        try {
+          const r = await axios.get(it.img, { responseType: "arraybuffer" });
+          const ext = (it.img.split(".").pop() || "jpg").toLowerCase();
+          it.img = `data:image/${ext};base64,${Buffer.from(r.data).toString("base64")}`;
+        } catch {}
+      }));
     }
 
-    const resp = {
-      ok: true,
-      url,
-      count: items.length,
-      products: [],
-      items,
-    };
-
-    if (debug) {
-      resp.debug = {
-        ...(debugFetch || {}),
-        ...(debugPart || {}),
-        adapter_used,
-      };
-    }
-
+    const resp = { ok: true, url, count: items.length, products: [], items };
+    if (wantDebug) resp.debug = { ...(debugFetch || {}), ...(debugPart || {}), adapter_used };
     return res.json(resp);
   } catch (err) {
-    return res
-      .status(200)
-      .json({ ok: false, error: String(err && err.message ? err.message : err) });
+    return res.status(200).json({ ok: false, error: String(err?.message || err) });
   }
 });
 
