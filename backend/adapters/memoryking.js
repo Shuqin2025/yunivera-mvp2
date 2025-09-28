@@ -1,117 +1,159 @@
-/** 
- * Memoryking 列表页适配器（处理懒加载图片）
- * - 先从列表卡片里拿图（data-src/data-srcset/src 或 noscript 里的 <img>）
- * - 如果还是 loader.svg 或没有真实后缀（jpg/png/webp），兜底抓详情页 .image--media img 的 src/srcset
- * - 如果是 200x200/300x300 小图，尽量替换为 600x600
- */
+// adapters/memoryking.js
+import axios from "axios";
 import * as cheerio from "cheerio";
 
-function text($, el) {
-  return ($(el).text() || "").replace(/\s+/g, " ").trim();
+const UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
+
+function abs(base, maybe) {
+  if (!maybe) return "";
+  try { return new URL(maybe, base).href; } catch { return ""; }
 }
-function pickFromSrcset(srcset) {
-  if (!srcset) return "";
-  const last = srcset.split(",").pop().trim();
-  return last.split(/\s+/)[0];
-}
-function isRealImage(u) {
-  return /\.(jpe?g|png|webp)(\?|$)/i.test(u || "");
-}
-function upsizeTo600(u) {
-  // 末尾形如 "_200x200.jpg" 或 "_300x300.jpg" → "_600x600.jpg"
-  return (u || "").replace(/_(?:200|300)x(?:200|300)(\.\w+)(\?|$)/i, `_600x600$1$2`);
-}
-function abs(u, base) {
-  try { return new URL(u || "", base).href; } catch { return u || ""; }
-}
+function text($el) { return ($el.text() || "").replace(/\s+/g, " ").trim(); }
+
 async function fetchHtml(url) {
-  const ctl = new AbortController();
-  const t = setTimeout(() => ctl.abort(), 15000);
-  const res = await fetch(url, { signal: ctl.signal });
-  clearTimeout(t);
-  if (!res.ok) throw new Error(`fetch ${url} -> ${res.status}`);
-  return await res.text();
+  const { data } = await axios.get(url, {
+    headers: {
+      "User-Agent": UA,
+      "Accept-Language": "de,en;q=0.8,zh;q=0.6",
+      Accept:
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+      Referer: url,
+    },
+    timeout: 25000,
+    maxRedirects: 5,
+    validateStatus: (s) => s >= 200 && s < 400,
+  });
+  return typeof data === "string" ? data : "";
 }
 
-async function getDetailImage(detailUrl, base) {
-  try {
-    const html = await fetchHtml(detailUrl);
-    const $$ = cheerio.load(html);
-    // 详情页常见结构：.image--media img 或 image slider 里的 img
-    let src =
-      $$(".image--media img").attr("srcset") ||
-      $$(".image--media img").attr("src") ||
-      $$(".image--box img").attr("srcset") ||
-      $$(".image--box img").attr("src") ||
-      "";
-    if (src && src.includes(",")) src = pickFromSrcset(src);
-    src = abs(src, base);
-    if (isRealImage(src)) return upsizeTo600(src);
-  } catch {}
-  return "";
+/** 选出真实图片：
+ *  1) 优先 data-srcset / data-src / data-original / data-lazy
+ *  2) 再看 srcset（拆出 URL，优先包含 600x600，其次 200x200）
+ *  3) 再看 src
+ *  4) 如果仍是 loader.svg，尝试解析 <noscript> 里的 <img>
+ */
+function pickRealImage($card, listUrl) {
+  const $img = $card.find("img").first();
+  const candAttrs = [
+    "data-srcset",
+    "data-src",
+    "data-original",
+    "data-lazy",
+    "data-image",
+    "data-large-img",
+    "data-img-large",
+    "srcset",
+    "src",
+  ];
+
+  let raw = "";
+  for (const a of candAttrs) {
+    const v = ($img.attr(a) || "").trim();
+    if (v) { raw = v; break; }
+  }
+
+  function fromSrcset(v) {
+    const parts = v
+      .split(",")
+      .map(s => s.trim().split(/\s+/)[0])
+      .filter(s => /^https?:/i.test(s));
+    // 优先 600x600，再退到 200x200，再退第一张
+    const p600 = parts.find(u => /600x600/i.test(u));
+    const p200 = parts.find(u => /200x200/i.test(u));
+    return p600 || p200 || parts[0] || "";
+  }
+
+  let url = "";
+  if (/,\s*\S+/.test(raw) || /\s+\d+x/.test(raw)) {
+    url = fromSrcset(raw);
+  } else {
+    url = raw;
+  }
+  url = abs(listUrl, (url || "").split("?")[0]);
+
+  // 如果还是 loader.svg，尝试 noscript
+  if (!url || /\.svg$/i.test(url)) {
+    const htmlNo = $card.find("noscript").first().html() || "";
+    if (htmlNo) {
+      try {
+        const $_ = cheerio.load(htmlNo);
+        const u2 = $_("img").attr("src") || $_("img").attr("data-src") || "";
+        if (u2) url = abs(listUrl, (u2 || "").split("?")[0]);
+      } catch {}
+    }
+  }
+  return url;
 }
 
-export default async function parseMemoryking($, limit = 50, debug = false) {
+function guessSku(title) {
+  const m =
+    String(title || "").match(/\b[0-9]{4,}\b/) ||
+    String(title || "").match(/\b[0-9A-Z]{4,}(?:-[0-9A-Z]{2,})*\b/i);
+  return m ? m[0] : "";
+}
+
+/** Memoryking 列表解析（Shopware） */
+export default async function parseMemoryking(listUrl, limit = 50) {
+  const html = await fetchHtml(listUrl);
+  const $ = cheerio.load(html);
+
   const items = [];
   const seen = new Set();
 
-  const base = $("base").attr("href") || "https://www.memoryking.de/";
+  // Shopware 列表常见卡片：.product--box / .box--minimal / .product-box / .listing .product
+  const CARD =
+    ".product--box, .box--minimal, .product-box, .listing .product, .product--info";
 
-  $(".listing--container .product--box").each((i, card) => {
+  $(CARD).each((_i, el) => {
     if (items.length >= limit) return false;
+    const $card = $(el);
 
-    const $card = $(card);
-    const $a = $card.find(".product--info .product--title a").first();
-    const title = text($, $a);
-    const href = abs($a.attr("href") || "", base);
-    if (!href || !title || seen.has(href)) return;
+    // 详情链接（排除购物车/收藏等）
+    const BAD = /(add-to-cart|cart|login|wishlist|compare|filter|sort)/i;
+    const $a = $card
+      .find("a[href]")
+      .filter((_, a) => !BAD.test(String($(a).attr("href"))))
+      .first();
+    if (!$a.length) return;
 
-    // 1) 列表里直接找
-    let img = "";
-    const $img = $card.find("img").first();
-    img = $img.attr("data-src") || $img.attr("data-srcset") || $img.attr("src") || "";
-    if (img && img.includes(",")) img = pickFromSrcset(img);
-    img = abs(img, base);
+    const href = abs(listUrl, $a.attr("href") || "");
+    if (!href || seen.has(href)) return;
 
-    // 2) 列表 noscript 兜底
-    if (/loader\.svg/i.test(img) || !isRealImage(img)) {
-      const nsHtml = $card.find("noscript").html() || "";
-      if (nsHtml) {
-        const $$ = cheerio.load(nsHtml);
-        let nsImg =
-          $$("img").attr("data-srcset") ||
-          $$("img").attr("data-src") ||
-          $$("img").attr("src") ||
-          "";
-        if (nsImg && nsImg.includes(",")) nsImg = pickFromSrcset(nsImg);
-        if (nsImg) img = abs(nsImg, base);
-      }
-    }
+    const title =
+      ($a.attr("title") || "").trim() ||
+      text($card.find("h3,h2,h1,.product--title").first()) ||
+      text($a) ||
+      text($card.find("img").first());
+    if (!title) return;
 
-    // 3) 放大缩略图
-    if (isRealImage(img)) {
-      img = upsizeTo600(img);
+    const img = pickRealImage($card, listUrl);
+
+    let price =
+      text(
+        $card.find(
+          ".price, .product--price, .price--default, .price__value, .amount"
+        ).first()
+      ) || "";
+    // 兜底：整卡文本里找 "12,34 € / € 12,34"
+    if (!price) {
+      const m = $card
+        .text()
+        .match(/\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2})\s*(?:€|EUR)/i);
+      if (m) price = m[0].replace(/\s+/g, " ");
     }
 
     items.push({
-      sku: "",
+      sku: guessSku(title),
       title,
-      href,
       url: href,
-      img
+      img,
+      price: price || null,
+      currency: "",
+      moq: "",
     });
     seen.add(href);
   });
 
-  // 4) 还存在非真实图的，进入详情页补齐
-  for (let k = 0; k < items.length; k++) {
-    const it = items[k];
-    if (!isRealImage(it.img)) {
-      const detailImg = await getDetailImage(it.href, base);
-      if (detailImg) it.img = detailImg;
-      if (debug) console.log("[mk:detail]", it.href, "->", it.img);
-    }
-  }
-
-  return { items };
+  return items.slice(0, limit);
 }
