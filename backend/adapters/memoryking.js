@@ -1,80 +1,111 @@
-/** Memoryking 列表页适配器（处理懒加载图片：优先 noscript，兜底 srcset/data-*，过滤 loader.svg） */
+// 适配 Memoryking（列表页/详情页）图片懒加载
+// ESM: export default
 export default function parseMemoryking($, limit = 50, debug = false) {
-  const BASE = "https://www.memoryking.de";
-  const items = [];
-  const seen = new Set();
+  const base =
+    $('base').attr('href') ||
+    'https://www.memoryking.de/';
 
-  const abs = (u) => {
-    try {
-      if (!u) return "";
-      if (/^\/\//.test(u)) u = "https:" + u;        // //host/path → https://host/path
-      return new URL(String(u), BASE).href;
-    } catch { return String(u || ""); }
-  };
-  const txt = (t) => String(t || "").replace(/\s+/g, " ").trim();
-  const notLoader = (u) => u && !/loader\.svg(?:$|\?)/i.test(u);
-  const isReal = (u) => /\.(?:jpe?g|png|webp)(?:$|\?)/i.test(String(u || ""));
-
-  // 从 srcset 里挑一个 URL（取最后一个，一般是最大）
-  const pickFromSrcset = (s) => {
-    if (!s) return "";
-    const last = String(s).split(",").pop().trim();
-    return last.split(/\s+/)[0] || "";
+  const toAbs = (u) => {
+    if (!u) return '';
+    try { return new URL(u, base).href; } catch { return u; }
   };
 
-  // 200x200 → 600x600（仅对 Memoryking 的云图床命名生效）
-  const up600 = (u) => String(u || "").replace(/_(?:200|300)x(?:200|300)(?=\.)/g, "600x600");
-
-  // 列表卡片（尽量通用）
-  const cards = $(".product--box, li.product--box, .box--basic, .product--teaser, .product--info");
-  cards.each((_, el) => {
-    if (items.length >= limit) return false;
-
-    const $el = $(el);
-    const a = $el.find("a").filter((_, x) => /\/detail|\/details|\/sArticle\//i.test($(x).attr("href") || "")).first();
-    const url = abs(a.attr("href") || "");
-
-    // 同一链接只收一次
-    if (!url || seen.has(url)) return;
-    seen.add(url);
-
-    const title =
-      txt($el.find(".product--title, .title, h3, h2").first().text()) ||
-      txt(a.text());
-
-    // 1) 先尝试从 noscript 取真图
-    let img = "";
-    const nos = $el.find("noscript").first().html() || "";
-    if (nos) {
-      const m = nos.match(/<img[^>]+src=["']([^"']+\.(?:jpe?g|png|webp)[^"']*)["']/i);
-      if (m) img = m[1];
-    }
-
-    // 2) 兜底：data-srcset/srcset/data-src/src
-    if (!img || !isReal(img)) {
-      const $img = $el.find("img").first();
-      img =
-        pickFromSrcset($img.attr("data-srcset") || $img.attr("data-lazy-srcset") || $img.attr("srcset")) ||
-        $img.attr("data-src") || $img.attr("data-original") || $img.attr("src") || "";
-    }
-
-    // 过滤 loader.svg & 放大到 600x600
-    if (img && notLoader(img)) img = up600(img);
-
-    items.push({
-      sku: "",                        // 列表页通常没有 SKU，这里留空
-      title,
-      url,
-      img: abs(img),
-      price: "",                      // 价格由通用逻辑或 JSON-LD 兜底
-      currency: "",
-      moq: ""
+  const pickFromSrcset = (srcset) => {
+    if (!srcset) return '';
+    // 选择宽度最大的那个 url
+    let best = '';
+    let bestW = -1;
+    srcset.split(',').forEach(part => {
+      const m = part.trim().match(/(\S+)\s+(\d+)w/); // url 600w
+      if (m) {
+        const url = m[1];
+        const w = parseInt(m[2], 10);
+        if (w > bestW) { bestW = w; best = url; }
+      } else {
+        // 只有 url 没有宽度时，作为候选
+        if (!best) best = part.trim().split(/\s+/)[0];
+      }
     });
+    return best;
+  };
+
+  const isRealImg = (u) => /\.(jpe?g|png|webp)(\?|$)/i.test(u || '');
+
+  // 核心：从商品卡片（或详情页主图容器）里拿真实图片
+  const pickImage = ($box) => {
+    let src = '';
+    let $img = $box.find('img').first();
+
+    // 1) 直接从 <img> 上拿
+    if ($img.length) {
+      src = $img.attr('data-src') || $img.attr('src') || '';
+      const srcset = $img.attr('data-srcset') || $img.attr('srcset') || '';
+      const fromSet = pickFromSrcset(srcset);
+      if (fromSet) src = fromSet || src;
+    }
+
+    // 2) 如果还是 loader.svg，尝试从 noscript 里提取
+    if (!isRealImg(src)) {
+      const html = ($box.find('noscript').first().html() || '').replace(/\n+/g, ' ');
+      const mSet = html.match(/srcset="([^"]+)"/i);
+      const mSrc = html.match(/src="([^"]+)"/i);
+      if (mSet) src = pickFromSrcset(mSet[1]);
+      if (!isRealImg(src) && mSrc) src = mSrc[1];
+    }
+
+    // 3) 再尝试从图片容器的 data-* 属性拿
+    if (!isRealImg(src)) {
+      const $el = $box.find('.image--element, .image--media').first();
+      if ($el.length) {
+        const candAttrs = [
+          'data-srcset', 'data-src',
+          'data-image', 'data-image-large', 'data-image-small', 'data-image-original'
+        ];
+        for (const a of candAttrs) {
+          const v = $el.attr(a);
+          if (!v) continue;
+          let c = v;
+          if (/,|\s\d+w/.test(v)) c = pickFromSrcset(v);
+          if (isRealImg(c)) { src = c; break; }
+        }
+      }
+    }
+
+    return toAbs(src);
+  };
+
+  // —— 解析列表页 ——（每个商品卡片 .product--box）
+  const items = [];
+  $('.product--box').each((_, el) => {
+    if (items.length >= limit) return;
+    const $box = $(el);
+    const $a = $box.find('a.product--title, a.product--image, a').first();
+    const url = toAbs($a.attr('href') || '');
+    const title = ($a.text() || '').trim();
+
+    const img = pickImage($box);
+    const price = ($box.find('.price--default, .price--content').first().text() || '').trim();
+    const sku = ($box.find('.product--supplier').first().text() || 'deleyCON').trim();
+
+    if (url && title) {
+      items.push({ sku, title, url, img, price, currency: '', moq: '' });
+    }
   });
 
-  if (debug) {
-    console.log("[memoryking] count =", items.length);
-    console.log("[memoryking] first =", items[0]);
+  // —— 解析详情页（主图容器 .image--media / .image--box）兜底 —— 
+  if (items.length === 0) {
+    const title = ($('h1.product--title').text() || $('title').text() || '').trim();
+    const url = toAbs(location?.href || $('link[rel="canonical"]').attr('href') || '');
+    const img = pickImage($('.image--box, .image--media, .image--container').first());
+    const price = ($('.price--default, .price--content').first().text() || '').trim();
+    const sku = ($('span[itemprop="brand"]').text() || 'deleyCON').trim();
+    if (title) items.push({ sku, title, url, img, price, currency: '', moq: '' });
   }
-  return items;
+
+  if (debug) {
+    const sample = items.slice(0, 3);
+    console.log('[mk] sample:', sample);
+  }
+
+  return { ok: true, items };
 }
