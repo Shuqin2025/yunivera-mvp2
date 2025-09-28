@@ -1,118 +1,76 @@
-/** Memoryking 适配器（分类页 + 详情页，处理懒加载图片） */
-export default function parseMemoryking($, limit = 50, debug = false) {
+/* Memoryking 适配器 · 列表/详情抓图修复（懒加载 + 两种详情URL） */
+export default async function parseMemoryking($, limit = 50, debug = false) {
+  const isDetail  = $('body').is('.is--ctl-detail');       // 详情页
+  const isListing = $('body').is('.is--ctl-listing') || $('.listing--container').length > 0; // 列表页
+
+  const pickImgFrom = ($root) => {
+    // 1) 直接看 <span class="image--media"><img ...>
+    let $img = $root.find('span.image--media img, .image--media img').first();
+    let src = ($img.attr('src') || '').trim();
+    let srcset = ($img.attr('srcset') || $img.attr('data-srcset') || '').trim();
+
+    // 2) 如果 src 还是 loader.svg，就从 srcset 里取第一个 URL
+    if (!/\.(jpe?g|png|webp)(\?|$)/i.test(src) && srcset) {
+      const c = srcset.split(',')[0].trim();          // "URL 600w"
+      src = c.split(/\s+/)[0];                        // 取 URL
+    }
+
+    // 3) 还有可能在 <noscript> 里（Shopware 常见兜底）
+    if (!/\.(jpe?g|png|webp)(\?|$)/i.test(src)) {
+      const nos = $root.find('noscript').html() || '';
+      const m = nos.match(/https?:\/\/[^\s"']+\.(?:jpe?g|png|webp)/i);
+      if (m) src = m[0];
+    }
+
+    return (src || '').trim();
+  };
+
   const items = [];
-  const base =
-    $('base').attr('href') ||
-    'https://www.memoryking.de/';
 
-  const abs = (u) => {
-    if (!u) return '';
-    if (/^https?:\/\//i.test(u)) return u;
-    if (u.startsWith('//')) return 'https:' + u;
-    try { return new URL(u, base).href; } catch { return u; }
-  };
+  if (isListing) {
+    // 列表：每个 .product--box 是一条
+    $('.product--box').each((i, el) => {
+      if (items.length >= limit) return;
+      const $box  = $(el);
+      const $link = $box.find('a.product--image, a.product--title, a').first();
+      const url   = ($link.attr('href') || '').trim();
 
-  // 选出 img 的真实地址（优先 data-srcset -> srcset -> data-src -> src）
-  const pickImg = ($img) => {
-    if (!$img || !$img.length) return '';
-    let s = $img.attr('data-srcset') || $img.attr('srcset') || '';
-    if (s) {
-      // srcset: "url 200w, url 400w, ..." —— 取最后一个（最大）
-      const url = s
-        .split(',')
-        .map(x => x.trim().split(/\s+/)[0])
-        .filter(Boolean)
-        .pop();
-      return abs(url);
-    }
-    // 兜底
-    const u = $img.attr('data-src') || $img.attr('src') || '';
-    return abs(u);
-  };
+      const sku   = ($box.find('.product--manufacturer').text() || 'deleyCON').trim() || 'deleyCON';
+      const title = ($box.find('.product--title').text() || '').trim();
+      const price = ($box.find('.product--price .price--default').text() || '').trim();
 
-  const norm = (t) => (t || '').replace(/\s+/g, ' ').trim();
+      // 关键：从当前卡片里抠真图（src / srcset / noscript 三选一）
+      const img   = pickImgFrom($box);
 
-  // ========== A. 分类/列表页 ==========
-  // Shopware 列表容器常见：.listing--container 下 .product--box
-  const $listBoxes = $('.listing--container .product--box, .product--box');
-  if ($listBoxes.length) {
-    $listBoxes.slice(0, limit).each((_, box) => {
-      const $box = $(box);
-      // 标题
-      const title =
-        norm($box.find('.product--title, .title--link').first().text()) ||
-        norm($box.find('a.product--title').first().text());
-      // 链接
-      let url =
-        $box.find('a.product--image, a.product--title, a.title--link').attr('href') || '';
-      url = abs(url);
-      // 价格（Shopware 5: .price--default/.price--content）
-      const price =
-        norm(
-          $box.find('.price--default, .price--content, .price').first().text()
-        );
-
-      // 图片（懒加载：data-srcset/srcset/data-src）
-      const img = pickImg($box.find('span.image--media img, img').first());
-
-      if (title || url || img) {
-        items.push({ title, url, price, img });
-      }
+      if (url) items.push({ sku, title, url, img, price, currency:'', moq:'' });
     });
   }
 
-  // ========== B. 商品详情页 ==========
-  // 详情页图片滑块：.image-slider--container / .image--media img
-  if (items.length === 0) {
-    const $detailImgs = $(
-      '.image-slider--container img, .image--box .image--media img, .image-slider--slide img'
-    );
-    if ($detailImgs.length) {
-      // 取第一张大图
-      const img = pickImg($detailImgs.first());
-      const title =
-        norm($('.product--title, h1.product--title').first().text()) ||
-        norm($('meta[property="og:title"]').attr('content'));
-      const price =
-        norm($('.price--content, .price--default, .price').first().text());
-      let url =
-        $('link[rel="canonical"]').attr('href') ||
-        $('meta[property="og:url"]').attr('content') ||
-        '';
-      url = abs(url || (typeof window !== 'undefined' ? window.location?.href : ''));
+  if (isDetail) {
+    // 详情：从图集/大图区抠 600x600
+    const title = ($('.product--title').text() || $('h1').text() || '').trim();
+    const price = ($('.price--default').text() || '').trim();
+    const sku   = ($('.product--supplier').text() || 'deleyCON').trim() || 'deleyCON';
 
-      if (title || url || img) {
-        items.push({ title, url, price, img });
-      }
-    }
+    // 详情页的大图区域通常在 .image-slider--container
+    const img = pickImgFrom($('.image-slider--container, .image--box, .product--image-container'));
+
+    items.push({ sku, title, url: (typeof window !== 'undefined' ? window.location.href : ''), img, price, currency:'', moq:'' });
   }
 
-  // ========== C. JSON-LD 兜底（详情页很多站会放） ==========
-  if (items.length === 0) {
-    $('script[type="application/ld+json"]').each((_, el) => {
-      try {
-        const data = JSON.parse($(el).text());
-        const prod = Array.isArray(data) ? data[0] : data;
-        if (prod && (prod.image || prod.name)) {
-          const img = abs(Array.isArray(prod.image) ? prod.image[0] : prod.image);
-          const title = norm(prod.name);
-          const price =
-            prod.offers && (prod.offers.price || prod.offers.priceSpecification?.price);
-          let url = abs(prod.url || '');
-          if (title || url || img) items.push({ title, url, price: price ? String(price) : '', img });
-        }
-      } catch { /* ignore */ }
+  // 安全兜底：如果两者都没识别，尝试按老逻辑（防止页面样式偶变）
+  if (!isDetail && !isListing && $('.image-slider--container, .listing--container, .product--box').length) {
+    // 简化兜底：当作列表处理
+    $('.product--box').each((i, el) => {
+      if (items.length >= limit) return;
+      const $box = $(el);
+      const $link = $box.find('a').first();
+      const url = ($link.attr('href') || '').trim();
+      const title = ($box.text() || '').trim().slice(0, 120);
+      const img = pickImgFrom($box);
+      if (url) items.push({ sku:'deleyCON', title, url, img, price:'', currency:'', moq:'' });
     });
   }
 
-  // 过滤掉 loader.svg
-  const filtered = items.filter(
-    it => it.img && !/loader\.svg(?:\?|$)/i.test(it.img)
-  );
-
-  if (debug) {
-    const sample = filtered.slice(0, 3);
-    console.log('debugPart:', { count: filtered.length, sample });
-  }
-  return { ok: true, items: filtered };
+  return { ok: items.length > 0, items: items.slice(0, limit) };
 }
