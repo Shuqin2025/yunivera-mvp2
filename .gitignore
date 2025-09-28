@@ -14,3 +14,7 @@ build/
 .DS_Store
 .vscode/
 *.log
+
+# local backups (do not commit)
+backend/server.js.bak*
+backend/server.js.fix_*
