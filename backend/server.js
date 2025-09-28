@@ -3,6 +3,9 @@ import cors from "cors";
 import axios from "axios";
 import * as cheerio from "cheerio";
 
+// ✅ 新增：memoryking 适配器（仅此一行）
+import parseMemoryking from "./adapters/memoryking.js";
+
 const app = express();
 app.use(cors({ origin: "*", exposedHeaders: ["X-Lang"] }));
 
@@ -540,6 +543,12 @@ async function enrichDetail(item) {
 async function parseUniversalCatalog(listUrl, limit = 50) {
   try {
     const host = new URL(listUrl).hostname;
+
+    // ✅ 新增：memoryking.de 专用适配器（仅此分支）
+    if (host.includes("memoryking.de")) {
+      return await parseMemoryking(listUrl, limit);
+    }
+
     if (host.includes("s-impuls-shop.de")) {
       return await parseSImpulsCatalog(listUrl, limit);
     }
