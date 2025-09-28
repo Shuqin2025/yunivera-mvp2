@@ -1,71 +1,118 @@
-/**
- * Memoryking 列表页适配器（处理懒加载图片）
- * - 从 data-srcset / srcset / data-src / data-image-* / noscript 中提取真实图
- * - 过滤 loader.svg
- */
-export default function parseMemoryking($, limit = 60, debug = false) {
+/** Memoryking 适配器（分类页 + 详情页，处理懒加载图片） */
+export default function parseMemoryking($, limit = 50, debug = false) {
   const items = [];
-  const seen  = new Set();
+  const base =
+    $('base').attr('href') ||
+    'https://www.memoryking.de/';
 
-  const base = ($('base').attr('href') || 'https://www.memoryking.de/').replace(/\/+$/, '/');
-  const ABS = (u) => {
-    try { return new URL(u || '', base).href; } catch { return u || ''; }
+  const abs = (u) => {
+    if (!u) return '';
+    if (/^https?:\/\//i.test(u)) return u;
+    if (u.startsWith('//')) return 'https:' + u;
+    try { return new URL(u, base).href; } catch { return u; }
   };
 
-  function pickFromSrcSet(s) {
-    if (!s) return '';
-    const parts = s.split(',').map(x => x.trim());
-    // 取“分辨率最大”的一条（通常在末尾）
-    for (let i = parts.length - 1; i >= 0; i--) {
-      const m = parts[i].match(/(https?:\/\/[^\s,]+?\.(?:jpg|jpeg|png|webp)(?:\?[^\s,]*)?)/i);
-      if (m) return m[1];
+  // 选出 img 的真实地址（优先 data-srcset -> srcset -> data-src -> src）
+  const pickImg = ($img) => {
+    if (!$img || !$img.length) return '';
+    let s = $img.attr('data-srcset') || $img.attr('srcset') || '';
+    if (s) {
+      // srcset: "url 200w, url 400w, ..." —— 取最后一个（最大）
+      const url = s
+        .split(',')
+        .map(x => x.trim().split(/\s+/)[0])
+        .filter(Boolean)
+        .pop();
+      return abs(url);
     }
-    return '';
+    // 兜底
+    const u = $img.attr('data-src') || $img.attr('src') || '';
+    return abs(u);
+  };
+
+  const norm = (t) => (t || '').replace(/\s+/g, ' ').trim();
+
+  // ========== A. 分类/列表页 ==========
+  // Shopware 列表容器常见：.listing--container 下 .product--box
+  const $listBoxes = $('.listing--container .product--box, .product--box');
+  if ($listBoxes.length) {
+    $listBoxes.slice(0, limit).each((_, box) => {
+      const $box = $(box);
+      // 标题
+      const title =
+        norm($box.find('.product--title, .title--link').first().text()) ||
+        norm($box.find('a.product--title').first().text());
+      // 链接
+      let url =
+        $box.find('a.product--image, a.product--title, a.title--link').attr('href') || '';
+      url = abs(url);
+      // 价格（Shopware 5: .price--default/.price--content）
+      const price =
+        norm(
+          $box.find('.price--default, .price--content, .price').first().text()
+        );
+
+      // 图片（懒加载：data-srcset/srcset/data-src）
+      const img = pickImg($box.find('span.image--media img, img').first());
+
+      if (title || url || img) {
+        items.push({ title, url, price, img });
+      }
+    });
   }
-  function pickFromString(s) {
-    if (!s) return '';
-    const m = s.match(/(https?:\/\/[^\s,]+?\.(?:jpg|jpeg|png|webp)(?:\?[^\s,]*)?)/i);
-    return m ? m[1] : '';
-  }
 
-  // 一般卡片：.product--box
-  $('.product--box').each((_i, box) => {
-    if (items.length >= limit) return false;
+  // ========== B. 商品详情页 ==========
+  // 详情页图片滑块：.image-slider--container / .image--media img
+  if (items.length === 0) {
+    const $detailImgs = $(
+      '.image-slider--container img, .image--box .image--media img, .image-slider--slide img'
+    );
+    if ($detailImgs.length) {
+      // 取第一张大图
+      const img = pickImg($detailImgs.first());
+      const title =
+        norm($('.product--title, h1.product--title').first().text()) ||
+        norm($('meta[property="og:title"]').attr('content'));
+      const price =
+        norm($('.price--content, .price--default, .price').first().text());
+      let url =
+        $('link[rel="canonical"]').attr('href') ||
+        $('meta[property="og:url"]').attr('content') ||
+        '';
+      url = abs(url || (typeof window !== 'undefined' ? window.location?.href : ''));
 
-    const $box = $(box);
-    const $a   = $box.find('a.product--image, a.box--link, a.product--title a, a').first();
-    const url  = ABS($a.attr('href') || '');
-
-    const title = (
-      $box.find('.product--title, .product--title a, .product--header a').first().text() ||
-      $a.attr('title') || ''
-    ).replace(/\s+/g, ' ').trim();
-
-    // 取图：srcset / data-srcset / data-src / src / noscript
-    let img = '';
-    const $img = $box.find('img').first();
-    const srcset  = $img.attr('data-srcset') || $img.attr('srcset') || '';
-    const datasrc = $img.attr('data-src') || $img.attr('data-image') || $img.attr('src') || '';
-    img = pickFromSrcSet(srcset) || pickFromString(datasrc);
-
-    if (!img) {
-      const nos = $box.find('noscript').first().html() || '';
-      const m = nos.match(/<img[^>]+src=["']([^"']+\.(?:jpg|jpeg|png|webp)[^"']*)/i);
-      if (m) img = m[1];
+      if (title || url || img) {
+        items.push({ title, url, price, img });
+      }
     }
+  }
 
-    if (img && /loader\.svg/i.test(img)) img = '';
-    if (img) img = ABS(img);
+  // ========== C. JSON-LD 兜底（详情页很多站会放） ==========
+  if (items.length === 0) {
+    $('script[type="application/ld+json"]').each((_, el) => {
+      try {
+        const data = JSON.parse($(el).text());
+        const prod = Array.isArray(data) ? data[0] : data;
+        if (prod && (prod.image || prod.name)) {
+          const img = abs(Array.isArray(prod.image) ? prod.image[0] : prod.image);
+          const title = norm(prod.name);
+          const price =
+            prod.offers && (prod.offers.price || prod.offers.priceSpecification?.price);
+          let url = abs(prod.url || '');
+          if (title || url || img) items.push({ title, url, price: price ? String(price) : '', img });
+        }
+      } catch { /* ignore */ }
+    });
+  }
 
-    // 价格（尽量留空格修剪）
-    const price = ($box.find('.price--default, .product--price .price, .product--price').first().text() || '')
-      .replace(/\s+/g, ' ').trim();
+  // 过滤掉 loader.svg
+  const filtered = items.filter(
+    it => it.img && !/loader\.svg(?:\?|$)/i.test(it.img)
+  );
 
-    if (!url || !title || seen.has(url)) return;
-    items.push({ sku: $box.find('.product--supplier, .product--sku').first().text().trim() || '—', title, url, img, price, currency: '' });
-    seen.add(url);
-  });
-
-  if (debug) return { ok: true, items, debugPart: { sample: items.slice(0, 3), total: items.length } };
-  return { items };
+  if (debug) {
+    const sample = filtered.slice(0, 3);
+    console.log('debugPart:', { count: filtered.length, sample });
+  }
+  return { ok: true, items: filtered };
 }
