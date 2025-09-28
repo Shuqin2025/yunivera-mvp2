@@ -1,95 +1,90 @@
-/** Memoryking 适配器（支持列表页+详情页，处理懒加载图片） */
-export default function parseMemoryking($, limit = 50, debug = false) {
-  const items = [];
-  const base =
-    $('base').attr('href') ||
-    'https://www.memoryking.de/';
+cd /workspaces/yunivera-mvp2/backend
 
-  const toAbs = (u) => {
+cat > adapters/memoryking.js <<'EOF'
+/**
+ * Memoryking 适配器（处理懒加载图片 + 列表/详情双模式）
+ */
+export default function parseMemoryking($, limit = 50, debug = false) {
+  const baseHref = $('base').attr('href') || 'https://www.memoryking.de';
+
+  const abs = (u) => {
     if (!u) return '';
-    try { return new URL(u, base).href; } catch { return u; }
+    if (u.startsWith('//')) return 'https:' + u;
+    try { return new URL(u, baseHref).href; } catch { return u; }
   };
 
   const fromSrcset = (v) => {
     if (!v) return '';
-    // 选最后一个（通常分辨率最高），再取第一个空格前的 URL
-    const parts = v.split(',').map(s => s.trim());
-    if (!parts.length) return '';
-    const last = parts[parts.length - 1];
-    const url = last.split(/\s+/)[0];
-    return url || '';
+    // srcset 里按逗号分割，取最后一个（分辨率最高）
+    const urls = v.split(',').map(s => s.trim().split(/\s+/)[0]).filter(Boolean);
+    const best = urls.filter(p => /\.(jpe?g|png|webp)(\?|$)/i.test(p)).pop();
+    return best ? abs(best) : '';
   };
 
-  const pickFromImg = ($img) => {
-    const attr = (a) => ($img.attr(a) || '').trim();
-    let cand =
-      attr('data-src') ||
-      fromSrcset(attr('data-srcset')) ||
-      fromSrcset(attr('srcset')) ||
-      attr('src');
+  const pickFromAttrs = (el, names) => {
+    for (const n of names) {
+      const v = $(el).attr(n);
+      if (!v) continue;
+      if (/loader\.svg/i.test(v)) continue;
 
-    // 如果还是 loader.svg，则尝试父元素 data-img-*
-    if (!cand || /loader\.svg/i.test(cand)) {
-      const $el = $img.closest('.image--element');
-      if ($el && $el.length) {
-        cand =
-          ($el.attr('data-img-large') || '').trim() ||
-          ($el.attr('data-image-original') || '').trim() ||
-          ($el.attr('data-img-small') || '').trim();
+      if (n.includes('srcset')) {
+        const u = fromSrcset(v);
+        if (u) return u;
       }
+      if (/\.(jpe?g|png|webp)(\?|$)/i.test(v)) return abs(v);
     }
-
-    if (cand && /loader\.svg/i.test(cand)) cand = '';
-    if (cand) cand = toAbs(cand);
-    return cand;
+    return '';
   };
 
-  const pickText = ($node) => ($node.text() || '').replace(/\s+/g, ' ').trim();
-
-  /** ============ 列表页 ============ */
-  $('.product--box').each((_, el) => {
-    const $box   = $(el);
-    const $title = $box.find('.product--title a, a.product--title').first();
-    const url    = toAbs($title.attr('href') || '');
-    const title  = pickText($title) || pickText($box.find('.product--title'));
-
-    const price  = pickText($box.find('.price--default, .price--content').first());
-    const sku    = pickText($box.find('.product--supplier, .manufacturer--name').first()) || 'deleyCON';
-
-    let img = '';
-    const $img = $box.find('.image--media img, .product--image img').first();
-    if ($img.length) img = pickFromImg($img);
-
-    if (!img) {
-      // 极端兜底：background-image
-      const bg = ($box.find('.product--image').css('background-image') || '').trim();
-      const m = bg.match(/url\(["']?([^"')]+)["']?\)/i);
-      if (m) img = toAbs(m[1]);
+  const pickImage = (ctx) => {
+    // 1) 先看 <img> 本身
+    const img = $('img', ctx).get(0);
+    if (img) {
+      const u = pickFromAttrs(img, ['srcset','data-srcset','data-src','src','data-original']);
+      if (u) return u;
     }
+    // 2) 常见懒加载容器上的自定义属性
+    const wrap = $(ctx).find('.image--element, .image--media, .image--box').get(0) || ctx;
+    const u2 = pickFromAttrs(wrap, ['data-img-large','data-image-large','data-original','data-image','data-srcset','data-src']);
+    if (u2) return u2;
 
-    if (url) items.push({ sku, title, url, img, price });
-    if (items.length >= limit) return false;
-  });
+    // 3) 兜底：在 HTML 片段里直接搜一张可用图片（优先 meinecloud）
+    const html = ($(ctx).html() || '');
+    const m = html.match(/https?:\/\/[^"' ]+meinecloud[^"' ]+?\.(?:jpe?g|png|webp)/i)
+           || html.match(/https?:\/\/[^"' ]+\.(?:jpe?g|png|webp)/i);
+    return m ? abs(m[0]) : '';
+  };
 
-  /** ============ 详情页兜底 ============ */
-  if (!items.length) {
-    const title = pickText($('h1.product--title, h1[itemprop="name"]').first()) || pickText($('h1').first());
-    let img = '';
-    const $img = $('span.image--media img, .image-slider--item img, .image--media img').first();
-    if ($img.length) img = pickFromImg($img);
+  const items = [];
 
-    const price = pickText($('.price--default, .product--price .price--content').first());
-    const url   = toAbs(($('link[rel="canonical"]').attr('href') || ''));
+  // 列表页
+  const listTiles = $('[data-compare-ajax="true"] .product--box, .listing .product--box, .product--box');
+  if (listTiles.length) {
+    listTiles.each((_, el) => {
+      if (items.length >= limit) return false;
 
+      const a = $(el).find('a.product--title, .product--image a, .product--title a').first();
+      const url = abs(a.attr('href'));
+      const title = (a.text() || $(el).find('.product--title').text() || '').trim();
+      const price = ($(el).find('.product--price, .product--price .price--default, .price--content, .price').text() || '').replace(/\s+/g, ' ').trim();
+      const img = pickImage(el);
+
+      if (title || url) items.push({ sku: 'deleyCON', title, url, img, price });
+    });
+  }
+
+  // 详情页（若列表没抓到，再尝试单品）
+  if (!items.length && $('.product--detail').length) {
+    const title = ($('h1.product--title, .product--header h1, h1').first().text() || '').trim();
+    const canon = $('link[rel="canonical"]').attr('href') || '';
+    const url = abs(canon);
+    const img = pickImage($('.image--box, .image-slider--container, .image--media, .product--image').first());
+    const price = ($('.price--default, .price--content, .price').first().text() || '').replace(/\s+/g, ' ').trim();
     if (title) items.push({ sku: 'deleyCON', title, url, img, price });
   }
 
-  // 清洗：把仍为空或仍是 loader.svg 的图片置空（前端会显示占位但不再转圈）
-  items.forEach(it => {
-    if (!it.img || /loader\.svg/i.test(it.img)) it.img = '';
-  });
-
-  const result = { ok: true, items };
-  if (debug) result.debugPart = items.slice(0, 3);
-  return result;
+  const out = { ok: true, items };
+  if (debug) out.debugPart = { sample: items.slice(0, 3), total: items.length };
+  return out;
 }
+EOF
