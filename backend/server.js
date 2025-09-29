@@ -546,7 +546,11 @@ async function parseUniversalCatalog(listUrl, limit = 50) {
 
     // ✅ 新增：memoryking.de 专用适配器（仅此分支）
     if (host.includes("memoryking.de")) {
-      return await parseMemoryking(listUrl, limit);
+      // --- 三行微改开始 ---
+      const html = await fetchHtml(listUrl);
+      const $ = cheerio.load(html, { decodeEntities: false });
+      return await parseMemoryking({ $, url: listUrl, rawHtml: html, limit });
+      // --- 三行微改结束 ---
     }
 
     if (host.includes("s-impuls-shop.de")) {
@@ -680,3 +684,4 @@ app.get(["/v1/api/catalog", "/v1/api/catalog.json", "/v1/api/catalog/parse.json"
 /* ──────────────────────────── listen ──────────────────────────── */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`[mvp2-backend] listening on :${PORT}`));
+
