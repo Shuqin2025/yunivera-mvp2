@@ -1,9 +1,9 @@
 /**
- * Memoryking 适配器（鲁棒版 v2.8 / ESM）
+ * Memoryking 适配器（鲁棒版 v2.9 / ESM）
  * 修正：
- *  - 详情页（/details/ 或存在 .product--detail[s]）强制走“单条详情兜底”，不抓推荐卡片
- *  - 列表模式过滤掉“交叉销售/推荐/配件”等容器下的 .product--box，防止误判
- * 其余沿用 v2.7：rawHtml 源码直扫兜底、data-* 优先、loader.svg 过滤、清晰度打分
+ *  - 详情页（/details/ 或有 .product--detail[s] 或 ld+json: Product）强制返回“主商品 1 条”
+ *  - 列表仅匹配真正的 listing 容器；排除 related/cross-selling/accessories/slider 等推荐区
+ * 其它：保留 rawHtml 源码直扫兜底、data-* 优先、loader.svg 过滤、清晰度打分
  */
 
 import * as cheerio from 'cheerio';
@@ -176,23 +176,56 @@ export default function parseMemoryking(input, limitDefault = 50, debugDefault =
     return { sku, title, url: href, img, price, currency: '', moq: '' };
   };
 
-  // ====== 关键：先判定是否“详情页” ======
-  const isDetail =
+  // ====== 关键：判定是否“详情页” ======
+  let isDetail =
     /\/details\//i.test(pageUrl || '') ||
     $('.product--detail, .product--details').length > 0 ||
     (String($('meta[property="og:type"]').attr('content') || '').toLowerCase() === 'product');
 
-  // ---------- ① 列表（仅在“非详情页”时走；并排除推荐区容器） ----------
+  // 再从 ld+json 里探测 Product
+  if (!isDetail) {
+    $('script[type="application/ld+json"]').each((_i, el) => {
+      try {
+        const raw = $(el).contents().text() || '';
+        if (!raw) return;
+        const data = JSON.parse(raw);
+        const check = (obj) => {
+          if (!obj) return false;
+          const t = obj['@type'];
+          if (t === 'Product') return true;
+          if (Array.isArray(t) && t.includes('Product')) return true;
+          if (obj['@graph']) return Array.isArray(obj['@graph']) && obj['@graph'].some(check);
+          return false;
+        };
+        if (Array.isArray(data)) {
+          if (data.some(check)) isDetail = true;
+        } else if (check(data)) {
+          isDetail = true;
+        }
+      } catch {}
+    });
+  }
+
+  // ---------- ① 列表（仅“非详情页”时；并排除推荐区容器） ----------
   if (!isDetail) {
     const listSelectors = [
       '.listing--container .product--box',
       '.js--isotope .product--box',
-      // （去掉裸 `.product--box` 的优先权，以减少误匹配；需要时仍作为第三选择）
-      '.product--box',
+      '#listing .product--box',
+      '.product--listing .product--box',
     ];
 
-    // 详情页里不应抓取这些区域下面的 box
-    const BLACKLIST = '.product--detail, .product--details, .cross-selling, .crossselling, .related, .related--products, .similar--products, .upselling, .accessories, .accessory--slider';
+    // 详情页推荐区/滑动区等黑名单容器
+    const BLACKLIST = [
+      '.product--detail',
+      '.product--details',
+      '#detail',
+      '.cross-selling', '.crossselling',
+      '.related', '.related--products', '.similar--products',
+      '.upselling',
+      '.accessories', '.accessory--slider',
+      '.product-slider--container', '.product--slider', '.is--ctl-detail'
+    ].join(', ');
 
     let boxes = [];
     for (const sel of listSelectors) {
@@ -208,8 +241,8 @@ export default function parseMemoryking(input, limitDefault = 50, debugDefault =
     }
   }
 
-  // ---------- ② 详情兜底（列表无结果或判定为详情页时） ----------
-  if (items.length === 0) {
+  // ---------- ② 详情兜底（列表无结果 或 明确为详情页） ----------
+  if (items.length === 0 || isDetail) {
     const $detail = $('.product--details, .product--detail, #content, body');
 
     const title =
@@ -244,7 +277,10 @@ export default function parseMemoryking(input, limitDefault = 50, debugDefault =
 
     const row = { sku, title, url, img, price, currency: '', moq: '' };
     if (row.img && /loader\.svg/i.test(row.img)) row.img = '';
-    if (row.title || row.url || row.img) items.push(row);
+    if (row.title || row.url || row.img) {
+      // 详情页：只返回 1 条
+      return [row];
+    }
   }
 
   // ---------- 出口 ----------
