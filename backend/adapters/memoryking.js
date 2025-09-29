@@ -1,155 +1,144 @@
 /**
- * Memoryking 适配器（处理懒加载图片 + 列表/详情双模式）
- * 目标：把 <img src="...loader.svg"> 从 srcset/data-* 中解析出真实 jpg/webp（优先 600x600）
+ * Memoryking 适配器（稳健取图：列表直接取 + 失败回落到详情页）
+ * - 列表：优先从 data-img-*/srcset 抓真图
+ * - 仍为 loader.svg 时，最多对前 N 条回落抓详情页的 og:image / image--media
+ * - 详情页：直接取 og:image / image--media 的 600x600
  */
-export default function parseMemoryking($, limit = 50, debug = false) {
-  // ─────────────── helpers ───────────────
-  const BASE = $('base').attr('href') || 'https://www.memoryking.de/';
-
+export default async function parseMemoryking($, limit = 50, debug = false) {
+  const base = $('base').attr('href') || 'https://www.memoryking.de/';
   const abs = (u) => {
     if (!u) return '';
-    if (u.startsWith('//')) return 'https:' + u;
-    try { return new URL(u, BASE).href; } catch { return u; }
+    try { return new URL(u, base).href; } catch { return u; }
   };
 
-  const text = ($el) => (($el && $el.text()) || '').replace(/\s+/g, ' ').trim();
-
-  const pickFromSrcset = (srcset) => {
-    if (!srcset) return '';
-    const parts = srcset
-      .split(',')
-      .map(s => (s || '').trim().split(/\s+/)[0])
-      .filter(Boolean);
-
-    // 优先 600x600，其次取最后一个（通常分辨率最大），全部过滤 loader.svg
-    const filtered = parts.filter(p => !/loader\.svg/i.test(p));
-    const prefer600 = filtered.find(p => /600x600\.(jpg|jpeg|png|webp)(\?|$)/i.test(p));
-    return prefer600 || filtered[filtered.length - 1] || '';
-  };
-
-  // 从 cheerio 的 <source> 集合里挑 srcset
-  const pickFromPictureSources = ($pic) => {
-    if (!$pic || !$pic.length) return '';
-    const urls = [];
-    $pic.find('source[srcset]').each((_i, s) => {
-      const v = $(s).attr('srcset');
-      const u = pickFromSrcset(v);
-      if (u) urls.push(u);
-    });
-    // 还是同样优先 600x600
-    const prefer600 = urls.find(u => /600x600\.(jpg|jpeg|png|webp)(\?|$)/i.test(u));
-    return prefer600 || urls[urls.length - 1] || '';
-  };
-
-  /**
-   * 在一个 <img> 元素上解析真实图片：
-   * 1) srcset / data-srcset
-   * 2) src / data-src / data-original / data-src-large
-   * 3) <picture><source srcset>
-   * 4) 上层懒加载容器的 data-img-*（极端兜底）
-   */
-  const pickImgUrl = ($img) => {
-    if (!$img || !$img.length) return '';
-
-    const a = (name) => ($img.attr(name) || '').trim();
-
-    // 1) 来自 srcset 的候选
-    let cand = pickFromSrcset(a('srcset')) || pickFromSrcset(a('data-srcset'));
-
-    // 2) 直接属性兜底
-    if (!cand) {
-      const direct = a('src') || a('data-src') || a('data-original') || a('data-src-large') || '';
-      if (direct && !/loader\.svg/i.test(direct)) cand = direct;
-    }
-
-    // 3) picture > source
-    if (!cand) {
-      // cheerio 的 closest 可用，但更稳妥用 parents
-      const $pic = $img.parents('picture').first();
-      const u = pickFromPictureSources($pic);
-      if (u) cand = u;
-    }
-
-    // 4) 懒加载容器自定义属性（若图片标签没给）
-    if (!cand) {
-      const $wrap = $img.parents('.image--element, .image--media, .image--box').first();
-      const attrs = ['data-img-large', 'data-image-large', 'data-original', 'data-image', 'data-srcset', 'data-src'];
-      for (const k of attrs) {
-        const v = ($wrap.attr(k) || '').trim();
-        if (v && !/loader\.svg/i.test(v)) {
-          if (/srcset/i.test(k)) {
-            const u2 = pickFromSrcset(v);
-            if (u2) { cand = u2; break; }
-          } else if (/\.(jpe?g|png|webp)(\?|$)/i.test(v)) {
-            cand = v; break;
-          }
-        }
-      }
-    }
-
-    if (!cand || /loader\.svg/i.test(cand)) return '';
-    return abs(cand);
-  };
-
-  // ─────────────── parse list ───────────────
   const items = [];
-  const seen = new Set();
+  const pickFromSrcset = (ss) => {
+    if (!ss) return '';
+    const urls = ss.split(',').map(s => s.trim().split(' ')[0]);
+    const p600 = urls.find(u => /600x600/.test(u));
+    return p600 || urls.pop() || '';
+  };
+  const isPlaceholder = (u) => !u || /\.svg(\?|$)/i.test(u);
 
-  const listBoxes = $('.listing .product--box, .product--box');
-  if (listBoxes.length) {
-    listBoxes.each((_i, el) => {
-      if (items.length >= limit) return false;
+  const grabImgFromTile = (tile) => {
+    const img = tile.find('img').first();
+    let src =
+      img.attr('data-src') ||
+      img.attr('src') ||
+      tile.find('.image--element').attr('data-img-medium') ||
+      tile.find('.image--element').attr('data-img-large') ||
+      tile.find('.image--element').attr('data-img-small') ||
+      '';
 
-      const $box = $(el);
-      // 链接/标题
-      const $a = $box.find('a[href*="/details/"], a.product--image, .product--title a').first();
-      const url = abs($a.attr('href') || '');
-      const title = text($box.find('.product--title').first()) || text($a);
-
-      // 价格（尽量不做数值化，以免丢单位/小数）
-      const price = text($box.find('.price--content, .price--default, .product--price').first());
-
-      // 图片：从盒子里找第一张 img
-      const $img = $box.find('img').first();
-      let img = pickImgUrl($img);
-
-      // 极端兜底：尝试读取盒子内的 <picture>
-      if (!img) {
-        const $pic = $box.find('picture').first();
-        img = pickFromPictureSources($pic);
-        if (img) img = abs(img);
-      }
-
-      // 去重 & 入列
-      const key = url || (title + '|' + img);
-      if (!key || seen.has(key)) return;
-      seen.add(key);
-      items.push({ sku: 'deleyCON', title, url, img, price });
-    });
-  }
-
-  // ─────────────── parse detail (fallback) ───────────────
-  if (!items.length && $('.product--detail, .detail--container').length) {
-    const title = text($('h1.product--title, .product--header h1, h1').first());
-    const canon = abs($('link[rel="canonical"]').attr('href') || '');
-    // 主图：优先 detail 区的图片
-    const $img = $('.image--box .image--media img, .image-slider--container img, .image--media img').first();
-    let img = pickImgUrl($img);
-    if (!img) {
-      const $pic = $img.parents('picture').first();
-      img = pickFromPictureSources($pic);
-      if (img) img = abs(img);
+    if ((!src || isPlaceholder(src))) {
+      // 再尝试 srcset
+      src =
+        img.attr('data-srcset') ||
+        img.attr('srcset') ||
+        src;
+      src = pickFromSrcset(src);
     }
-    const price = text($('.price--default, .price--content, .price').first());
-    if (title) items.push({ sku: 'deleyCON', title, url: canon, img, price });
-  }
+    return abs(src);
+  };
 
-  // 清洗：保底把 loader.svg 清空（避免前端无限转圈）
-  items.forEach(it => {
-    if (!it.img || /loader\.svg/i.test(it.img)) it.img = '';
+  const grabDetailImage = ($$) => {
+    let src =
+      $$('meta[property="og:image"]').attr('content') ||
+      $$('.image--media img').attr('src') ||
+      '';
+
+    if (!src) {
+      src = pickFromSrcset($$('.image--media img').attr('srcset') || '');
+    }
+    if (!src) {
+      // 少数主题把真图放在 data-img-*
+      const el = $$('.image--element');
+      src =
+        el.attr('data-img-medium') ||
+        el.attr('data-img-large') ||
+        el.attr('data-img-small') ||
+        '';
+    }
+    return abs(src);
+  };
+
+  // 1) 列表页尝试直接抓
+  $('.product--box').each((i, el) => {
+    if (items.length >= limit) return false;
+    const card = $(el);
+
+    const title =
+      card.find('.product--title a').text().trim() ||
+      card.find('.product--title').text().trim();
+
+    const url =
+      card.find('.product--title a, .product--image a').attr('href') ||
+      card.find('a').first().attr('href') || '';
+
+    const price =
+      card.find('.price--default, .product--price .price--content').first().text().trim();
+
+    const img = grabImgFromTile(card);
+
+    items.push({
+      sku: 'deleyCON',
+      title,
+      url: abs(url),
+      img,
+      price,
+      currency: '',
+      moq: ''
+    });
   });
 
-  const out = { ok: true, items };
-  if (debug) out.debugPart = { total: items.length, first: items[0] || {} };
-  return out;
+  // 若不是列表（如详情页）
+  if (items.length === 0) {
+    const oneTitle = $('#content h1, .product--title').first().text().trim();
+    if (oneTitle) {
+      const url =
+        $('link[rel=canonical]').attr('href') ||
+        $('meta[property="og:url"]').attr('content') || '';
+      const img = grabDetailImage($);
+      const price =
+        $('.price--default, .product--price .price--content').first().text().trim();
+      return {
+        ok: true,
+        items: [{
+          sku: 'deleyCON',
+          title: oneTitle,
+          url: abs(url),
+          img,
+          price,
+          currency: '',
+          moq: ''
+        }],
+        debugPart: { mode: 'detail-only' }
+      };
+    }
+    return { ok: false, items: [], debugPart: { note: 'no items' } };
+  }
+
+  // 2) 对仍为 loader.svg 的商品，回落抓详情页取真图（最多 30 条，足够页面首屏/导出）
+  let enriched = 0;
+  const enrichCap = Math.min(items.length, 30);
+  for (let i = 0; i < enrichCap; i++) {
+    const it = items[i];
+    if (!isPlaceholder(it.img)) continue;
+    try {
+      const $$ = await $.fetch(it.url);
+      const real = grabDetailImage($$);
+      if (real && !isPlaceholder(real)) {
+        it.img = real;
+        enriched++;
+      }
+    } catch (e) {
+      // 忽略个别失败，继续
+    }
+  }
+
+  return {
+    ok: true,
+    items,
+    debugPart: { enriched, total: items.length }
+  };
 }
