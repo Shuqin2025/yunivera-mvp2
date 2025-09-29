@@ -1,9 +1,9 @@
 /**
- * Memoryking 适配器（鲁棒版 v2.7 / ESM）
- * 关键：支持从原始 HTML（rawHtml）做“源码直扫兜底”，即使中途清洗也能拿到真图
- * 调用签名：
- *   parseMemoryking({ $, url, rawHtml, limit, debug })
- *   或兼容旧式：parseMemoryking($, limit, debug)
+ * Memoryking 适配器（鲁棒版 v2.8 / ESM）
+ * 修正：
+ *  - 详情页（/details/ 或存在 .product--detail[s]）强制走“单条详情兜底”，不抓推荐卡片
+ *  - 列表模式过滤掉“交叉销售/推荐/配件”等容器下的 .product--box，防止误判
+ * 其余沿用 v2.7：rawHtml 源码直扫兜底、data-* 优先、loader.svg 过滤、清晰度打分
  */
 
 import * as cheerio from 'cheerio';
@@ -62,7 +62,6 @@ export default function parseMemoryking(input, limitDefault = 50, debugDefault =
     return s;
   };
 
-  // 从一段 HTML 源码中直扫全部图片 URL（极限兜底）
   const scrapeUrlsFromHtml = (html) => {
     if (!html) return [];
     const out = new Set();
@@ -71,12 +70,6 @@ export default function parseMemoryking(input, limitDefault = 50, debugDefault =
     return [...out];
   };
 
-  // 解析 <noscript> 片段为 $ 根
-  const loadNoscript = (html) => {
-    try { return cheerio.load(html || ''); } catch { return null; }
-  };
-
-  // 从“单个 <img>”抽取最佳 URL（优先 data-*）
   const bestFromImgNode = ($img) => {
     if (!$img || !$img.length) return '';
     const cand = new Set();
@@ -93,7 +86,6 @@ export default function parseMemoryking(input, limitDefault = 50, debugDefault =
     return real[0];
   };
 
-  // 作用域收集（含 noscript + 源码直扫）
   const collectImgs = ($root) => {
     const cand = new Set();
 
@@ -134,27 +126,7 @@ export default function parseMemoryking(input, limitDefault = 50, debugDefault =
       }
     });
 
-    // 5) noscript 里的 <img>
-    $root.find('noscript').each((_, el) => {
-      const html = $(el).html() || '';
-      const $n = loadNoscript(html);
-      if ($n) {
-        $n('img').each((__, img) => {
-          const $i = $n(img);
-          const best = bestFromImgNode($i); if (best) cand.add(best);
-          const list = [
-            $i.attr('data-src'), $i.attr('data-fallbacksrc'), $i.attr('src')
-          ].filter(Boolean);
-          const ss = $i.attr('data-srcset') || $i.attr('srcset') || '';
-          if (ss) fromSrcset(ss).forEach((u) => list.push(u));
-          list.forEach((u) => cand.add(u));
-        });
-        // noscript 源码直扫（以防写在 style/script 里）
-        scrapeUrlsFromHtml(html).forEach((u) => cand.add(u));
-      }
-    });
-
-    // 6) 该作用域 HTML 直扫
+    // 5) 作用域 HTML 直扫
     const html = $root.html() || '';
     scrapeUrlsFromHtml(html).forEach((u) => cand.add(u));
 
@@ -179,7 +151,7 @@ export default function parseMemoryking(input, limitDefault = 50, debugDefault =
       $box.find('a').first().attr('href') || '';
     href = abs(href);
 
-    // 图片：先就地取第一个 <img> 的 data-* → 再 DOM 收集 → 再 box 源码直扫
+    // 图片：先从首个 img 的 data-* 强取 → 再 DOM 收集 → 再 box 源码直扫
     const firstImg = $box.find('img').first();
     let img = bestFromImgNode(firstImg);
     if (!img) img = collectImgs($box);
@@ -204,27 +176,41 @@ export default function parseMemoryking(input, limitDefault = 50, debugDefault =
     return { sku, title, url: href, img, price, currency: '', moq: '' };
   };
 
-  // ---------- ① 列表 ----------
-  const selectors = [
-    '.listing--container .product--box',
-    '.product--box',
-    '.js--isotope .product--box',
-  ];
-  let boxes = [];
-  for (const sel of selectors) {
-    const arr = $(sel).toArray();
-    if (arr.length) { boxes = arr; break; }
-  }
-  if (boxes.length) {
-    boxes.forEach((el) => {
-      const row = readBox($(el));
-      if (row.title || row.url || row.img) items.push(row);
-    });
+  // ====== 关键：先判定是否“详情页” ======
+  const isDetail =
+    /\/details\//i.test(pageUrl || '') ||
+    $('.product--detail, .product--details').length > 0 ||
+    (String($('meta[property="og:type"]').attr('content') || '').toLowerCase() === 'product');
+
+  // ---------- ① 列表（仅在“非详情页”时走；并排除推荐区容器） ----------
+  if (!isDetail) {
+    const listSelectors = [
+      '.listing--container .product--box',
+      '.js--isotope .product--box',
+      // （去掉裸 `.product--box` 的优先权，以减少误匹配；需要时仍作为第三选择）
+      '.product--box',
+    ];
+
+    // 详情页里不应抓取这些区域下面的 box
+    const BLACKLIST = '.product--detail, .product--details, .cross-selling, .crossselling, .related, .related--products, .similar--products, .upselling, .accessories, .accessory--slider';
+
+    let boxes = [];
+    for (const sel of listSelectors) {
+      const arr = $(sel).toArray().filter((el) => $(el).closest(BLACKLIST).length === 0);
+      if (arr.length) { boxes = arr; break; }
+    }
+
+    if (boxes.length) {
+      boxes.forEach((el) => {
+        const row = readBox($(el));
+        if (row.title || row.url || row.img) items.push(row);
+      });
+    }
   }
 
-  // ---------- ② 详情兜底 ----------
+  // ---------- ② 详情兜底（列表无结果或判定为详情页时） ----------
   if (items.length === 0) {
-    const $detail = $('.product--details, .product--detail, body');
+    const $detail = $('.product--details, .product--detail, #content, body');
 
     const title =
       $detail.find('.product--title').first().text().trim() ||
@@ -232,38 +218,25 @@ export default function parseMemoryking(input, limitDefault = 50, debugDefault =
 
     const url =
       abs($('link[rel="canonical"]').attr('href') || '') ||
-      abs(($('meta[property="og:url"]').attr('content') || '').trim());
+      abs(($('meta[property="og:url"]').attr('content') || '').trim()) ||
+      (pageUrl || '');
 
+    // 图片：og:image → 主区域收集 → 全页(rawHtml 优先)直扫
     let img = $('meta[property="og:image"]').attr('content') || '';
-
-    if (!img) {
-      $('script[type="application/ld+json"]').each((_, el) => {
-        try {
-          const data = JSON.parse($(el).contents().text() || '{}');
-          const pic = Array.isArray(data?.image) ? data.image[0] : data?.image;
-          if (!img && pic && /\.(jpe?g|png|webp)(?:$|\?)/i.test(pic)) img = pic;
-        } catch {}
-      });
-    }
-
     if (!img) img = bestFromImgNode($detail.find('img').first());
     if (!img) img = collectImgs($detail);
-
-    // —— 全页源码直扫（用 rawHtml 优先；没有则用 $.root().html()）——
     if (!img) {
       const pageHtml = rawHtml || ($.root().html() || '');
-      const best = scrapeUrlsFromHtml(pageHtml)
+      img = (scrapeUrlsFromHtml(pageHtml)
         .map(abs)
         .filter((u) => /\.(jpe?g|png|webp)(?:$|\?)/i.test(u) && !/loader\.svg/i.test(u))
-        .sort((a, b) => score(b) - score(a))[0];
-      img = best || '';
+        .sort((a, b) => score(b) - score(a))[0]) || '';
     }
-
     img = abs(img);
 
     const price =
-      $detail.find('.price--default, .product--price, .price--content, .price--unit, [itemprop="price"]')
-        .first().text().replace(/\s+/g, ' ').trim() || '';
+      $detail.find('.price--default, .product--price, .price--content, .price--unit, [itemprop="price"]').first()
+        .text().replace(/\s+/g, ' ').trim() || '';
 
     const sku =
       $detail.find('.manufacturer--name').first().text().trim() ||
@@ -280,8 +253,7 @@ export default function parseMemoryking(input, limitDefault = 50, debugDefault =
     .slice(0, limit);
 
   if (debug) {
-    const first = out[0] || {};
-    console.log('[memoryking] out=%d; first.img=%s title=%s', out.length, first.img, first.title);
+    console.log('[memoryking] isDetail=%s out=%d; first=%o', isDetail, out.length, out[0]);
   }
   return out;
 }
