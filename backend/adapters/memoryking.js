@@ -1,144 +1,213 @@
-/**
- * Memoryking 适配器（稳健取图：列表直接取 + 失败回落到详情页）
- * - 列表：优先从 data-img-*/srcset 抓真图
- * - 仍为 loader.svg 时，最多对前 N 条回落抓详情页的 og:image / image--media
- * - 详情页：直接取 og:image / image--media 的 600x600
- */
-export default async function parseMemoryking($, limit = 50, debug = false) {
-  const base = $('base').attr('href') || 'https://www.memoryking.de/';
+// Memoryking 适配器（处理懒加载图片）
+// 列表页与详情页都会尽力从 data-img 系列属性、srcset 或 data-src/src 中取到真正图片
+// 只接受 jpg jpeg png webp 四种后缀的真实图片地址，过滤掉 loader.svg
+
+export default function parseMemoryking($, limit = 50, debug = false) {
+  const items = [];
+  const base =
+    $('base').attr('href') ||
+    'https://www.memoryking.de/';
+
   const abs = (u) => {
     if (!u) return '';
-    try { return new URL(u, base).href; } catch { return u; }
+    if (/^\/\//i.test(u)) return 'https:' + u;
+    if (/^https?:/i.test(u)) return u;
+    try {
+      return new URL(u, base).href;
+    } catch (e) {
+      return u;
+    }
   };
 
-  const items = [];
-  const pickFromSrcset = (ss) => {
-    if (!ss) return '';
-    const urls = ss.split(',').map(s => s.trim().split(' ')[0]);
-    const p600 = urls.find(u => /600x600/.test(u));
-    return p600 || urls.pop() || '';
-  };
-  const isPlaceholder = (u) => !u || /\.svg(\?|$)/i.test(u);
+  const cleanTxt = (t) =>
+    (t || '')
+      .replace(/\s+/g, ' ')
+      .trim();
 
-  const grabImgFromTile = (tile) => {
-    const img = tile.find('img').first();
-    let src =
-      img.attr('data-src') ||
-      img.attr('src') ||
-      tile.find('.image--element').attr('data-img-medium') ||
-      tile.find('.image--element').attr('data-img-large') ||
-      tile.find('.image--element').attr('data-img-small') ||
+  const textOf = (scope, sel) =>
+    cleanTxt(sel ? scope.find(sel).first().text() : scope.text());
+
+  const pickFromSrcset = (srcset) => {
+    if (!srcset) return '';
+    // 例子： "https://...600x600.jpg 600w, https://...200x200.jpg 200w"
+    const parts = srcset
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (!parts.length) return '';
+
+    const scored = parts.map((p) => {
+      // 把末尾的 600w、2x 或者文件名里的 600x600 抽成“宽度”
+      const endNum = p.match(/(\d+)\s*(w|x|h|px)?\s*$/);
+      let w = endNum ? parseInt(endNum[1], 10) : 0;
+      if (!w) {
+        const m2 = p.match(/(\d{3,4})x(\d{3,4})/);
+        if (m2) w = parseInt(m2[1], 10);
+      }
+      const url = p.replace(/\s+\d.*$/, ''); // 去掉描述，只保留 URL
+      return { w, url };
+    });
+
+    // 取“最大的那张”
+    scored.sort((a, b) => b.w - a.w);
+    const chosen = scored[0]?.url || parts[0].replace(/\s+\d.*$/, '');
+    return chosen || '';
+  };
+
+  const extractRealImage = ($scope) => {
+    // 1) memoryking 列表常见：span.image--element 挂 data-img-large / -small / -original 等
+    let fromMeta = $scope.find('span.image--element').first();
+    let cand =
+      fromMeta.attr('data-img-large') ||
+      fromMeta.attr('data-image-large') ||
+      fromMeta.attr('data-large') ||
+      fromMeta.attr('data-img-original') ||
+      fromMeta.attr('data-original') ||
+      fromMeta.attr('data-img-small') ||
+      fromMeta.attr('data-small') ||
       '';
 
-    if ((!src || isPlaceholder(src))) {
-      // 再尝试 srcset
-      src =
-        img.attr('data-srcset') ||
-        img.attr('srcset') ||
-        src;
-      src = pickFromSrcset(src);
+    // 2) 其次尝试 <img> 上的 srcset / data-srcset
+    let imgEl = $scope.find('img').first();
+    if (!cand) {
+      const srcset = imgEl.attr('srcset') || imgEl.attr('data-srcset') || '';
+      if (srcset) cand = pickFromSrcset(srcset);
     }
-    return abs(src);
+
+    // 3) 再退化到 data-src / src
+    if (!cand) cand = imgEl.attr('data-src') || imgEl.attr('src') || '';
+
+    // 4) 兜底在 scope 上直接搜一遍带图片后缀的 URL
+    if (cand && !/\.(jpg|jpeg|png|webp)(\?|#|$)/i.test(cand)) {
+      const inText =
+        (fromMeta.attr('data-img-small') || '').match(
+          /https?:\/\/[^\s'"]+\.(jpg|jpeg|png|webp)[^\s'"]*/i
+        ) ||
+        cand.match(/https?:\/\/[^\s'"]+\.(jpg|jpeg|png|webp)[^\s'"]*/i);
+      if (inText) cand = inText[0];
+    }
+
+    // 5) 过滤掉 loader.svg
+    if (/loader\.svg/i.test(cand)) cand = '';
+
+    // 6) 绝对化
+    if (cand) cand = abs(cand);
+
+    // 7) 最终只接受图片后缀
+    if (cand && !/\.(jpg|jpeg|png|webp)(\?|#|$)/i.test(cand)) cand = '';
+
+    return cand;
   };
 
-  const grabDetailImage = ($$) => {
-    let src =
-      $$('meta[property="og:image"]').attr('content') ||
-      $$('.image--media img').attr('src') ||
-      '';
-
-    if (!src) {
-      src = pickFromSrcset($$('.image--media img').attr('srcset') || '');
-    }
-    if (!src) {
-      // 少数主题把真图放在 data-img-*
-      const el = $$('.image--element');
-      src =
-        el.attr('data-img-medium') ||
-        el.attr('data-img-large') ||
-        el.attr('data-img-small') ||
-        '';
-    }
-    return abs(src);
+  const pushItem = (o) => {
+    if (!o) return;
+    o.title = cleanTxt(o.title);
+    if (!o.title) return;
+    if (o.url) o.url = abs(o.url);
+    items.push(o);
   };
 
-  // 1) 列表页尝试直接抓
-  $('.product--box').each((i, el) => {
+  // 一、列表页
+  // 典型结构：.listing--container .product--box
+  $('.listing--container .product--box, .product--box').each((i, el) => {
     if (items.length >= limit) return false;
-    const card = $(el);
+
+    const $box = $(el);
+    const $link =
+      $box.find('a.product--image').first() ||
+      $box.find('a.product--title').first() ||
+      $box.find('a').first();
 
     const title =
-      card.find('.product--title a').text().trim() ||
-      card.find('.product--title').text().trim();
+      textOf($box, '.product--title a') ||
+      textOf($box, '.product--title') ||
+      textOf($box, '.product--info .title');
 
     const url =
-      card.find('.product--title a, .product--image a').attr('href') ||
-      card.find('a').first().attr('href') || '';
+      $link.attr('href') ||
+      $box.find('.product--title a').attr('href') ||
+      '';
 
     const price =
-      card.find('.price--default, .product--price .price--content').first().text().trim();
+      textOf($box, '.price--default .price') ||
+      textOf($box, '.product--price .price') ||
+      textOf($box, '.price');
 
-    const img = grabImgFromTile(card);
+    const sku =
+      textOf($box, '.product--supplier') ||
+      textOf($box, '.manufacturer') ||
+      '';
 
-    items.push({
-      sku: 'deleyCON',
-      title,
-      url: abs(url),
-      img,
-      price,
-      currency: '',
-      moq: ''
-    });
+    const img = extractRealImage($box);
+
+    if (title || img) {
+      pushItem({
+        sku,
+        title,
+        url,
+        img,
+        price
+      });
+    }
   });
 
-  // 若不是列表（如详情页）
-  if (items.length === 0) {
-    const oneTitle = $('#content h1, .product--title').first().text().trim();
-    if (oneTitle) {
-      const url =
-        $('link[rel=canonical]').attr('href') ||
-        $('meta[property="og:url"]').attr('content') || '';
-      const img = grabDetailImage($);
-      const price =
-        $('.price--default, .product--price .price--content').first().text().trim();
-      return {
-        ok: true,
-        items: [{
-          sku: 'deleyCON',
-          title: oneTitle,
-          url: abs(url),
-          img,
-          price,
-          currency: '',
-          moq: ''
-        }],
-        debugPart: { mode: 'detail-only' }
-      };
+  // 二、若仍未取到，按详情页兜底
+  if (!items.length) {
+    const title =
+      textOf($, 'h1.product--title') ||
+      textOf($, '.product--title h1') ||
+      textOf($, '.product--header h1') ||
+      textOf($, '.product--title');
+
+    const url = $('link[rel="canonical"]').attr('href') || '';
+
+    // 详情页图片容器常见：.image--box / .image--container / .image-slider--container
+    let img =
+      extractRealImage(
+        $('.image--box, .image--container, .image-slider--container, .image-gallery, .image-slider')
+      ) || '';
+
+    if (!img) {
+      // 遍历所有 img 的父容器快速兜底
+      $('img').each((_, el) => {
+        if (img) return;
+        const trial = extractRealImage($(el).parent());
+        if (trial) img = trial;
+      });
     }
-    return { ok: false, items: [], debugPart: { note: 'no items' } };
+
+    const price =
+      textOf($, '.price--default .price') ||
+      textOf($, '.price--content .price') ||
+      textOf($, '.product--price .price') ||
+      textOf($, '.buybox--price .price');
+
+    const sku =
+      textOf($, '[itemprop=brand]') ||
+      textOf($, '.product--supplier') ||
+      '';
+
+    if (title) {
+      pushItem({
+        sku,
+        title,
+        url,
+        img,
+        price
+      });
+    }
   }
 
-  // 2) 对仍为 loader.svg 的商品，回落抓详情页取真图（最多 30 条，足够页面首屏/导出）
-  let enriched = 0;
-  const enrichCap = Math.min(items.length, 30);
-  for (let i = 0; i < enrichCap; i++) {
-    const it = items[i];
-    if (!isPlaceholder(it.img)) continue;
-    try {
-      const $$ = await $.fetch(it.url);
-      const real = grabDetailImage($$);
-      if (real && !isPlaceholder(real)) {
-        it.img = real;
-        enriched++;
-      }
-    } catch (e) {
-      // 忽略个别失败，继续
-    }
+  if (debug) {
+    const first = items[0] || {};
+    /* eslint-disable no-console */
+    console.log('[memoryking] debug:', {
+      sample: items.slice(0, 3),
+      total: items.length,
+      first
+    });
+    /* eslint-enable no-console */
   }
 
-  return {
-    ok: true,
-    items,
-    debugPart: { enriched, total: items.length }
-  };
+  return { ok: true, items };
 }
