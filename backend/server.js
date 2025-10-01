@@ -5,6 +5,8 @@ import * as cheerio from "cheerio";
 
 // ✅ 新增：memoryking 适配器（仅此一行）
 import parseMemoryking from "./adapters/memoryking.js";
+// ✅ 新增：sinotronic 适配器（仅此一行）
+import sino from "./adapters/sinotronic.js";
 
 const app = express();
 app.use(cors({ origin: "*", exposedHeaders: ["X-Lang"] }));
@@ -553,6 +555,14 @@ async function parseUniversalCatalog(listUrl, limit = 50) {
       // --- 三行微改结束 ---
     }
 
+    // ✅ 新增：sinotronic-e.com 静态目录页（Cheerio 本地解析）
+    if (host.includes("sinotronic-e.com")) {
+      const html = await fetchHtml(listUrl);
+      const $ = cheerio.load(html, { decodeEntities: false });
+      const items = sino.parse($, listUrl, { limit });
+      return Array.isArray(items) ? items : (items.items || []);
+    }
+
     if (host.includes("s-impuls-shop.de")) {
       return await parseSImpulsCatalog(listUrl, limit);
     }
@@ -684,4 +694,3 @@ app.get(["/v1/api/catalog", "/v1/api/catalog.json", "/v1/api/catalog/parse.json"
 /* ──────────────────────────── listen ──────────────────────────── */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`[mvp2-backend] listening on :${PORT}`));
-
