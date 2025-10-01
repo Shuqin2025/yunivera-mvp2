@@ -18,3 +18,6 @@ build/
 # local backups (do not commit)
 backend/server.js.bak*
 backend/server.js.fix_*
+server.js.bak.*
+backend/server.js.broken.*
+*.bak.*
