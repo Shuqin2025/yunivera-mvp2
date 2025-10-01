@@ -1,98 +1,120 @@
-// backend/adapters/sinotronic.js
-// 站点适配：sinotronic-e.com 静态列表页
-// 适配器只做 DOM 解析，不发请求；抓取与解码由 routes/catalog.js 统一处理。
-
-const CONTAINER_CANDIDATES = ["#productlist", ".productlist", "main", "body"];
-// 容器内“相对选择器”优先，避免“容器再找自己”；最后兜底到全局
-const ITEM_CANDIDATES = ["ul > li", "li", ".product", "#productlist ul > li"];
-
-const toAbs = (u, base) => {
-  if (!u) return "";
-  try { return new URL(u, base).href; } catch { return u || ""; }
-};
-
-const pickAttr = ($el, attrs) => {
-  for (const k of attrs) {
-    const v = $el.attr(k);
-    if (v) return v;
-  }
-  return "";
-};
-
-function extractItems($, baseUrl, $items, limit, wantDebug, debugObj) {
-  const items = [];
-  $items.each((_, li) => {
-    if (items.length >= limit) return false;
-    const $li = $(li);
-
-    const $img = $li.find("img").first();
-    const imgRel = pickAttr($img, ["src", "data-src", "data-original"]);
-    const img = toAbs(imgRel, baseUrl);
-
-    const $a = $li.find("a[href]").first();
-    const link = toAbs($a.attr("href") || "", baseUrl);
-
-    const title =
-      ($img.attr("alt") || "").trim() ||
-      ($a.text() || "").trim() ||
-      ($li.text() || "").trim();
-
-    if (!title && !img && !link) return;
-
-    items.push({ sku: title, desc: title, minQty: "", price: "", img, link });
-
-    if (wantDebug && items.length === 1) {
-      debugObj.first_item_html = $.html($li);
-    }
-  });
-  return items;
-}
-
+/**
+ * Sinotronic 列表页适配器 v1.6（ESM）
+ * 目标： http://www.sinotronic-e.com/list/?9_1.html 这类静态目录页
+ *
+ * 思路：
+ * 1) 先在 #productlist/.productlist/.editor 容器里找含 <img> 的 <li>
+ * 2) 若未命中，兜底：全页扫描 <img>，仅保留 /upload/product/…（大小写不敏感）
+ * 3) 近邻/就近寻找 <a href> 作为链接；优先 img.alt / a.text / img.title 作为标题
+ * 4) 统一补全绝对地址，按图片去重，返回标准字段
+ *
+ * 返回：Array<{ sku, title, url, img, price, currency, moq }>
+ */
 export default {
-  test(url) {
-    return /https?:\/\/(www\.)?sinotronic-e\.com\//i.test(url);
+  test(u) {
+    return /https?:\/\/(www\.)?sinotronic-e\.com\//i.test(String(u || ""));
   },
 
   /**
-   * @param {$} $  cheerio 实例（调用方已抓取并解码）
-   * @param {string} url 页面 URL
-   * @param {object} opts { limit?: number, debug?: boolean }
+   * @param {CheerioStatic} $  — 已经加载好 HTML 的 cheerio 根
+   * @param {string} pageUrl   — 当前页面 URL，用于补全相对地址
+   * @param {object} opts      — { limit?: number, debug?: boolean }
    */
-  parse($, url, opts = {}) {
-    const { limit = 50, debug: rawDebug = false } = opts;
-    const wantDebug = ["1","true","yes","on"].includes(String(rawDebug).toLowerCase());
+  parse($, pageUrl, opts = {}) {
+    const limit = Number(opts.limit || 60);
 
-    const debug = wantDebug ? { tried: { container: [], item: [] } } : undefined;
+    const toAbs = (u) => {
+      if (!u) return "";
+      try { return new URL(u, pageUrl).href; } catch { return String(u || ""); }
+    };
 
-    // 1) 容器
-    let $ctn = $(), usedCtn = "";
-    for (const sel of CONTAINER_CANDIDATES) {
-      const cnt = $(sel).length;
-      if (wantDebug) debug.tried.container.push({ selector: sel, matched: cnt });
-      if (cnt) { $ctn = $(sel).first(); usedCtn = sel; break; }
+    const push = (bag, rec) => {
+      if (!rec || !rec.img) return;
+      if (seen.has(rec.img)) return;
+      seen.add(rec.img);
+      bag.push(rec);
+    };
+
+    const out = [];
+    const seen = new Set();
+
+    // -------------------------
+    // 1) 容器优先：只在“像列表”的区域里取
+    // -------------------------
+    let $ctn = $("#productlist");
+    if (!$ctn.length) $ctn = $(".productlist, .editor").first();
+    if (!$ctn.length) $ctn = $("body");
+
+    let $lis = $ctn.find("li:has(img)");
+    if (!$lis.length) $lis = $ctn.find("li");
+
+    $lis.each((_, li) => {
+      if (out.length >= limit) return false;
+      const $li  = $(li);
+      const $img = $li.find("img").first();
+      if (!$img.length) return;
+
+      // 近邻 a[href]
+      let $a = $li.find("a[href]").first();
+      if (!$a.length) $a = $img.closest("a[href]");
+
+      const img   = toAbs($img.attr("src") || $img.attr("data-src") || $img.attr("data-original") || "");
+      const href  = toAbs(($a && $a.attr("href")) || "");
+      const title = (
+        $img.attr("alt") ||
+        ($a && $a.text()) ||
+        $img.attr("title") ||
+        $li.text() ||
+        ""
+      ).trim();
+
+      if (!img && !href && !title) return;
+      push(out, { sku: title || "", title: title || "", url: href, img, price: "", currency: "", moq: "" });
+    });
+
+    // -------------------------
+    // 2) 兜底：全页扫描图片，限定 /upload/product/（大小写不敏感）
+    // -------------------------
+    if (out.length === 0) {
+      $("img").each((_, el) => {
+        if (out.length >= limit) return false;
+        const $img = $(el);
+        const src  = $img.attr("src") || $img.attr("data-src") || $img.attr("data-original") || "";
+        if (!/\/upload\/product\//i.test(src)) return;
+
+        // a[href]：先最近祖先，再 li 内，再父节点内
+        let $a = $img.closest("a[href]");
+        if (!$a.length) {
+          const $li = $img.closest("li");
+          if ($li.length) $a = $li.find("a[href]").first();
+        }
+        if (!$a.length) $a = $img.parent().find("a[href]").first();
+
+        const img   = toAbs(src);
+        const href  = toAbs(($a && $a.attr("href")) || "");
+        const title = (
+          $img.attr("alt") ||
+          ($a && $a.text()) ||
+          $img.attr("title") ||
+          ""
+        ).trim();
+
+        if (!img) return;
+        push(out, {
+          sku: title || img.split("/").pop(),
+          title: title || img.split("/").pop(),
+          url: href,
+          img,
+          price: "",
+          currency: "",
+          moq: ""
+        });
+      });
     }
-    if (!$ctn.length) { $ctn = $("body"); usedCtn = "body"; }
 
-    // 2) 条目（容器相对优先，再全局兜底）
-    let $items = $(), usedItemSel = "";
-    for (const sel of ITEM_CANDIDATES) {
-      let list = sel.startsWith("#") ? $(sel) : $ctn.find(sel);
-      if (!list.length) list = $(sel);               // 全局兜底
-      const cnt = list.length;
-      if (wantDebug) debug.tried.item.push({ selector: sel, matched: cnt });
-      if (cnt) { $items = list; usedItemSel = sel; break; }
-    }
-
-    if (wantDebug) {
-      debug.container_matched = usedCtn;
-      debug.item_selector_used = usedItemSel || "";
-      debug.item_count = $items.length || 0;
-    }
-
-    // 3) 抽取
-    const base = new URL(url).origin + "/";
-    const items = extractItems($, base, $items, limit, wantDebug, debug || {});
-
-    return { items, debugPart: wantDebug ? debug : undefined };
-  },
+    try {
+      console.log("[sinotronic] out=%d first=%s", out.length, out[0]?.img || "");
+    } catch {}
+    return out.slice(0, limit);
+  }
 };
