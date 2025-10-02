@@ -226,7 +226,6 @@ async function parseAutoSchmuck(listUrl, limit = 50) {
         currency: "",
         moq: "",
       });
-      seen.add(href);
     });
 
   return items.slice(0, limit);
@@ -372,7 +371,6 @@ function parseByCardSelectors($, listUrl, limit = 50) {
       currency: "",
       moq: "",
     });
-    seen.add(href);
   });
 
   return items;
@@ -461,7 +459,6 @@ function parseGenericFromHtml($, listUrl, limit = 50) {
     } catch {
       continue;
     }
-    if (seen.has(href)) continue;
 
     let $card = $a.closest("li,article,div");
     if (!$card.length) $card = $a.parent();
@@ -502,7 +499,6 @@ function parseGenericFromHtml($, listUrl, limit = 50) {
       currency: "",
       moq: "",
     });
-    seen.add(href);
   }
 
   return items;
@@ -546,26 +542,120 @@ async function parseUniversalCatalog(listUrl, limit = 50) {
   try {
     const host = new URL(listUrl).hostname;
 
-    // ✅ 新增：memoryking.de 专用适配器（仅此分支）
+    // ✅ memoryking.de
     if (host.includes("memoryking.de")) {
-      // --- 三行微改开始 ---
       const html = await fetchHtml(listUrl);
       const $ = cheerio.load(html, { decodeEntities: false });
       return await parseMemoryking({ $, url: listUrl, rawHtml: html, limit });
-      // --- 三行微改结束 ---
     }
 
-    // ✅ 新增：sinotronic-e.com 静态目录页（Cheerio 本地解析）
+    // ✅ sinotronic-e.com（自动翻页）
     if (host.includes("sinotronic-e.com")) {
-      const html = await fetchHtml(listUrl);
-      const $ = cheerio.load(html, { decodeEntities: false });
-      const items = sino.parse($, listUrl, { limit });
-      return Array.isArray(items) ? items : (items.items || []);
+      // 分页样式：/list/?{category}_{page}.html
+      const re = /(\?\d+_)(\d+)\.html$/i;
+      const makeUrl = (p) => (re.test(listUrl) ? listUrl.replace(re, (_, a) => `${a}${p}.html`) : null);
+
+      const maxPages = 20; // 安全上限
+      const seenKey = new Set();
+      const out = [];
+
+      // 第 1 页
+      const firstHtml = await fetchHtml(listUrl);
+      let $ = cheerio.load(firstHtml, { decodeEntities: false });
+      let part = sino.parse($, listUrl, { limit });
+      for (const it of part || []) {
+        const key = it.url || it.img || it.title || "";
+        if (!key || seenKey.has(key)) continue;
+        seenKey.add(key);
+        out.push(it);
+        if (out.length >= limit) break;
+      }
+
+      // 后续页
+      for (let p = 2; p <= maxPages && out.length < limit; p++) {
+        const nextUrl = makeUrl(p);
+        if (!nextUrl) break;
+
+        const html = await fetchHtml(nextUrl);
+        $ = cheerio.load(html, { decodeEntities: false });
+        part = sino.parse($, nextUrl, { limit: limit - out.length }) || [];
+        if (!part.length) break;
+
+        let add = 0;
+        for (const it of part) {
+          const key = it.url || it.img || it.title || "";
+          if (!key || seenKey.has(key)) continue;
+          seenKey.add(key);
+          out.push(it);
+          add++;
+          if (out.length >= limit) break;
+        }
+        if (!add) break;
+      }
+
+      return out;
     }
 
+    // ✅ s-impuls-shop.de（自动翻页）
     if (host.includes("s-impuls-shop.de")) {
-      return await parseSImpulsCatalog(listUrl, limit);
+      const maxPages = 50; // 安全上限
+      const visited = new Set();
+      const out = [];
+
+      const findNext = ($, currentUrl) => {
+        // 常见“下一页”选择器 & 文本
+        let href =
+          $('a[rel="next"]').attr("href") ||
+          $(".pagination a.next, .pagination .next a").first().attr("href") ||
+          $('.pagination a').filter((_, a) => /›|Next|Weiter|Nächste|»|>>/i.test($(a).text().trim())).first().attr("href") ||
+          "";
+
+        // 数字页：current + 1
+        if (!href) {
+          const cur =
+            parseInt(
+              $(".pagination .active, .pagination .current, .pagination li.active a, .pagination li.active, .pager .active")
+                .first()
+                .text()
+                .trim(),
+              10
+            ) || 0;
+          if (cur) {
+            const $a = $(".pagination a").filter((_i, a) => parseInt($(a).text().trim(), 10) === cur + 1).first();
+            href = $a.attr("href") || href;
+          }
+        }
+
+        href = href ? abs(currentUrl, href) : "";
+        if (href && visited.has(href)) return "";
+        return href;
+      };
+
+      let pageUrl = listUrl;
+      for (let p = 1; p <= maxPages && out.length < limit && pageUrl; p++) {
+        if (visited.has(pageUrl)) break;
+        visited.add(pageUrl);
+
+        // 解析本页
+        const html = await fetchHtml(pageUrl);
+        const $ = cheerio.load(html, { decodeEntities: false });
+        // 复用现有单页解析器（保持你的代码结构），哪怕多一次请求，也不改动原函数签名
+        const part = await parseSImpulsCatalog(pageUrl, limit - out.length);
+        for (const it of part || []) {
+          out.push(it);
+          if (out.length >= limit) break;
+        }
+        if (out.length >= limit) break;
+
+        // 发现下一页
+        const nextUrl = findNext($, pageUrl);
+        if (!nextUrl) break;
+        pageUrl = nextUrl;
+      }
+
+      return out;
     }
+
     if (host.includes("auto-schmuck.com")) {
       return await parseAutoSchmuck(listUrl, limit);
     }
@@ -574,11 +664,11 @@ async function parseUniversalCatalog(listUrl, limit = 50) {
   const html = await fetchHtml(listUrl);
   const $ = cheerio.load(html);
 
-  // ① 新增：通用卡片解析（静态 HTML / PHP / WordPress）
+  // ① 通用卡片解析
   const cardItems = parseByCardSelectors($, listUrl, limit);
   if (cardItems.length) return cardItems;
 
-  // ② WooCommerce 优先
+  // ② WooCommerce
   const wcCards = $("ul.products li.product");
   if (wcCards.length) return parseWooFromHtml($, listUrl, limit);
 
@@ -619,7 +709,6 @@ app.get("/v1/api/catalog/parse", async (req, res) => {
       await Promise.all(items.slice(0, enrichCount).map(enrichDetail));
     }
 
-    // 可选：将前 imgCount 个商品的图片转成 base64 一起返回（前端 ExcelJS 可直接用）
     if (wantImgBase64 && imgCount > 0) {
       await Promise.all(
         items.slice(0, imgCount).map(async (it) => {
