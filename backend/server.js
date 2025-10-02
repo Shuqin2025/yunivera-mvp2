@@ -7,6 +7,8 @@ import * as cheerio from "cheerio";
 import parseMemoryking from "./adapters/memoryking.js";
 // ✅ 新增：sinotronic 适配器（仅此一行）
 import sino from "./adapters/sinotronic.js";
+// ✅ 新增：universal 适配器（仅此一行）
+import parseUniversal from "./adapters/universal.js";
 
 const app = express();
 app.use(cors({ origin: "*", exposedHeaders: ["X-Lang"] }));
@@ -715,6 +717,12 @@ if (host.includes("s-impuls-shop.de")) {
     if (host.includes("auto-schmuck.com")) {
       return await parseAutoSchmuck(listUrl, limit);
     }
+  } catch {}
+
+  // ✅ 新增兜底：尝试外部 universal 适配器（若成功且有数据，直接返回）
+  try {
+    const uni = await parseUniversal({ url: listUrl, limit });
+    if (Array.isArray(uni) && uni.length) return uni;
   } catch {}
 
   const html = await fetchHtml(listUrl);
