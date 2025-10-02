@@ -3,6 +3,11 @@ import cors from "cors";
 import axios from "axios";
 import * as cheerio from "cheerio";
 
+// ✅ 新增：memoryking 适配器（仅此一行）
+import parseMemoryking from "./adapters/memoryking.js";
+// ✅ 新增：sinotronic 适配器（仅此一行）
+import sino from "./adapters/sinotronic.js";
+
 const app = express();
 app.use(cors({ origin: "*", exposedHeaders: ["X-Lang"] }));
 
@@ -17,9 +22,9 @@ app.get("/v1/api/health", (_req, res) => {
 
 app.get("/v1/api/__version", (_req, res) => {
   res.json({
-    version: "mvp-universal-parse-2025-09-16-b64-img+aliases",
+    version: "mvp-universal-parse-2025-09-16-b64-img+aliases+cards",
     note:
-      "Add /v1/api/image64 & parse?img=base64; aliases for /v1/api/catalog*; robust query; keep limit up to 200.",
+      "Add /v1/api/image64 & parse?img=base64; aliases for /v1/api/catalog*; robust query; add generic card parser for static HTML & PHP/WordPress (div/li[class*=product]).",
   });
 });
 
@@ -293,6 +298,86 @@ async function parseSImpulsCatalog(listUrl, limit = 50) {
   return items;
 }
 
+/* ──────────────────────────── Generic 卡片解析（新增） ──────────────────────────── */
+/** 更贴近“静态 HTML / PHP（织梦/WordPress）”页面结构：
+ *  - 直接按“卡片容器”选择：div[class*=product], li[class*=product], article[class*=product]
+ *  - 卡片中找第一个指向详情的 <a> 与第一张 <img>
+ *  - 价格从常见类名与整卡文本兜底匹配
+ */
+function parseByCardSelectors($, listUrl, limit = 50) {
+  const items = [];
+  const seen = new Set();
+
+  // 常见卡片容器
+  const CARD_SEL = [
+    'div[class*="product"]',
+    'li[class*="product"]',
+    'article[class*="product"]',
+    '.product-item',
+    '.product-card',
+    '.prod-item',
+    '.good, .goods, .item',
+  ].join(", ");
+
+  const BAD_LINK = /(add-to-cart|wishlist|compare|login|register|cart|filter|sort)/i;
+
+  $(CARD_SEL).each((_i, el) => {
+    if (items.length >= limit) return false;
+    const $card = $(el);
+
+    // 图
+    const $img = $card.find("img").first();
+    let src =
+      $img.attr("data-src") ||
+      $img.attr("data-original") ||
+      ($img.attr("srcset") || "").split(" ").find((s) => /^https?:/i.test(s)) ||
+      $img.attr("src") ||
+      "";
+    const img = abs(listUrl, (src || "").split("?")[0]);
+
+    // 链接：第一个合格的 a[href]
+    let $a = $card.find("a[href]").filter((_, a) => !BAD_LINK.test(String($(a).attr("href")))).first();
+    if (!$a.length) return; // 没有详情链接不收
+
+    let href = abs(listUrl, $a.attr("href") || "");
+    if (!href || seen.has(href)) return;
+
+    // 标题：a 的 title/文本 -> h3/h2/h1 -> img alt
+    const title =
+      ($a.attr("title") || "").trim() ||
+      text($card.find("h3,h2,h1").first()) ||
+      text($a) ||
+      ($img.attr("alt") || "").trim();
+
+    if (!title) return;
+
+    // 价格：常见类名兜底
+    let priceTxt =
+      text(
+        $card.find(
+          ".price,.product-price,.amount,.money,.m-price,.price--default,.price__value"
+        ).first()
+      ) || "";
+    if (!priceTxt) {
+      const m = $card.text().match(/\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2})\s*(?:€|EUR)/i);
+      if (m) priceTxt = m[0].replace(/\s+/g, " ");
+    }
+
+    items.push({
+      sku: text($card.find(".sku,.product-sku,.model,.product-model").first()) || guessSkuFromTitle(title),
+      title,
+      url: href,
+      img,
+      price: priceTxt || null,
+      currency: "",
+      moq: "",
+    });
+    seen.add(href);
+  });
+
+  return items;
+}
+
 /* ──────────────────────────── WooCommerce (保留) ──────────────────────────── */
 function parseWooFromHtml($, listUrl, limit = 50) {
   const items = [];
@@ -340,7 +425,7 @@ function parseWooFromHtml($, listUrl, limit = 50) {
   return items;
 }
 
-/* ──────────────────────────── Generic (更严过滤) ──────────────────────────── */
+/* ──────────────────────────── Generic（原“超通用链接”回退） ──────────────────────────── */
 function parseGenericFromHtml($, listUrl, limit = 50) {
   const items = [];
   const seen = new Set();
@@ -460,6 +545,24 @@ async function enrichDetail(item) {
 async function parseUniversalCatalog(listUrl, limit = 50) {
   try {
     const host = new URL(listUrl).hostname;
+
+    // ✅ 新增：memoryking.de 专用适配器（仅此分支）
+    if (host.includes("memoryking.de")) {
+      // --- 三行微改开始 ---
+      const html = await fetchHtml(listUrl);
+      const $ = cheerio.load(html, { decodeEntities: false });
+      return await parseMemoryking({ $, url: listUrl, rawHtml: html, limit });
+      // --- 三行微改结束 ---
+    }
+
+    // ✅ 新增：sinotronic-e.com 静态目录页（Cheerio 本地解析）
+    if (host.includes("sinotronic-e.com")) {
+      const html = await fetchHtml(listUrl);
+      const $ = cheerio.load(html, { decodeEntities: false });
+      const items = sino.parse($, listUrl, { limit });
+      return Array.isArray(items) ? items : (items.items || []);
+    }
+
     if (host.includes("s-impuls-shop.de")) {
       return await parseSImpulsCatalog(listUrl, limit);
     }
@@ -471,11 +574,15 @@ async function parseUniversalCatalog(listUrl, limit = 50) {
   const html = await fetchHtml(listUrl);
   const $ = cheerio.load(html);
 
-  // WooCommerce 优先
+  // ① 新增：通用卡片解析（静态 HTML / PHP / WordPress）
+  const cardItems = parseByCardSelectors($, listUrl, limit);
+  if (cardItems.length) return cardItems;
+
+  // ② WooCommerce 优先
   const wcCards = $("ul.products li.product");
   if (wcCards.length) return parseWooFromHtml($, listUrl, limit);
 
-  // 通用回退
+  // ③ 超通用回退
   return parseGenericFromHtml($, listUrl, limit);
 }
 
