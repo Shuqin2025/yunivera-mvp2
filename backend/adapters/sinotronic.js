@@ -103,7 +103,7 @@ export default {
         push(out, {
           sku: title || img.split("/").pop(),
           title: title || img.split("/").pop(),
-          url: href,
+          url,
           img,
           price: "",
           currency: "",
