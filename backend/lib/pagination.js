@@ -1,158 +1,89 @@
 // backend/lib/pagination.js
-// 更鲁棒的自动翻页：支持 ?p=2 / ?page=2 / ?seite=2 / /page/2 / /p/2 / /seite/2
-// 并回退到 rel=next / 常见分页容器；默认仅在同一路径下前进，避免串类目
+import { URL } from "node:url";
 
-import * as cheerio from "cheerio";
-
-const PAGE_KEYS = ["p", "page", "seite", "pg", "pagina", "sayfa"];
-
-function toAbs(baseUrl, href) {
-  if (!href) return "";
-  try { return new URL(href, baseUrl).href; } catch { return String(href || ""); }
-}
-
-export function extractPageNumber(u) {
+/** 绝对化链接 */
+export function abs(baseUrl, href) {
   try {
-    const url = new URL(u);
-    // 1) ?p=2 / ?page=2 / ?seite=2 ...
-    for (const k of PAGE_KEYS) {
-      const v = url.searchParams.get(k);
-      const n = v && /^\d+$/.test(v) ? parseInt(v, 10) : 0;
-      if (n > 0) return n;
-    }
-    // 2) /page/2 / /p/2 / /seite/2
-    const m = url.pathname.match(/(?:^|\/)(?:page|p|seite|pg|pagina|sayfa)\/(\d+)(?:\/|$)/i);
-    if (m) return parseInt(m[1], 10) || 0;
-
-    return 0;
+    if (!href) return "";
+    return new URL(href, baseUrl).toString();
   } catch {
-    return 0;
-  }
-}
-
-function samePath(u1, u2) {
-  try {
-    const a = new URL(u1);
-    const b = new URL(u2);
-    return a.origin === b.origin && a.pathname === b.pathname;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * 在当前页面里寻找“下一页”的绝对地址
- */
-export function findNextPageUrl($, currentUrl, opts = {}) {
-  const { samePathOnly = true, debug = false } = opts;
-  const currentNum = extractPageNumber(currentUrl);
-  const pathLock = new URL(currentUrl).pathname;
-
-  const log = (...args) => { if (debug) console.log("[pagination]", ...args); };
-
-  // 0) rel=next
-  const relNext =
-    $('a[rel="next"]').attr("href") ||
-    $('link[rel="next"]').attr("href") ||
-    "";
-  if (relNext) {
-    const abs = toAbs(currentUrl, relNext);
-    if (!samePathOnly || samePath(abs, currentUrl)) {
-      log("rel=next ->", abs);
-      return abs;
-    }
-  }
-
-  // 1) 常见容器
-  const CTN = [
-    "nav.pagination", ".pagination", ".paging", ".paginator",
-    ".page-numbers", ".listing-pagination", ".cms-element-pagination",
-    ".pager", ".cate-paging", ".product-pager"
-  ].join(", ");
-
-  let containerLinks = [];
-  $(CTN).find('a[href]').each((_i, a) => {
-    const abs = toAbs(currentUrl, $(a).attr("href"));
-    containerLinks.push(abs);
-  });
-
-  // 2) 全链路扫描（兜底）
-  if (containerLinks.length === 0) {
-    $('a[href]').each((_i, a) => {
-      const abs = toAbs(currentUrl, $(a).attr("href"));
-      containerLinks.push(abs);
-    });
-  }
-
-  // 3) 把所有链接解析成 (url,pageNum)，过滤不同路径/无页码的
-  const candidates = [];
-  for (const href of containerLinks) {
-    if (!href) continue;
-    if (samePathOnly) {
-      try {
-        if (new URL(href).pathname !== pathLock) continue;
-      } catch { continue; }
-    }
-    const n = extractPageNumber(href);
-    if (n > 0) candidates.push({ href, n });
-  }
-
-  if (candidates.length === 0) {
-    log("no candidates");
     return "";
   }
+}
 
-  // 4) 选择 current+1；若没有 current（=0），则取最小 >=2
-  const target = (currentNum > 0)
-    ? candidates
-        .filter(c => c.n > currentNum)
-        .sort((a, b) => a.n - b.n)[0]
-    : candidates
-        .filter(c => c.n >= 2)
-        .sort((a, b) => a.n - b.n)[0];
+// 常见“下一页”文案/符号（多语言）
+const NEXT_TEXT_RE =
+  /(next|weiter|nächste|nächst|suivant|seguente|siguiente|дальше|вперёд|التالي|次へ|下一页|下一頁|下一步|下一|›|»)/i;
 
-  if (target) {
-    log("next ->", target.n, target.href);
-    return target.href;
+/** 1) rel=next / <link rel="next"> */
+function byRel($) {
+  return $('a[rel="next"]').attr("href") || $('link[rel="next"]').attr("href") || "";
+}
+
+/** 2) 常见选择器 + 文案判断（含 Shopware: .paging--link.is--next） */
+function byCommonSelectors($) {
+  const sel =
+    ".pagination a.next, .pager a.next, .page-link.next, .paging--link.is--next, \
+     .paging .next a, .pagination__next a, .pages-item-next a, .page-nav a.next, \
+     .page-item.next a, nav.pagination a.next";
+  let href = $(sel).first().attr("href") || "";
+
+  if (!href) {
+    href = $(".pagination a, .pager a, .page-link, .paging a, .pagination__link")
+      .filter((_, a) => NEXT_TEXT_RE.test($(a).text().trim()))
+      .first()
+      .attr("href") || "";
   }
+  return href;
+}
 
-  log("no next");
+/** 3) 数字页码：取“当前页+1”的 <a> */
+function byNumeric($) {
+  const activeText =
+    $(".pagination .active, .pagination li.active a, .page-item.active a, \
+      .paging--item.is--active a, .paging--item.is--active, .page-numbers .current")
+      .first()
+      .text()
+      .trim();
+
+  const cur = parseInt(activeText, 10);
+  if (!cur) return "";
+
+  const a = $(".pagination a, .pager a, .page-link, .paging a, .pagination__link, .page-numbers a")
+    .filter((_, el) => parseInt($(el).text().trim(), 10) === cur + 1)
+    .first();
+
+  return a.attr("href") || "";
+}
+
+/** 4) URL 参数兜底：?p=2 / ?page=2 / ?sPage=2 / ?seite=2 */
+function bumpPageParam(currentUrl, $) {
+  const url = new URL(currentUrl, currentUrl);
+  const keys = ["p", "page", "sPage", "Seite", "seite"]; // Shopware / 通用
+  for (const k of keys) {
+    const v = url.searchParams.get(k);
+    if (v) {
+      url.searchParams.set(k, String(parseInt(v, 10) + 1));
+      return url.toString();
+    }
+  }
+  // 如果有分页容器但没有任何参数，试探性设为 p=2（Shopware 常见）
+  const hasPager = $(".pagination, .pager, .paging, .paging--container, .page-numbers").length > 0;
+  if (hasPager && !url.searchParams.has("p")) {
+    url.searchParams.set("p", "2");
+    return url.toString();
+  }
   return "";
 }
 
-/**
- * 统一的“翻页抓取框架”
- * @param {*} startHtml  首页 HTML
- * @param {*} startUrl   首页 URL
- * @param {*} maxPages   保护上限（默认 15）
- * @param {*} limit      需要的最大条数
- * @param {*} parseFn    ( $, pageUrl ) => items[]
- * @param {*} fetchFn    ( url ) => Promise<html>
- */
-export async function crawlPages(startHtml, startUrl, maxPages = 15, limit = 200, parseFn, fetchFn, opts = {}) {
-  const out = [];
-  const visited = new Set([startUrl]);
+/** 导出：查找下一页的绝对地址；visited 用于去重（Set） */
+export function findNextPage($, currentUrl, visited = undefined) {
+  let href = byRel($) || byCommonSelectors($);
+  if (!href) href = byNumeric($);
+  if (!href) href = bumpPageParam(currentUrl, $);
+  if (!href) return "";
 
-  let $ = cheerio.load(startHtml, { decodeEntities: false });
-  let pageUrl = startUrl;
-
-  for (let i = 0; i < maxPages && out.length < limit; i++) {
-    // 抽取数据（不更改 parseFn 的签名）
-    const part = parseFn($, pageUrl) || [];
-    for (const it of part) {
-      if (out.length >= limit) break;
-      out.push(it);
-    }
-    if (out.length >= limit) break;
-
-    const next = findNextPageUrl($, pageUrl, opts);
-    if (!next || visited.has(next)) break;
-
-    visited.add(next);
-    const html = await fetchFn(next);
-    $ = cheerio.load(html, { decodeEntities: false });
-    pageUrl = next;
-  }
-
-  return out;
+  const nextAbs = abs(currentUrl, href);
+  if (visited && visited.has(nextAbs)) return "";
+  return nextAbs;
 }
