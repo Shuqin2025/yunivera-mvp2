@@ -1,7 +1,7 @@
 // backend/adapters/universal.js
 import * as cheerio from "cheerio";
-import * as http from "../lib/http.js";          // fetchHtml（带编码适配）
-import * as images from "../lib/images.js";      // 统一取图
+import * as http from "../lib/http.js";          // fetchHtml（带编码/重试/UA）
+import * as images from "../lib/images.js";      // 统一取图（支持 data-* / srcset 等）
 import { crawlPages } from "../lib/pagination.js";
 
 const UA =
@@ -17,6 +17,8 @@ function firstSrcFromSet(ss) {
   const cand = ss.split(",").map(s => s.trim().split(/\s+/)[0]).find(s => /^https?:/i.test(s));
   return cand || "";
 }
+
+// —— 最小兜底：从任意 card 里取一张靠谱图
 function fallbackPickImg($root, base) {
   const $img = $root.find("img").first();
   const src =
@@ -28,14 +30,14 @@ function fallbackPickImg($root, base) {
     $img.attr("src") || "";
   return abs(base, (src || "").split("?")[0]);
 }
+
 function pickImg($root, base) {
-  // 优先走 images 模块
   if (images && typeof images.pickImage === "function") {
     return images.pickImage($root, base) || "";
   }
-  // 兜底
   return fallbackPickImg($root, base);
 }
+
 function guessSkuFromTitle(title) {
   if (!title) return "";
   const m =
@@ -43,6 +45,7 @@ function guessSkuFromTitle(title) {
     title.match(/\b[A-Z0-9][A-Z0-9-]{3,}\b/);
   return m ? m[0] : "";
 }
+
 function findPrice($card) {
   let s = text(
     $card.find(".price,.product-price,.amount,.money,.m-price,.price__value,.price-value").first()
@@ -163,44 +166,43 @@ function parseAnchors($, base, limit) {
   return items;
 }
 
-/* ---------- 导出：通用适配器（支持自动翻页） ---------- */
+/* ---------- 导出：通用适配器（自动翻页） ---------- */
 export default async function parseUniversal({ url, limit = 60, debug = false } = {}) {
   if (!url) return [];
+
+  // 统一的抓取函数（带 UA / 编码识别 / 重试）
   const fetchHtml =
     (http && typeof http.fetchHtml === "function")
       ? (u) => http.fetchHtml(u, { headers: { "User-Agent": UA } })
-      : async (u) => {
-          // 极端兜底（不依赖 http 模块），一般用不到
-          const res = await (await fetch(u, { headers: { "User-Agent": UA } })).text();
-          return res;
-        };
+      : async (u) => (await fetch(u, { headers: { "User-Agent": UA } })).text();
 
-  try {
-    const pages = await crawlPages(url, fetchHtml, 50); // 最多 50 页
-    const out = [];
-    for (const pageUrl of pages) {
-      if (out.length >= limit) break;
-      const html = await fetchHtml(pageUrl);
-      const $ = cheerio.load(html, { decodeEntities: false });
+  // 首页 HTML
+  const startHtml = await fetchHtml(url);
 
-      let part = parseCards($, pageUrl, limit - out.length);
-      if (part.length < Math.min(3, limit - out.length)) {
-        part = part.concat(parseWoo($, pageUrl, (limit - out.length) - part.length));
-      }
-      if (part.length < (limit - out.length)) {
-        part = part.concat(parseAnchors($, pageUrl, (limit - out.length) - part.length));
-      }
-
-      for (const it of part) {
-        out.push(it);
-        if (out.length >= limit) break;
-      }
-
-      if (debug) console.log(`[universal] page=${pageUrl} items+=${part.length} total=${out.length}`);
+  // 单页解析函数（供 crawlPages 调用，不改签名）
+  const parseOne = ($, pageUrl) => {
+    const need = limit; // 交给 crawlPages 控制整体数量
+    let part = parseCards($, pageUrl, need);
+    if (part.length < Math.min(3, need)) {
+      part = part.concat(parseWoo($, pageUrl, need - part.length));
     }
-    return out.slice(0, limit);
-  } catch (e) {
-    if (debug) console.error("[universal] fail:", e?.message || e);
-    return [];
-  }
+    if (part.length < need) {
+      part = part.concat(parseAnchors($, pageUrl, need - part.length));
+    }
+    if (debug) console.log(`[universal] parsed=${part.length} url=${pageUrl}`);
+    return part;
+  };
+
+  // 让自动翻页框架驱动：最多翻 40 页，整体条数上限 limit
+  const items = await crawlPages(
+    startHtml,
+    url,
+    40,             // maxPages 保护
+    limit,          // 总条数保护
+    parseOne,
+    fetchHtml,
+    { samePathOnly: true, debug }
+  );
+
+  return items.slice(0, limit);
 }
