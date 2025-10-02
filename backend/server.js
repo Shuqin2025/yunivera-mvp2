@@ -596,65 +596,93 @@ async function parseUniversalCatalog(listUrl, limit = 50) {
       return out;
     }
 
-    // ✅ s-impuls-shop.de（自动翻页）
-    if (host.includes("s-impuls-shop.de")) {
-      const maxPages = 50; // 安全上限
-      const visited = new Set();
-      const out = [];
+// ✅ s-impuls-shop.de（自动翻页，收集全部页码链接）
+if (host.includes("s-impuls-shop.de")) {
+  const maxPages = 50;              // 安全上限
+  const out = [];
+  const visited = new Set();
 
-      const findNext = ($, currentUrl) => {
-        // 常见“下一页”选择器 & 文本
-        let href =
-          $('a[rel="next"]').attr("href") ||
-          $(".pagination a.next, .pagination .next a").first().attr("href") ||
-          $('.pagination a').filter((_, a) => /›|Next|Weiter|Nächste|»|>>/i.test($(a).text().trim())).first().attr("href") ||
-          "";
-
-        // 数字页：current + 1
-        if (!href) {
-          const cur =
-            parseInt(
-              $(".pagination .active, .pagination .current, .pagination li.active a, .pagination li.active, .pager .active")
-                .first()
-                .text()
-                .trim(),
-              10
-            ) || 0;
-          if (cur) {
-            const $a = $(".pagination a").filter((_i, a) => parseInt($(a).text().trim(), 10) === cur + 1).first();
-            href = $a.attr("href") || href;
-          }
-        }
-
-        href = href ? abs(currentUrl, href) : "";
-        if (href && visited.has(href)) return "";
-        return href;
-      };
-
-      let pageUrl = listUrl;
-      for (let p = 1; p <= maxPages && out.length < limit && pageUrl; p++) {
-        if (visited.has(pageUrl)) break;
-        visited.add(pageUrl);
-
-        // 解析本页
-        const html = await fetchHtml(pageUrl);
-        const $ = cheerio.load(html, { decodeEntities: false });
-        // 复用现有单页解析器（保持你的代码结构），哪怕多一次请求，也不改动原函数签名
-        const part = await parseSImpulsCatalog(pageUrl, limit - out.length);
-        for (const it of part || []) {
-          out.push(it);
-          if (out.length >= limit) break;
-        }
-        if (out.length >= limit) break;
-
-        // 发现下一页
-        const nextUrl = findNext($, pageUrl);
-        if (!nextUrl) break;
-        pageUrl = nextUrl;
-      }
-
-      return out;
+  // 单页抓取（保持你原有的解析函数）
+  const harvest = async (pageUrl) => {
+    const html = await fetchHtml(pageUrl);
+    const $ = cheerio.load(html, { decodeEntities: false });
+    const part = await parseSImpulsCatalog(pageUrl, limit - out.length);
+    for (const it of part || []) {
+      out.push(it);
+      if (out.length >= limit) break;
     }
+    return $;
+  };
+
+  // 1) 先抓第 1 页
+  let $ = await harvest(listUrl);
+  if (out.length >= limit) return out;
+
+  // 2) 在分页区域里收集“所有页码链接”，支持 ?page= / ?p= / /page/2 三种
+  const pageSet = new Map(); // pageNo -> url
+  const addPage = (href) => {
+    if (!href) return;
+    const full = abs(listUrl, href);
+    try {
+      const u = new URL(full);
+      // 常见 query 参数：page / p / seite
+      let n =
+        parseInt(
+          u.searchParams.get("page") ||
+            u.searchParams.get("p") ||
+            u.searchParams.get("seite") ||
+            "",
+          10
+        ) || 0;
+      // 路由式 /page/2
+      if (!n) {
+        const m = u.pathname.match(/\/page\/(\d+)/i);
+        if (m) n = parseInt(m[1], 10) || 0;
+      }
+      if (n && n > 1 && !pageSet.has(n)) pageSet.set(n, u.href);
+    } catch {}
+  };
+
+  // 常见的分页容器/链接
+  $(
+    ".pagination a[href], nav.pagination a[href], .pager a[href], .page-pagination a[href], .page-numbers a[href]"
+  ).each((_i, a) => addPage($(a).attr("href")));
+
+  // 万一没拿到明确数字页，再兜底“下一页”
+  if (pageSet.size === 0) {
+    const cand =
+      $('a[rel="next"]').attr("href") ||
+      $(".pagination .next a").attr("href") ||
+      $('a[aria-label*="Weiter"], a[aria-label*="Next"], a[aria-label*="Nächste"]')
+        .first()
+        .attr("href") ||
+      "";
+    if (cand) {
+      try {
+        const u = new URL(abs(listUrl, cand));
+        const n =
+          parseInt(u.searchParams.get("page") || u.searchParams.get("p") || "", 10) ||
+          2;
+        if (!pageSet.has(n)) pageSet.set(n, u.href);
+      } catch {}
+    }
+  }
+
+  // 3) 按页号升序抓取后续页（直到 limit / maxPages）
+  const pages = [...pageSet.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([, href]) => href)
+    .slice(0, maxPages - 1);
+
+  for (const pageUrl of pages) {
+    if (out.length >= limit) break;
+    if (visited.has(pageUrl)) continue;
+    visited.add(pageUrl);
+    $ = await harvest(pageUrl);
+  }
+
+  return out;
+}
 
     if (host.includes("auto-schmuck.com")) {
       return await parseAutoSchmuck(listUrl, limit);
