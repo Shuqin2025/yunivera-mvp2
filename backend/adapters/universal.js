@@ -1,74 +1,54 @@
 // backend/adapters/universal.js
-import axios from "axios";
 import * as cheerio from "cheerio";
+import * as http from "../lib/http.js";          // fetchHtml（带编码适配）
+import * as images from "../lib/images.js";      // 统一取图
+import { crawlPages } from "../lib/pagination.js";
 
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 
-async function fetchHtml(url) {
-  const { data } = await axios.get(url, {
-    headers: {
-      "User-Agent": UA,
-      Accept:
-        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-      "Accept-Language": "de,en;q=0.8,zh;q=0.6",
-      Referer: url,
-    },
-    timeout: 20000,
-    maxRedirects: 5,
-    validateStatus: (s) => s >= 200 && s < 400,
-  });
-  return typeof data === "string" ? data : "";
-}
-
 function abs(base, href) {
   if (!href) return "";
-  try {
-    return new URL(href, base).href;
-  } catch {
-    return "";
-  }
+  try { return new URL(href, base).href; } catch { return ""; }
 }
-function text($el) {
-  return ($el.text() || "").replace(/\s+/g, " ").trim();
-}
-function firstSrcFromSet(srcset) {
-  if (!srcset) return "";
-  const cand = srcset
-    .split(",")
-    .map((s) => s.trim().split(/\s+/)[0])
-    .find((s) => /^https?:/i.test(s));
+function text($el) { return ($el.text() || "").replace(/\s+/g, " ").trim(); }
+function firstSrcFromSet(ss) {
+  if (!ss) return "";
+  const cand = ss.split(",").map(s => s.trim().split(/\s+/)[0]).find(s => /^https?:/i.test(s));
   return cand || "";
 }
-function pickImg($card, base) {
-  const $img = $card.find("img").first();
+function fallbackPickImg($root, base) {
+  const $img = $root.find("img").first();
   const src =
     $img.attr("data-src") ||
     $img.attr("data-original") ||
     $img.attr("data-lazy") ||
     $img.attr("data-zoom-image") ||
     firstSrcFromSet($img.attr("srcset")) ||
-    $img.attr("src") ||
-    "";
+    $img.attr("src") || "";
   return abs(base, (src || "").split("?")[0]);
+}
+function pickImg($root, base) {
+  // 优先走 images 模块
+  if (images && typeof images.pickImage === "function") {
+    return images.pickImage($root, base) || "";
+  }
+  // 兜底
+  return fallbackPickImg($root, base);
 }
 function guessSkuFromTitle(title) {
   if (!title) return "";
   const m =
     title.match(/\b[0-9]{4,}\b/) ||
-    title.match(/\b[A-Z0-9][A-Z0-9-]{3,}\b/); // 大写+数字的型号
+    title.match(/\b[A-Z0-9][A-Z0-9-]{3,}\b/);
   return m ? m[0] : "";
 }
 function findPrice($card) {
   let s = text(
-    $card.find(
-      ".price,.product-price,.amount,.money,.m-price,.price__value,.price-value"
-    ).first()
+    $card.find(".price,.product-price,.amount,.money,.m-price,.price__value,.price-value").first()
   );
   if (!s) {
-    const m = ($card.text() || "").match(
-      /\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2})\s*(?:€|EUR)/i
-    );
+    const m = ($card.text() || "").match(/\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2})\s*(?:€|EUR)/i);
     if (m) s = m[0].replace(/\s+/g, " ");
   }
   return s || null;
@@ -95,19 +75,14 @@ function parseCards($, base, limit) {
   $(CARD_SEL).each((_i, el) => {
     if (items.length >= limit) return false;
     const $card = $(el);
-
-    // 详情链接（排除购物车/筛选类链接）
-    const $a = $card
-      .find("a[href]")
-      .filter((_, a) => !BAD.test(String($(a).attr("href"))))
-      .first();
+    const $a = $card.find("a[href]").filter((_, a) => !BAD.test(String($(a).attr("href")))).first();
     if (!$a.length) return;
 
     const href = abs(base, $a.attr("href") || "");
     if (!href || seen.has(href)) return;
 
     const img = pickImg($card, base);
-    if (!img) return; // 要有图
+    if (!img) return;
 
     const title =
       ($a.attr("title") || "").trim() ||
@@ -116,18 +91,9 @@ function parseCards($, base, limit) {
     if (!title) return;
 
     const price = findPrice($card);
-    items.push({
-      sku: guessSkuFromTitle(title),
-      title,
-      url: href,
-      img,
-      price,
-      currency: "",
-      moq: "",
-    });
+    items.push({ sku: guessSkuFromTitle(title), title, url: href, img, price, currency: "", moq: "" });
     seen.add(href);
   });
-
   return items;
 }
 
@@ -149,20 +115,10 @@ function parseWoo($, base, limit) {
     if (!href || !title) return;
 
     const img = pickImg($li, base);
-    const price =
-      text($li.find(".price .amount,.price").first()) || null;
+    const price = text($li.find(".price .amount,.price").first()) || null;
 
-    items.push({
-      sku: guessSkuFromTitle(title),
-      title,
-      url: href,
-      img,
-      price,
-      currency: "",
-      moq: "",
-    });
+    items.push({ sku: guessSkuFromTitle(title), title, url: href, img, price, currency: "", moq: "" });
   });
-
   return items;
 }
 
@@ -178,7 +134,6 @@ function parseAnchors($, base, limit) {
     const href = abs(base, $a.attr("href") || "");
     if (!href || seen.has(href) || BAD.test(href)) return;
 
-    // URL 上看起来像详情页
     let isDetail = false;
     try {
       const u = new URL(href, base);
@@ -201,38 +156,47 @@ function parseAnchors($, base, limit) {
     if (!title) return;
 
     const price = findPrice($card);
-    items.push({
-      sku: guessSkuFromTitle(title),
-      title,
-      url: href,
-      img,
-      price,
-      currency: "",
-      moq: "",
-    });
+    items.push({ sku: guessSkuFromTitle(title), title, url: href, img, price, currency: "", moq: "" });
     seen.add(href);
   });
 
   return items;
 }
 
-/* ---------- 导出：通用适配器 ---------- */
-export default async function parseUniversal({
-  url,
-  limit = 50,
-  debug = false,
-} = {}) {
+/* ---------- 导出：通用适配器（支持自动翻页） ---------- */
+export default async function parseUniversal({ url, limit = 60, debug = false } = {}) {
   if (!url) return [];
-  try {
-    const html = await fetchHtml(url);
-    const $ = cheerio.load(html, { decodeEntities: false });
+  const fetchHtml =
+    (http && typeof http.fetchHtml === "function")
+      ? (u) => http.fetchHtml(u, { headers: { "User-Agent": UA } })
+      : async (u) => {
+          // 极端兜底（不依赖 http 模块），一般用不到
+          const res = await (await fetch(u, { headers: { "User-Agent": UA } })).text();
+          return res;
+        };
 
-    let out = parseCards($, url, limit);
-    if (out.length < Math.min(3, limit)) {
-      out = out.concat(parseWoo($, url, limit - out.length));
-    }
-    if (out.length < limit) {
-      out = out.concat(parseAnchors($, url, limit - out.length));
+  try {
+    const pages = await crawlPages(url, fetchHtml, 50); // 最多 50 页
+    const out = [];
+    for (const pageUrl of pages) {
+      if (out.length >= limit) break;
+      const html = await fetchHtml(pageUrl);
+      const $ = cheerio.load(html, { decodeEntities: false });
+
+      let part = parseCards($, pageUrl, limit - out.length);
+      if (part.length < Math.min(3, limit - out.length)) {
+        part = part.concat(parseWoo($, pageUrl, (limit - out.length) - part.length));
+      }
+      if (part.length < (limit - out.length)) {
+        part = part.concat(parseAnchors($, pageUrl, (limit - out.length) - part.length));
+      }
+
+      for (const it of part) {
+        out.push(it);
+        if (out.length >= limit) break;
+      }
+
+      if (debug) console.log(`[universal] page=${pageUrl} items+=${part.length} total=${out.length}`);
     }
     return out.slice(0, limit);
   } catch (e) {
