@@ -596,13 +596,16 @@ async function parseUniversalCatalog(listUrl, limit = 50) {
       return out;
     }
 
-// ✅ s-impuls-shop.de（自动翻页，收集全部页码链接）
+// ✅ s-impuls-shop.de（自动翻页，健壮版 v2：清洗无值 page 参数 + 收集页码 + 猜测式翻页）
 if (host.includes("s-impuls-shop.de")) {
   const maxPages = 50;              // 安全上限
   const out = [];
   const visited = new Set();
 
-  // 单页抓取（保持你原有的解析函数）
+  // 0) 清洗：去掉尾部无值的 ?page / &page / ?p / &p，避免出现 xxx/catalog/home-cinema&page 这种无效地址
+  listUrl = listUrl.replace(/[?&](page|p)(=[^&]*)?$/i, "");
+
+  // 单页抓取（保持你现有的解析函数）
   const harvest = async (pageUrl) => {
     const html = await fetchHtml(pageUrl);
     const $ = cheerio.load(html, { decodeEntities: false });
@@ -648,27 +651,53 @@ if (host.includes("s-impuls-shop.de")) {
     ".pagination a[href], nav.pagination a[href], .pager a[href], .page-pagination a[href], .page-numbers a[href]"
   ).each((_i, a) => addPage($(a).attr("href")));
 
-  // 万一没拿到明确数字页，再兜底“下一页”
+  // 3) 如果没收集到明确页码，用“猜测式翻页”试探：?page=N / ?p=N / /page/N
+  const makeCandidates = (base, n) => {
+    const u = new URL(base);
+    const sep = u.search ? "&" : "?";
+    return [
+      `${u.origin}${u.pathname}${u.search}${sep}page=${n}${u.hash}`,
+      `${u.origin}${u.pathname}${u.search}${sep}p=${n}${u.hash}`,
+      `${u.origin}${u.pathname.replace(/\/$/, "")}/page/${n}${u.search}${u.hash}`,
+    ];
+  };
+  const firstKey = (items) => (items?.[0]?.link || items?.[0]?.url || items?.[0]?.href || "").trim();
+
   if (pageSet.size === 0) {
-    const cand =
-      $('a[rel="next"]').attr("href") ||
-      $(".pagination .next a").attr("href") ||
-      $('a[aria-label*="Weiter"], a[aria-label*="Next"], a[aria-label*="Nächste"]')
-        .first()
-        .attr("href") ||
-      "";
-    if (cand) {
-      try {
-        const u = new URL(abs(listUrl, cand));
-        const n =
-          parseInt(u.searchParams.get("page") || u.searchParams.get("p") || "", 10) ||
-          2;
-        if (!pageSet.has(n)) pageSet.set(n, u.href);
-      } catch {}
+    let n = 2;
+    let lastFirst = firstKey(out);
+    while (n <= maxPages && out.length < limit) {
+      let advanced = false;
+      for (const tryUrl of makeCandidates(listUrl, n)) {
+        if (visited.has(tryUrl)) continue;
+        let html = "";
+        try { html = await fetchHtml(tryUrl); } catch {}
+        if (!html) continue;
+
+        const $$ = cheerio.load(html, { decodeEntities: false });
+        const part = await parseSImpulsCatalog(tryUrl, limit - out.length);
+        if (part && part.length) {
+          const fk = firstKey(part);
+          // 与上一页首条不同，认为翻页成功（避免同页重复）
+          if (!fk || fk !== lastFirst) {
+            for (const it of part) {
+              out.push(it);
+              if (out.length >= limit) break;
+            }
+            visited.add(tryUrl);
+            lastFirst = fk || lastFirst;
+            advanced = true;
+            break;
+          }
+        }
+      }
+      if (!advanced) break; // 三种格式都失败，停止
+      n += 1;
     }
+    return out;
   }
 
-  // 3) 按页号升序抓取后续页（直到 limit / maxPages）
+  // 4) 正常路径：有明确页码链接，按页号升序抓
   const pages = [...pageSet.entries()]
     .sort((a, b) => a[0] - b[0])
     .map(([, href]) => href)
@@ -677,7 +706,6 @@ if (host.includes("s-impuls-shop.de")) {
   for (const pageUrl of pages) {
     if (out.length >= limit) break;
     if (visited.has(pageUrl)) continue;
-    visited.add(pageUrl);
     $ = await harvest(pageUrl);
   }
 
