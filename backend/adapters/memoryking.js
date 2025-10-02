@@ -52,6 +52,7 @@ export default function parseMemoryking(input, limitDefault = 50, debugDefault =
     let s = 0;
     const sz = pickSquareSize(u);
     if (sz) s += Math.min(sz, 1200);
+    if (sz >= 600) s += 10;
     if (/600x600|700x700|800x800/i.test(u)) s += 120;
     if (/@2x\b/i.test(u)) s += 150;
     if (/(\?|&)format=webp\b/i.test(u)) s += 5;
@@ -176,13 +177,13 @@ export default function parseMemoryking(input, limitDefault = 50, debugDefault =
     return { sku, title, url: href, img, price, currency: '', moq: '' };
   };
 
-  // ====== 关键：判定是否“详情页” ======
+  // ====== 判定是否详情页 ======
   let isDetail =
     /\/details\//i.test(pageUrl || '') ||
     $('.product--detail, .product--details').length > 0 ||
     (String($('meta[property="og:type"]').attr('content') || '').toLowerCase() === 'product');
 
-  // 再从 ld+json 里探测 Product
+  // ld+json 中的 Product
   if (!isDetail) {
     $('script[type="application/ld+json"]').each((_i, el) => {
       try {
@@ -206,7 +207,7 @@ export default function parseMemoryking(input, limitDefault = 50, debugDefault =
     });
   }
 
-  // ---------- ① 列表（仅“非详情页”时；并排除推荐区容器） ----------
+  // ---------- ① 列表 ----------
   if (!isDetail) {
     const listSelectors = [
       '.listing--container .product--box',
@@ -215,7 +216,7 @@ export default function parseMemoryking(input, limitDefault = 50, debugDefault =
       '.product--listing .product--box',
     ];
 
-    // 详情页推荐区/滑动区等黑名单容器
+    // 推荐区黑名单
     const BLACKLIST = [
       '.product--detail',
       '.product--details',
@@ -241,7 +242,7 @@ export default function parseMemoryking(input, limitDefault = 50, debugDefault =
     }
   }
 
-  // ---------- ② 详情兜底（列表无结果 或 明确为详情页） ----------
+  // ---------- ② 详情兜底 ----------
   if (items.length === 0 || isDetail) {
     const $detail = $('.product--details, .product--detail, #content, body');
 
