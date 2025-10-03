@@ -1,5 +1,5 @@
 /**
- * Memoryking 适配器（鲁棒版 v3.1 / ESM / 详情页深抓：型号&货号）
+ * Memoryking 适配器（鲁棒版 v3.2 / ESM / 详情页深抓：型号&货号）
  *  - 目录页抓基础字段（title/url/img/price）
  *  - 对前 limit 条并发进入详情页，提取 Artikel-Nr / SKU / MPN / Model（多策略）
  *  - 详情价/图片兜底，自动挑更清晰图片
@@ -12,7 +12,7 @@ export default async function parseMemoryking(input, limitDefault = 50, debugDef
   // ---- 入参自适配（兼容旧式只传 $ ）----
   let $, pageUrl = "", rawHtml = "", limit = limitDefault, debug = debugDefault;
   if (input && typeof input === "object" && (input.$ || input.rawHtml || input.url || input.limit !== undefined || input.debug !== undefined)) {
-    $ = input.$ || input; // 也支持直接传 $
+    $ = input.$ || input;           // 也支持直接传 $
     rawHtml = input.rawHtml || "";
     pageUrl = input.url || "";
     if (input.limit !== undefined) limit = input.limit;
@@ -139,16 +139,20 @@ export default async function parseMemoryking(input, limitDefault = 50, debugDef
     return real[0];
   };
 
+  // —— 列表卡片读取（增强版：更鲁棒的详情链接 & 就地提取 Artikel-Nr）
   const readListBox = ($box) => {
     const title =
       $box.find(".product--title, .product--info a, a[title]").first().text().trim() ||
       $box.find("a").first().attr("title") || "";
 
-    // 详情链接（优先匹配 /details/）
+    // 详情链接：多模式匹配
+    const links = $box.find("a[href]").map((_, a) => ($(a).attr("href") || "").trim()).get().filter(Boolean);
+    const firstMatch = (patterns) => links.find(h => patterns.some(p => p.test(h)));
     let href =
-      $box.find("a").map((_, a) => $(a).attr("href") || "").get()
-        .find(h => h && /\/(details|detail)\//i.test(h)) ||
-      $box.find("a").first().attr("href") || "";
+      firstMatch([/\/details\//i, /\/detail\//i, /[?&]sArticle=\d+/i, /\/product\//i, /\/prod\//i, /\/artikel\//i]) ||
+      links.find(h => /^https?:\/\//i.test(h) && !/#/.test(h)) ||
+      links.find(h => !/#/.test(h)) ||
+      links[0] || "";
     href = abs(href);
 
     // 图片：先 img，再容器，再源码直扫
@@ -168,7 +172,12 @@ export default async function parseMemoryking(input, limitDefault = 50, debugDef
       $box.find('.price--default, .product--price, .price--content, .price--unit, [itemprop="price"]')
         .first().text().replace(/\s+/g, " ").trim() || "";
 
-    const sku = ""; // 目录页先留空，详情页再补
+    // 少数页面会直接把 “Artikel-Nr: 123” 写在列表卡片里，这里顺手捞一下
+    let sku = "";
+    const inline = ($box.text() || "").replace(/\s+/g, " ");
+    const m = inline.match(/Artikel\s*[-–—]?\s*Nr\.?\s*[:#]?\s*([A-Za-z0-9._\-\/]+)/i);
+    if (m && m[1]) sku = m[1].trim();
+
     if (img && /loader\.svg/i.test(img)) img = "";
     return { sku, title, url: href, img, price, currency: "", moq: "" };
   };
@@ -277,7 +286,7 @@ export default async function parseMemoryking(input, limitDefault = 50, debugDef
 
   // ---------- ③ 目录页并发进入详情页补齐 SKU ----------
   const needDeep = items.slice(0, Math.min(limit, items.length)).filter(r => r && r.url && !r.sku);
-  await mapWithLimit(needDeep, 4, async (row) => {
+  await mapWithLimit(needDeep, 5, async (row) => {
     try {
       const html = await fetchHtml(row.url);
       if (!html) return;
@@ -338,7 +347,7 @@ function extractSkuFromDetail($, $detail, rawHtml = "") {
     // 先抓 Artikel-Nr
     let m = txt.match(/Artikel\s*[-–—]?\s*Nr\.?\s*[:#]?\s*([A-Za-z0-9._\-\/]+)/i);
     if (m && m[1]) { skuStrong = m[1].trim(); return false; }
-    // 其它可接受标签
+    // 其它可接受标签（显式排除“Hersteller”）
     m = txt.match(/\b(?:SKU|MPN|Modell|Model|Herstellernummer)\b[^A-Za-z0-9]*([A-Za-z0-9._\-\/]+)/i);
     if (!skuStrong && m && m[1]) { skuStrong = m[1].trim(); return false; }
   });
@@ -369,7 +378,6 @@ function extractSkuFromDetail($, $detail, rawHtml = "") {
   if (skuFromJson) return skuFromJson;
 
   // 2) 结构化标签（dt/dd, th/td, li 等）
-  // 明确排除“Hersteller”（厂家），仅接受以下标签
   const LABEL_RE = /(artikel\s*[-–—]?\s*nr|sku|mpn|modell|model|herstellernummer)/i;
 
   // dl/dt/dd
