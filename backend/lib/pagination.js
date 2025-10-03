@@ -2,8 +2,7 @@
 // 通用自动翻页工具：优先找“下一页”链接；不行就数字翻页；还不行就 ?p=/page= 参数推断。
 // 所有返回的链接统一绝对化，避免相对路径循环。
 
-import cheerio from "cheerio";
-
+import * as cheerio from "cheerio";
 const TEXT_NEXT_RE = /^(next|weiter|nächste|nächster|n\u00E4chste|more|次へ|下一页|下一頁|下一步|后页|›|»|→)$/i;
 const PAGINATION_CTNS = [
   ".pagination",
