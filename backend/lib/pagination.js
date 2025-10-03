@@ -1,107 +1,157 @@
-// backend/lib/pagination.js  (ESM)
-import * as cheerio from "cheerio";
+// backend/lib/pagination.js
+// 通用自动翻页工具：优先找“下一页”链接；不行就数字翻页；还不行就 ?p=/page= 参数推断。
+// 所有返回的链接统一绝对化，避免相对路径循环。
 
-/** 将相对链接转成绝对链接（不依赖 http.js） */
-function absUrl(base, href) {
-  if (!href) return "";
-  try {
-    return new URL(href, base).href;
-  } catch {
-    return "";
-  }
+import cheerio from "cheerio";
+
+const TEXT_NEXT_RE = /^(next|weiter|nächste|nächster|n\u00E4chste|more|次へ|下一页|下一頁|下一步|后页|›|»|→)$/i;
+const PAGINATION_CTNS = [
+  ".pagination",
+  ".pager",
+  ".page",
+  ".paging",
+  ".nav-pages",
+  "nav[aria-label*=Pagination i]",
+  "ul[role=presentation]",
+];
+
+function abs(base, href) {
+  try { return new URL(href, base).href; } catch { return href || ""; }
 }
 
-/** 常见“下一页”文案（多语言） */
-const NEXT_TEXT_RE =
-  /(next|weiter|nächste|naechste|siguiente|suivant|следующ|próxima|proxima|volgende|seguinte|下一页|下一頁|下页|下一步|次へ|다음)/i;
+// 1) 直接找 rel=next / 常见“下一页”文案
+function findByRelOrText($, baseUrl) {
+  const a1 = $("a[rel='next']").attr("href");
+  if (a1) return abs(baseUrl, a1);
 
-/**
- * 在页面中寻找“下一页”的绝对地址
- * @param {cheerio.CheerioAPI} $
- * @param {string} currentUrl
- * @returns {string} next absolute url or "" if not found
- */
-export function findNextHref($, currentUrl) {
-  // 1) rel="next" / 常见 class
-  let href =
-    $('a[rel="next"]').attr("href") ||
-    $(".pagination a.next, .pager a.next, .page-link.next, .paginator__next, .pagination__next")
-      .first()
-      .attr("href") ||
-    // 2) 文案匹配（多语言）
-    $("a")
-      .filter((_, a) => NEXT_TEXT_RE.test($(a).text().trim()))
-      .first()
-      .attr("href");
+  const candidates = [];
+  PAGINATION_CTNS.forEach(sel => {
+    $(sel).find("a").each((_, a) => candidates.push(a));
+  });
+  if (!candidates.length) $("a").each((_, a) => candidates.push(a));
 
-  // 3) 数字分页兜底（当前页 + 1）
-  if (!href) {
-    const cur =
-      parseInt(
-        $(
-          ".pagination .active, .pagination li.active a, .page-item.active a, .pages .current, .pager .current, .pagination__link--current"
-        )
-          .first()
-          .text()
-          .trim(),
-        10
-      ) || 0;
-
-    if (cur > 0) {
-      const a = $(".pagination a, .pages a, .pager a").filter(
-        (_, el) => parseInt($(el).text().trim(), 10) === cur + 1
-      );
-      if (a.length) href = a.first().attr("href");
-    }
+  for (const a of candidates) {
+    const $a = $(a);
+    const txt = ($a.text() || $a.attr("aria-label") || "").trim();
+    if (TEXT_NEXT_RE.test(txt)) return abs(baseUrl, $a.attr("href"));
   }
-
-  if (!href) return "";
-  const url = absUrl(currentUrl, href);
-  if (!url || url === currentUrl) return "";
-  return url;
+  return "";
 }
 
-/**
- * 通用分页抓取
- * @param {string} startUrl
- * @param {number} limit
- * @param {( $:cheerio.CheerioAPI, url:string, push:(item:any)=>void )=>Promise<void>|void} parsePage
- * @param {(url:string)=>Promise<string>} fetchHtml
- * @param {{maxPages?:number}} [opts]
- * @returns {Promise<any[]>}
- */
-export async function crawlPages(startUrl, limit, parsePage, fetchHtml, opts = {}) {
-  const maxPages = Math.max(1, opts.maxPages ?? 50);
+// 2) 数字翻页：当前页数字 + 1
+function findByNumber($, baseUrl) {
+  // 常见当前页标记
+  const currentText =
+    $(".pagination .active, .pagination li.active, .pager .active, .page .active, .paging .active, li.is--active, li.active")
+      .first()
+      .text()
+      .trim() || $("li[aria-current='page']").first().text().trim();
+
+  const cur = parseInt(currentText, 10);
+  if (!cur || Number.isNaN(cur)) return "";
+
+  // 在同一分页容器里找“cur+1”的链接
+  const containers = $(PAGINATION_CTNS.join(", "));
+  const scope = containers.length ? containers : $;
+  let href = "";
+  scope.find("a").each((_, a) => {
+    if (href) return;
+    const t = ($(a).text() || "").trim();
+    if (parseInt(t, 10) === cur + 1) href = $(a).attr("href") || "";
+  });
+  return href ? abs(baseUrl, href) : "";
+}
+
+// 3) 参数推断：?p= / &p= / ?page=
+function findByQueryParam($, baseUrl) {
+  const paramNames = ["p", "page", "seite", "pg"];
+  const url = new URL(baseUrl);
+
+  // 先看看页面里是否存在带这些参数的链接
+  const hrefs = new Set();
+  $("a[href]").each((_, a) => {
+    const h = abs(baseUrl, $(a).attr("href"));
+    try {
+      const u = new URL(h);
+      for (const name of paramNames) {
+        if (u.searchParams.has(name)) hrefs.add(name);
+      }
+    } catch {}
+  });
+
+  // 候选（页面里见过的优先；否则通用名也试）
+  const tryNames = [...hrefs, ...paramNames];
+
+  for (const name of tryNames) {
+    // 以当前 URL 为基准
+    const u = new URL(baseUrl);
+    const cur = parseInt(u.searchParams.get(name) || "1", 10) || 1;
+    u.searchParams.set(name, String(cur + 1));
+    // 防止出现重复参数
+    const next = u.href.replace(new RegExp(`([?&])${name}=\\d+&${name}=\\d+`), `$1${name}=${cur+1}`);
+    return next;
+  }
+  return "";
+}
+
+// 4) 静态文件名推断（list_2.html、_3.html、/page/2/）
+function findByPathPattern(baseUrl) {
+  const u = new URL(baseUrl);
+  const pathname = u.pathname;
+
+  // a) ...list_1.html → list_2.html
+  const mList = pathname.match(/(.*?_)(\d+)(\.html?)$/i);
+  if (mList) {
+    const next = mList[1] + (parseInt(mList[2], 10) + 1) + mList[3];
+    u.pathname = next;
+    return u.href;
+  }
+
+  // b) .../page/1/ → /page/2/
+  const mPage = pathname.match(/(.*?\/page\/)(\d+)(\/.*)?$/i);
+  if (mPage) {
+    u.pathname = `${mPage[1]}${parseInt(mPage[2], 10) + 1}${mPage[3] || ""}`;
+    return u.href;
+  }
+
+  return "";
+}
+
+export function nextPageUrl($, baseUrl) {
+  return (
+    findByRelOrText($, baseUrl) ||
+    findByNumber($, baseUrl) ||
+    findByQueryParam($, baseUrl) ||
+    findByPathPattern(baseUrl) ||
+    ""
+  );
+}
+
+// 通用自动翻页：传入 fetchHtml 与一个“单页解析器 parsePage($)”。
+export async function autoPaginate({ startUrl, limit = 200, fetchHtml, parsePage, cheerioInstance = cheerio }) {
   const visited = new Set();
   const out = [];
-
   let url = startUrl;
-  let page = 0;
 
-  while (url && !visited.has(url) && out.length < limit && page < maxPages) {
+  while (url && !visited.has(url) && out.length < limit) {
     visited.add(url);
-    page++;
 
     const html = await fetchHtml(url);
-    const $ = cheerio.load(html, { decodeEntities: false });
+    const $ = cheerioInstance.load(html, { decodeEntities: false });
 
-    // 解析当前页
-    await Promise.resolve(
-      parsePage($, url, (item) => {
-        if (item && out.length < limit) out.push(item);
-      })
-    );
-
+    // 单页解析
+    const part = (await parsePage($, url)) || [];
+    for (const it of part) {
+      if (out.length >= limit) break;
+      out.push(it);
+    }
     if (out.length >= limit) break;
 
     // 下一页
-    const next = findNextHref($, url);
-    if (!next) break;
+    const next = nextPageUrl($, url);
+    if (!next || visited.has(next)) break;
     url = next;
   }
 
-  return out;
+  return out.slice(0, limit);
 }
-
-// 兼容：既导出具名，也导出默认
-export default crawlPages;
