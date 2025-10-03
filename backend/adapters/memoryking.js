@@ -1,8 +1,8 @@
 /**
- * Memoryking 适配器（鲁棒版 v3.3 / ESM / 详情页深抓：型号&货号）
+ * Memoryking 适配器（鲁棒版 v3.4 / 目录全量深抓纠正 SKU）
  *  - 目录页抓基础字段（title/url/img/price）
- *  - 对前 limit 条一律并发进入详情页，提取 Artikel-Nr / SKU / MPN / Model（多策略）
- *  - 详情价/图片兜底，自动挑更清晰图片
+ *  - 目录页对“全部”条目并发进入详情页，强制用 Artikel-Nr/SKU/MPN 纠正（避免抓到 Prüfziffer）
+ *  - 详情页深抓兜底：图片/价格/sku
  */
 
 import * as cheerio from "cheerio";
@@ -12,7 +12,7 @@ export default async function parseMemoryking(input, limitDefault = 50, debugDef
   // ---- 入参自适配（兼容旧式只传 $ ）----
   let $, pageUrl = "", rawHtml = "", limit = limitDefault, debug = debugDefault;
   if (input && typeof input === "object" && (input.$ || input.rawHtml || input.url || input.limit !== undefined || input.debug !== undefined)) {
-    $ = input.$ || input;           // 也支持直接传 $
+    $       = input.$ || input;           // 也支持直接传 $
     rawHtml = input.rawHtml || "";
     pageUrl = input.url || "";
     if (input.limit !== undefined) limit = input.limit;
@@ -148,11 +148,18 @@ export default async function parseMemoryking(input, limitDefault = 50, debugDef
     // 详情链接：多模式匹配
     const links = $box.find("a[href]").map((_, a) => ($(a).attr("href") || "").trim()).get().filter(Boolean);
     const firstMatch = (patterns) => links.find(h => patterns.some(p => p.test(h)));
+
     let href =
+      // 常见详情路径
       firstMatch([/\/details\//i, /\/detail\//i, /[?&]sArticle=\d+/i, /\/product\//i, /\/prod\//i, /\/artikel\//i]) ||
+      // data-* 里兜底
+      $box.attr("data-url") || $box.attr("data-link") || $box.attr("data-href") ||
+      $box.find("[data-url],[data-link],[data-href]").attr("data-url") ||
+      // 其次选一个最像详情的绝对链接
       links.find(h => /^https?:\/\//i.test(h) && !/#/.test(h)) ||
       links.find(h => !/#/.test(h)) ||
       links[0] || "";
+
     href = abs(href);
 
     // 图片：先 img，再容器，再源码直扫
@@ -179,6 +186,7 @@ export default async function parseMemoryking(input, limitDefault = 50, debugDef
     if (m && m[1]) sku = m[1].trim();
 
     if (img && /loader\.svg/i.test(img)) img = "";
+
     return { sku, title, url: href, img, price, currency: "", moq: "" };
   };
 
@@ -284,10 +292,9 @@ export default async function parseMemoryking(input, limitDefault = 50, debugDef
     }
   }
 
-  // ---------- ③ 目录页并发进入详情页“强制校正 SKU” ----------
-  // 关键改动：不再“只有缺失 sku 才去补”，而是对前 N 条一律进入详情页，
-  // 以防列表里出现 Prüfziffer 等非 Artikel-Nr 的编号。
-  const needDeep = items.slice(0, Math.min(limit, items.length)).filter(r => r && r.url);
+  // ---------- ③ 目录页并发进入详情页「强制校正 SKU」 ----------
+  // 关键调整：对目录页采集到的“全部条目”做深抓，不再用 limit 截断，避免错过校正。
+  const needDeep = items.filter(r => r && r.url);
 
   await mapWithLimit(needDeep, 5, async (row) => {
     try {
@@ -343,14 +350,15 @@ async function mapWithLimit(list, limit, worker) {
 
 // 从详情页提取 SKU / MPN / 型号（多策略，优先 Artikel-Nr）
 function extractSkuFromDetail($, $detail, rawHtml = "") {
-  // 0) Memoryking 强规则：同节点“标签: 值”（优先抓 Artikel-Nr）
+  // 0) Memoryking 强规则：同节点“标签: 值”（优先抓 Artikel-Nr，显式排除 Prüfziffer/Hersteller）
   let skuStrong = "";
   $detail.find("*").each((_i, el) => {
     const txt = ($(el).text() || "").replace(/\s+/g, " ").trim();
     // 先抓 Artikel-Nr
     let m = txt.match(/Artikel\s*[-–—]?\s*Nr\.?\s*[:#]?\s*([A-Za-z0-9._\-\/]+)/i);
     if (m && m[1]) { skuStrong = m[1].trim(); return false; }
-    // 其它可接受标签（显式排除“Hersteller”，不含“Prüfziffer”）
+    // 其它可接受标签（显式排除“Prüfziffer/Hersteller”）
+    if (/Pr[üu]fziffer|Hersteller\b/i.test(txt)) return; // 跳过
     m = txt.match(/\b(?:SKU|MPN|Modell|Model|Herstellernummer)\b[^A-Za-z0-9]*([A-Za-z0-9._\-\/]+)/i);
     if (!skuStrong && m && m[1]) { skuStrong = m[1].trim(); return false; }
   });
