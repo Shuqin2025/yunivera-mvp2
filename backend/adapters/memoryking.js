@@ -1,5 +1,5 @@
 /**
- * Memoryking 适配器（鲁棒版 v4.4）
+ * Memoryking 适配器（鲁棒版 v4.6）
  * 目标：
  *  1) 列表页不误抓 Prüfziffer（如 48680368），只要 Artikel-Nr.（SKU/MPN/Model 亦可兜底）
  *  2) 无论列表有没有抓到，始终并发进入详情页，把“Artikel-Nr.”回填覆盖到列表行
@@ -92,7 +92,6 @@ function extractSkuFromDetail($, $root, rawHtml = "") {
   let strong = "";
   $root.find("*").each((_i, el) => {
     const txt = ($(el).text() || "").replace(/\s+/g, " ").trim();
-
     if (/Pr[üu]fziffer|Hersteller\b/i.test(txt)) return; // 显式屏蔽
 
     let m = txt.match(/Artikel\s*[-–—]?\s*Nr\.?\s*[:#]?\s*([A-Za-z0-9._\-\/]+)/i);
@@ -183,16 +182,22 @@ function readListBox($, $box, origin) {
     $box.find(".product--title, .product--info a, a[title]").first().text().trim() ||
     $box.find("a").first().attr("title") || "";
 
-  // 详情链接（放宽匹配，务必拿到）
-  const links = $box.find("a[href]").map((_, a) => ($(a).attr("href") || "").trim()).get().filter(Boolean);
-  const firstMatch = (patterns) => links.find(h => patterns.some(p => p.test(h)));
+  // —— 详情链接（更激进/更放宽）
+  const allAs = $box.find("a[href]").toArray().map(a => ($(a).attr("href") || "").trim()).filter(Boolean);
+  const preferIn = sel => $box.find(sel).toArray().map(a => ($(a).attr("href") || "").trim()).filter(Boolean);
+
+  const pickBy = (arr, pats) => arr.find(h => pats.some(p => p.test(h)));
+  const pats = [/\/details\//i, /\/detail\//i, /\/produkt\//i, /\/product\//i, /[?&]sArticle=\d+/i, /[?&]number=\w+/i];
+
   let href =
-    firstMatch([/\/details\//i, /\/detail\//i, /\/produkt\//i, /\/product\//i, /[?&]sArticle=\d+/i, /[?&]number=\w+/i]) ||
+    pickBy(preferIn(".product--image a, .product--info a, .product--title a"), pats) ||
+    pickBy(allAs, pats) ||
     $box.attr("data-url") || $box.attr("data-link") || $box.attr("data-href") ||
     $box.find("[data-url],[data-link],[data-href]").attr("data-url") ||
-    links.find(h => /^https?:\/\//i.test(h) && !/#/.test(h)) ||
-    links.find(h => !/#/.test(h)) ||
-    links[0] || "";
+    allAs.find(h => /^https?:\/\//i.test(h) && !/#/.test(h)) ||
+    allAs.find(h => !/#/.test(h)) ||
+    allAs[0] || "";
+
   const url = absolutize(href, origin);
 
   // 图片
@@ -396,6 +401,6 @@ export default async function parseMemoryking(input, limitDefault = 50, debugDef
   });
 
   const out = items.slice(0, limit);
-  if (debug) console.log("[memoryking/v4.4] total=%d sample=%o", out.length, out[0]);
+  if (debug) console.log("[memoryking/v4.6] total=%d sample=%o", out.length, out[0]);
   return out;
 }
