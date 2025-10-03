@@ -1,6 +1,5 @@
 /**
- * Memoryking 适配器（鲁棒版 v3.0 / ESM / 详情页深抓 型号&货号）
- * 功能：
+ * Memoryking 适配器（鲁棒版 v3.1 / ESM / 详情页深抓：型号&货号）
  *  - 目录页抓基础字段（title/url/img/price）
  *  - 对前 limit 条并发进入详情页，提取 Artikel-Nr / SKU / MPN / Model（多策略）
  *  - 详情价/图片兜底，自动挑更清晰图片
@@ -98,7 +97,7 @@ export default async function parseMemoryking(input, limitDefault = 50, debugDef
       fromSrcset(ss).forEach(u => cand.add(u));
     });
 
-    // 2) img + 各类 lazy 属性
+    // 2) img + lazy 属性
     $root.find("img").each((_, el) => {
       const $img = $(el);
       const best = bestFromImgNode($img);
@@ -330,8 +329,21 @@ async function mapWithLimit(list, limit, worker) {
   await Promise.all(runners);
 }
 
-// 从详情页提取 SKU / MPN / 型号（多策略）
+// 从详情页提取 SKU / MPN / 型号（多策略，优先 Artikel-Nr）
 function extractSkuFromDetail($, $detail, rawHtml = "") {
+  // 0) Memoryking 强规则：同节点“标签: 值”（优先抓 Artikel-Nr）
+  let skuStrong = "";
+  $detail.find("*").each((_i, el) => {
+    const txt = ($(el).text() || "").replace(/\s+/g, " ").trim();
+    // 先抓 Artikel-Nr
+    let m = txt.match(/Artikel\s*[-–—]?\s*Nr\.?\s*[:#]?\s*([A-Za-z0-9._\-\/]+)/i);
+    if (m && m[1]) { skuStrong = m[1].trim(); return false; }
+    // 其它可接受标签
+    m = txt.match(/\b(?:SKU|MPN|Modell|Model|Herstellernummer)\b[^A-Za-z0-9]*([A-Za-z0-9._\-\/]+)/i);
+    if (!skuStrong && m && m[1]) { skuStrong = m[1].trim(); return false; }
+  });
+  if (skuStrong) return skuStrong;
+
   // 1) JSON-LD
   let skuFromJson = "";
   $('script[type="application/ld+json"]').each((_i, el) => {
@@ -344,9 +356,7 @@ function extractSkuFromDetail($, $detail, rawHtml = "") {
         if (obj.sku) return String(obj.sku);
         if (obj.mpn) return String(obj.mpn);
         if (obj.productID || obj.productId) return String(obj.productID || obj.productId);
-        if (Array.isArray(obj)) {
-          for (const it of obj) { const v = pick(it); if (v) return v; }
-        }
+        if (Array.isArray(obj)) for (const it of obj) { const v = pick(it); if (v) return v; }
         if (obj["@graph"]) return pick(obj["@graph"]);
         if (obj.offers) return pick(obj.offers);
         if (obj.brand) return pick(obj.brand);
@@ -359,6 +369,7 @@ function extractSkuFromDetail($, $detail, rawHtml = "") {
   if (skuFromJson) return skuFromJson;
 
   // 2) 结构化标签（dt/dd, th/td, li 等）
+  // 明确排除“Hersteller”（厂家），仅接受以下标签
   const LABEL_RE = /(artikel\s*[-–—]?\s*nr|sku|mpn|modell|model|herstellernummer)/i;
 
   // dl/dt/dd
@@ -386,23 +397,27 @@ function extractSkuFromDetail($, $detail, rawHtml = "") {
   });
   if (sku) return sku;
 
-  // li / div：左 label 右 value
-  $detail.find("li, .product--properties *").each((_i2, el) => {
-    const txt = $(el).text().replace(/\s+/g, " ").trim();
-    if (LABEL_RE.test(txt)) {
-      const next = $(el).next().text().replace(/\s+/g, " ").trim();
-      if (next && !sku) sku = next;
+  // li / div：先尝试“同行标签:值”，否则尝试兄弟节点
+  $detail.find("li, .product--properties *, .product--attributes *").each((_i2, el) => {
+    const txt = ($(el).text() || "").replace(/\s+/g, " ").trim();
+    // 同行“标签:值”
+    let m = txt.match(/\b(Artikel\s*[-–—]?\s*Nr\.?|SKU|MPN|Modell|Model|Herstellernummer)\b[^A-Za-z0-9]*([A-Za-z0-9._\-\/]+)/i);
+    if (m && m[2] && !sku) { sku = m[2].trim(); return false; }
+    // 兄弟节点“标签 -> 值”
+    if (!sku && LABEL_RE.test(txt)) {
+      const next = ($(el).next().text() || "").replace(/\s+/g, " ").trim();
+      if (next) { sku = next; return false; }
     }
   });
   if (sku) return sku;
 
-  // 3) 全页文本兜底：Artikel-Nr: XXX / SKU: XXX / MPN: XXX ...
+  // 3) 全页文本兜底：Artikel-Nr / SKU / MPN …
   const scopeText = ($detail.text() || "") + " " + (rawHtml || "");
   const RE_LIST = [
     /Artikel\s*[-–—]?\s*Nr\.?\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
     /\bSKU\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
     /\bMPN\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
-    /(?:\bModell|\bModel)\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
+    /\b(?:Modell|Model)\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
     /\bHerstellernummer\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
   ];
   for (const re of RE_LIST) {
