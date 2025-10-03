@@ -1,413 +1,261 @@
-/**
- * Memoryking 适配器（鲁棒版 v3.0 / ESM / 详情页深抓 型号&货号）
- * 功能：
- *  - 目录页抓基础字段（title/url/img/price）
- *  - 对前 limit 条并发进入详情页，提取 Artikel-Nr / SKU / MPN / Model（多策略）
- *  - 详情价/图片兜底，自动挑更清晰图片
- */
+// backend/adapters/memoryking.js
+// 站点：memoryking.de
+// 目标：目录页抓基础信息 + 自动进入详情页抓取 Artikel-Nr.（写入 items[].no）
+// 说明：保持“标准字段”兼容（no / title / desc / img / price / link…），避免影响既有功能。
 
 import * as cheerio from "cheerio";
-import { fetchHtml } from "../lib/http.js"; // 仅此一个导入
+import { fetchHtml } from "../lib/http.js";
 
-export default async function parseMemoryking(input, limitDefault = 50, debugDefault = false) {
-  // ---- 入参自适配（兼容旧式只传 $ ）----
-  let $, pageUrl = "", rawHtml = "", limit = limitDefault, debug = debugDefault;
-  if (input && typeof input === "object" && (input.$ || input.rawHtml || input.url || input.limit !== undefined || input.debug !== undefined)) {
-    $ = input.$ || input; // 也支持直接传 $
-    rawHtml = input.rawHtml || "";
-    pageUrl = input.url || "";
-    if (input.limit !== undefined) limit = input.limit;
-    if (input.debug !== undefined) debug = input.debug;
-  } else {
-    $ = input; // 旧式：直接传 $
+// —— 小工具 —— //
+const toAbs = (base, href) => {
+  try {
+    return new URL(href, base).toString();
+  } catch {
+    return href || base;
   }
+};
 
-  const items = [];
+const pick = (txt) => (txt || "").replace(/\s+/g, " ").trim();
 
-  // ---------- 工具 ----------
-  const origin = (() => {
-    try { return pageUrl ? new URL(pageUrl).origin : "https://www.memoryking.de"; }
-    catch { return "https://www.memoryking.de"; }
-  })();
-
-  const abs = (u) => {
-    if (!u) return "";
-    if (/^https?:\/\//i.test(u)) return u;
-    if (u.startsWith("//")) return "https:" + u;
-    return origin + (u.startsWith("/") ? u : "/" + u);
-  };
-
-  const fromSrcset = (s) =>
-    (s || "")
-      .split(",")
-      .map(x => x.trim().split(/\s+/)[0])
-      .filter(Boolean);
-
-  const squareSize = (u) => {
-    const m = u && u.match(/(\d{2,4})x\1\b/);
-    return m ? parseInt(m[1], 10) : 0;
-  };
-
-  const scoreImg = (u) => {
-    if (!u) return -1e9;
-    let s = 0;
-    const sz = squareSize(u);
-    if (sz) s += Math.min(sz, 1200);
-    if (sz >= 600) s += 10;
-    if (/600x600|700x700|800x800/i.test(u)) s += 120;
-    if (/@2x\b/i.test(u)) s += 150;
-    if (/(\?|&)format=webp\b/i.test(u)) s += 5;
-    if (/\.webp(?:$|\?)/i.test(u)) s += 5;
-    else if (/\.jpe?g(?:$|\?)/i.test(u)) s += 3;
-    else if (/\.png(?:$|\?)/i.test(u)) s += 2;
-    if (/meinecloud\.io|cloudfront|cdn/i.test(u)) s += 10;
-    return s;
-  };
-
-  const scrapeUrlsFromHtml = (html) => {
-    if (!html) return [];
-    const out = new Set();
-    const re = /https?:\/\/[^"'()\s<>]+?\.(?:jpe?g|png|webp)(?:\?[^"'()\s<>]*)?/ig;
-    let m; while ((m = re.exec(html))) out.add(m[0]);
-    return [...out];
-  };
-
-  const bestFromImgNode = ($img) => {
-    if (!$img || !$img.length) return "";
-    const cand = new Set();
-
-    // 常见 lazy 属性
-    const ds  = $img.attr("data-src");           if (ds) cand.add(ds);
-    const dss = $img.attr("data-srcset");        if (dss) fromSrcset(dss).forEach(u => cand.add(u));
-    const fb  = $img.attr("data-fallbacksrc");   if (fb) cand.add(fb);
-    const ss  = $img.attr("srcset");             if (ss) fromSrcset(ss).forEach(u => cand.add(u));
-    const s   = $img.attr("src");                if (s && !/loader\.svg/i.test(s)) cand.add(s);
-
-    const real = [...cand].map(abs).filter(u => /\.(jpe?g|png|webp)(?:$|\?)/i.test(u) && !/loader\.svg/i.test(u));
-    if (!real.length) return "";
-    real.sort((a, b) => scoreImg(b) - scoreImg(a));
-    return real[0];
-  };
-
-  const collectBestImg = ($root) => {
-    const cand = new Set();
-
-    // 1) <picture> / <source srcset="">
-    $root.find("picture source[srcset]").each((_, el) => {
-      const ss = el.attribs?.srcset || "";
-      fromSrcset(ss).forEach(u => cand.add(u));
-    });
-
-    // 2) img + lazy 属性
-    $root.find("img").each((_, el) => {
-      const $img = $(el);
-      const best = bestFromImgNode($img);
-      if (best) cand.add(best);
-
-      const extras = [
-        $img.attr("data-src"),
-        $img.attr("data-fallbacksrc"),
-        $img.attr("src")
-      ].filter(Boolean);
-      const ss1 = $img.attr("data-srcset") || $img.attr("srcset") || "";
-      if (ss1) fromSrcset(ss1).forEach(u => extras.push(u));
-      extras.forEach(u => cand.add(u));
-    });
-
-    // 3) 常见容器 data-*
-    $root.find(".image--element").each((_, el) => {
-      const $el = $(el);
-      ["data-img-large","data-original","data-img-small","data-zoom-image","data-img","data-src"]
-        .forEach(k => { const v = $el.attr(k); if (v) cand.add(v); });
-    });
-
-    // 4) 任意属性中含图片扩展名
-    $root.find("*").each((_, node) => {
-      const attrs = node.attribs || {};
-      for (const k in attrs) {
-        const v = attrs[k] || "";
-        if (/\.(jpe?g|png|webp)(?:$|\?)/i.test(v)) cand.add(v);
-      }
-    });
-
-    // 5) 作用域 HTML 直扫
-    const html = $root.html() || "";
-    scrapeUrlsFromHtml(html).forEach(u => cand.add(u));
-
-    const real = [...cand].map(abs).filter(u => u && /\.(jpe?g|png|webp)(?:$|\?)/i.test(u) && !/loader\.svg/i.test(u));
-    if (!real.length) return "";
-    real.sort((a, b) => scoreImg(b) - scoreImg(a));
-    return real[0];
-  };
-
-  const readListBox = ($box) => {
-    const title =
-      $box.find(".product--title, .product--info a, a[title]").first().text().trim() ||
-      $box.find("a").first().attr("title") || "";
-
-    // 详情链接（优先匹配 /details/）
-    let href =
-      $box.find("a").map((_, a) => $(a).attr("href") || "").get()
-        .find(h => h && /\/(details|detail)\//i.test(h)) ||
-      $box.find("a").first().attr("href") || "";
-    href = abs(href);
-
-    // 图片：先 img，再容器，再源码直扫
-    const firstImg = $box.find("img").first();
-    let img = bestFromImgNode(firstImg);
-    if (!img) img = collectBestImg($box);
-    if (!img) {
-      const boxHtml = $box.html() || "";
-      const best = scrapeUrlsFromHtml(boxHtml)
-        .map(abs)
-        .filter(u => /\.(jpe?g|png|webp)(?:$|\?)/i.test(u) && !/loader\.svg/i.test(u))
-        .sort((a, b) => scoreImg(b) - scoreImg(a))[0];
-      img = best || "";
-    }
-
-    const price =
-      $box.find('.price--default, .product--price, .price--content, .price--unit, [itemprop="price"]')
-        .first().text().replace(/\s+/g, " ").trim() || "";
-
-    const sku = ""; // 目录页先留空，详情页再补
-    if (img && /loader\.svg/i.test(img)) img = "";
-    return { sku, title, url: href, img, price, currency: "", moq: "" };
-  };
-
-  // ====== 判定是否详情页 ======
-  let isDetail =
-    /\/details\//i.test(pageUrl || "") ||
-    $(".product--detail, .product--details").length > 0 ||
-    (String($('meta[property="og:type"]').attr("content") || "").toLowerCase() === "product");
-
-  // ld+json 中 Product 判断
-  if (!isDetail) {
-    $('script[type="application/ld+json"]').each((_i, el) => {
-      try {
-        const raw = $(el).contents().text() || "";
-        if (!raw) return;
-        const data = JSON.parse(raw);
-        const check = (obj) => {
-          if (!obj) return false;
-          const t = obj["@type"];
-          if (t === "Product") return true;
-          if (Array.isArray(t) && t.includes("Product")) return true;
-          if (obj["@graph"]) return Array.isArray(obj["@graph"]) && obj["@graph"].some(check);
-          return false;
-        };
-        if (Array.isArray(data)) {
-          if (data.some(check)) isDetail = true;
-        } else if (check(data)) {
-          isDetail = true;
-        }
-      } catch {}
-    });
+const first = ($, el, sels) => {
+  for (const s of sels) {
+    const v = $(el).find(s).first();
+    if (v.length) return v;
   }
+  return $(); // empty
+};
 
-  // ---------- ① 列表 ----------
-  if (!isDetail) {
-    const listSelectors = [
-      ".listing--container .product--box",
-      ".js--isotope .product--box",
-      "#listing .product--box",
-      ".product--listing .product--box",
-    ];
+// 解析价格（容错若干常见 price 容器）
+const readPrice = ($root) => {
+  const t = pick(
+    $root
+      .find(
+        [
+          ".price--default",
+          ".price--content",
+          ".price--normal",
+          ".product--price",
+          ".product--price-info",
+          ".buybox--price",
+          ".price",
+        ].join(",")
+      )
+      .first()
+      .text()
+  );
+  return t || "";
+};
 
-    // 推荐/交叉销售黑名单
-    const BLACKLIST = [
-      ".product--detail", ".product--details", "#detail",
-      ".cross-selling", ".crossselling", ".related", ".related--products",
-      ".similar--products", ".upselling", ".accessories", ".accessory--slider",
-      ".product-slider--container", ".product--slider", ".is--ctl-detail"
-    ].join(", ");
-
-    let boxes = [];
-    for (const sel of listSelectors) {
-      const arr = $(sel).toArray().filter(el => $(el).closest(BLACKLIST).length === 0);
-      if (arr.length) { boxes = arr; break; }
+// 解析图片（支持懒加载）
+const readImg = ($root) => {
+  const img = first($root, null, ["img"]);
+  if (!img.length) return "";
+  const attrs = ["data-src", "data-original", "data-srcset", "srcset", "src"];
+  for (const a of attrs) {
+    const raw = img.attr(a);
+    if (raw) {
+      // 如果是 srcset，取第一张
+      const m = raw.split(",")[0].trim().split(" ")[0];
+      return m || raw;
     }
-
-    if (boxes.length) {
-      boxes.forEach((el) => {
-        const row = readListBox($(el));
-        if (row.title || row.url || row.img) items.push(row);
-      });
-    }
-  }
-
-  // ---------- ② 详情兜底 ----------
-  if (items.length === 0 || isDetail) {
-    const $detail = $(".product--details, .product--detail, #content, body");
-
-    const title =
-      $detail.find(".product--title").first().text().trim() ||
-      $("h1").first().text().trim() || "";
-
-    const url =
-      abs($('link[rel="canonical"]').attr("href") || "") ||
-      abs(($('meta[property="og:url"]').attr("content") || "").trim()) ||
-      (pageUrl || "");
-
-    // 图片：og:image → 主区域收集 → 全页直扫（rawHtml 优先）
-    let img = $('meta[property="og:image"]').attr("content") || "";
-    if (!img) img = bestFromImgNode($detail.find("img").first());
-    if (!img) img = collectBestImg($detail);
-    if (!img) {
-      const pageHtml = rawHtml || ($.root().html() || "");
-      img = (scrapeUrlsFromHtml(pageHtml)
-        .map(abs)
-        .filter(u => /\.(jpe?g|png|webp)(?:$|\?)/i.test(u) && !/loader\.svg/i.test(u))
-        .sort((a, b) => scoreImg(b) - scoreImg(a))[0]) || "";
-    }
-    img = abs(img);
-
-    const price =
-      $detail.find('.price--default, .product--price, .price--content, .price--unit, [itemprop="price"]').first()
-        .text().replace(/\s+/g, " ").trim() || "";
-
-    // —— 详情页提取 SKU（多策略）
-    const sku = extractSkuFromDetail($, $detail, rawHtml);
-
-    const row = { sku, title, url, img, price, currency: "", moq: "" };
-    if (row.img && /loader\.svg/i.test(row.img)) row.img = "";
-    if (row.title || row.url || row.img) {
-      // 详情页：只返回 1 条
-      return [row];
-    }
-  }
-
-  // ---------- ③ 目录页并发进入详情页补齐 SKU ----------
-  const needDeep = items.slice(0, Math.min(limit, items.length)).filter(r => r && r.url && !r.sku);
-  await mapWithLimit(needDeep, 4, async (row) => {
-    try {
-      const html = await fetchHtml(row.url);
-      if (!html) return;
-      const $$ = cheerio.load(html, { decodeEntities: false });
-      const $root = $$(".product--details, .product--detail, #content, body");
-
-      // SKU
-      const sku = extractSkuFromDetail($$, $root, html);
-      if (sku) row.sku = sku.trim();
-
-      // 详情价兜底
-      if (!row.price) {
-        const p = $root.find('.price--default, .product--price, .price--content, .price--unit, [itemprop="price"]')
-          .first().text().replace(/\s+/g, " ").trim();
-        if (p) row.price = p;
-      }
-
-      // 图片兜底
-      if (!row.img || /loader\.svg/i.test(row.img)) {
-        let im = $$('meta[property="og:image"]').attr("content") || "";
-        if (!im) im = bestFromImgNode($root.find("img").first());
-        if (!im) im = collectBestImg($root);
-        if (im) row.img = im;
-      }
-    } catch { /* 忽略个别失败 */ }
-  });
-
-  const out = items
-    .map(r => (r && r.img && /loader\.svg/i.test(r.img) ? { ...r, img: "" } : r))
-    .slice(0, limit);
-
-  if (debug) {
-    console.log("[memoryking] isDetail=%s out=%d; first=%o", isDetail, out.length, out[0]);
-  }
-  return out;
-}
-
-/* -------------------- 辅助方法 -------------------- */
-
-// 小并发调度器
-async function mapWithLimit(list, limit, worker) {
-  let i = 0;
-  const runners = Array(Math.min(limit, list.length)).fill(0).map(async () => {
-    while (i < list.length) {
-      const cur = list[i++]; // 递增索引
-      await worker(cur);
-    }
-  });
-  await Promise.all(runners);
-}
-
-// 从详情页提取 SKU / MPN / 型号（多策略）
-function extractSkuFromDetail($, $detail, rawHtml = "") {
-  // 1) JSON-LD
-  let skuFromJson = "";
-  $('script[type="application/ld+json"]').each((_i, el) => {
-    try {
-      const raw = $(el).contents().text() || "";
-      if (!raw) return;
-      const data = JSON.parse(raw);
-      const pick = (obj) => {
-        if (!obj || typeof obj !== "object") return "";
-        if (obj.sku) return String(obj.sku);
-        if (obj.mpn) return String(obj.mpn);
-        if (obj.productID || obj.productId) return String(obj.productID || obj.productId);
-        if (Array.isArray(obj)) {
-          for (const it of obj) { const v = pick(it); if (v) return v; }
-        }
-        if (obj["@graph"]) return pick(obj["@graph"]);
-        if (obj.offers) return pick(obj.offers);
-        if (obj.brand) return pick(obj.brand);
-        return "";
-      };
-      const v = pick(data);
-      if (v && !skuFromJson) skuFromJson = v.trim();
-    } catch {}
-  });
-  if (skuFromJson) return skuFromJson;
-
-  // 2) 结构化标签（dt/dd, th/td, li 等）
-  const LABEL_RE = /(artikel\s*[-–—]?\s*nr|sku|mpn|modell|model|herstellernummer)/i;
-
-  // dl/dt/dd
-  let sku = "";
-  $detail.find("dl").each((_, dl) => {
-    const $dl = $(dl);
-    $dl.find("dt").each((_i2, dt) => {
-      const t = $(dt).text().replace(/\s+/g, " ").trim();
-      if (LABEL_RE.test(t)) {
-        const v = ($(dt).next("dd").text() || "").replace(/\s+/g, " ").trim();
-        if (v && !sku) sku = v;
-      }
-    });
-  });
-  if (sku) return sku;
-
-  // table th/td
-  $detail.find("table").each((_, tb) => {
-    const $tb = $(tb);
-    $tb.find("tr").each((_i2, tr) => {
-      const th = $(tr).find("th,td").first().text().replace(/\s+/g, " ").trim();
-      const td = $(tr).find("td").last().text().replace(/\s+/g, " ").trim();
-      if (LABEL_RE.test(th) && td && !sku) sku = td;
-    });
-  });
-  if (sku) return sku;
-
-  // li / div：左 label 右 value
-  $detail.find("li, .product--properties *").each((_i2, el) => {
-    const txt = $(el).text().replace(/\s+/g, " ").trim();
-    if (LABEL_RE.test(txt)) {
-      const next = $(el).next().text().replace(/\s+/g, " ").trim();
-      if (next && !sku) sku = next;
-    }
-  });
-  if (sku) return sku;
-
-  // 3) 全页文本兜底：Artikel-Nr: XXX / SKU: XXX / MPN: XXX ...
-  const scopeText = ($detail.text() || "") + " " + (rawHtml || "");
-  const RE_LIST = [
-    /Artikel\s*[-–—]?\s*Nr\.?\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
-    /\bSKU\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
-    /\bMPN\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
-    /\bModell|Model\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
-    /\bHerstellernummer\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
-  ];
-  for (const re of RE_LIST) {
-    const m = scopeText.match(re);
-    if (m && m[1]) return m[1].trim();
   }
   return "";
+};
+
+// —— 详情页：提取 Artikel-Nr —— //
+// 兼容多种结构：
+// 1) <span class="entry--label">Artikel-Nr.:</span><span class="entry--content">6695</span>
+// 2) "Artikel-Nr.: 6695" 在同一个标签里
+// 3) “Art.-Nr”, “Artikel Nr”, “Artikelnummer” 等变体
+const readSkuFromDetail = ($d) => {
+  const LABEL_RE = /^(artikel(?:nummer)?|art\.?\s*[-–—]?\s*nr\.?)\s*:?\s*$/i;
+  const INLINE_RE =
+    /artikel(?:nummer)?|art\.?\s*[-–—]?\s*nr\.?/i; // 用于一行内匹配
+
+  // 1) label / value 分离的情形（常见于 Shopware）
+  // 在所有可能的 label 节点上做匹配
+  $d("span, dt, th, div, li, p").each((_, el) => {
+    const text = pick($d(el).text());
+    if (LABEL_RE.test(text)) {
+      const val =
+        pick($d(el).next().text()) ||
+        pick($d(el).parent().find(".entry--content, .content, .value").first().text());
+      if (val) return (readSkuFromDetail.sku = val);
+    }
+  });
+  if (readSkuFromDetail.sku) return readSkuFromDetail.sku;
+
+  // 2) 同一标签内的“Artikel-Nr.: 6695”
+  let sku = "";
+  $d("li, p, div, span, td").each((_, el) => {
+    const t = pick($d(el).text());
+    // 只匹配 Artikel/Art.-Nr，不要误抓 Hersteller
+    if (!INLINE_RE.test(t)) return;
+    // 取冒号/空格之后的内容
+    const m =
+      t.match(/(?:Artikel(?:nummer)?|Art\.?\s*[-–—]?\s*Nr\.?)\s*[:：]\s*([^\s].{0,60})$/i) ||
+      t.match(/(?:Artikel(?:nummer)?|Art\.?\s*[-–—]?\s*Nr\.?)\s*([\-A-Za-z0-9_./ ]{1,60})$/i);
+    if (m && m[1]) {
+      sku = pick(m[1]);
+      return false; // break
+    }
+  });
+  if (sku) return sku;
+
+  // 3) 兜底：搜索“Artikel-Nr”附近的兄弟文本
+  const near = $d(":contains('Artikel')").filter((_, el) =>
+    /artikel/i.test($d(el).text())
+  );
+  for (const node of near) {
+    const t = pick($d(node).text());
+    const m = t.match(/Artikel(?:nummer)?|Art\.?\s*[-–—]?\s*Nr\.?/i)
+      ? t.match(/[:：]\s*([^\s].{0,60})$/i)
+      : null;
+    if (m && m[1]) return pick(m[1]);
+  }
+
+  return ""; // 没找到
+};
+
+// —— 详情页：构造成单条 item（用于给单链接也能工作） —— //
+const parseDetailPage = async (url, html) => {
+  const raw = html || (await fetchHtml(url));
+  const $d = cheerio.load(raw, { decodeEntities: false });
+
+  const title =
+    pick($d("h1, .product--title, .product--header h1").first().text()) || "";
+
+  const img =
+    readImg(
+      $d(
+        ".image-slider--container, .product--image, .product--media, .image--container, .product--gallery, .image-slider--image"
+      ).first()
+    ) || readImg($d("body"));
+
+  const price = readPrice($d("body"));
+
+  const no = readSkuFromDetail($d) || "";
+
+  return {
+    no,
+    title,
+    desc: title,
+    img,
+    price,
+    link: url,
+  };
+};
+
+// —— 目录页 —— //
+const parseListPage = ($, pageUrl) => {
+  const items = [];
+
+  // Shopware 5/6 常见结构
+  const cards = $(
+    ".listing--container .product--box, .product--box, .product-box, .product--item, .product-box--row"
+  );
+
+  cards.each((_, el) => {
+    const a =
+      first($, el, [
+        "a.product--title",
+        ".product--title a",
+        ".title--link",
+        ".product--info a",
+        ".product--image a",
+        "a",
+      ]) || $(el).find("a").first();
+
+    const href = toAbs(pageUrl, a.attr("href"));
+    if (!href) return;
+
+    const title =
+      pick($(el).find(".product--title, .title, h3, .product--info a").first().text()) ||
+      pick(a.text());
+
+    const img =
+      readImg(
+        first($, el, [
+          ".product--image",
+          ".image--container",
+          ".product--media",
+          ".product--cover",
+        ])
+      ) || readImg($(el));
+
+    const price = readPrice($(el));
+
+    items.push({
+      no: "", // 先占位，随后详情页填充
+      title,
+      desc: title,
+      img,
+      price,
+      link: href,
+    });
+  });
+
+  return items;
+};
+
+// —— 主入口 —— //
+export default async function parseMemoryking(input, limitDefault = 50, debugDefault = false) {
+  // 兼容：既可传字符串 URL，也可传 { url, $, rawHtml, limit, debug }
+  let url = "", $, rawHtml = "", limit = limitDefault, debug = debugDefault;
+
+  if (typeof input === "string") {
+    url = input;
+  } else if (input && typeof input === "object") {
+    url = input.url || "";
+    $ = input.$;
+    rawHtml = input.rawHtml || "";
+    if (typeof input.limit !== "undefined") limit = input.limit;
+    if (typeof input.debug !== "undefined") debug = input.debug;
+  }
+
+  // 如果是详情页，直接解析单条
+  if (/\/details\//i.test(url)) {
+    const single = await parseDetailPage(url, rawHtml);
+    return [single];
+  }
+
+  // 目录页
+  const html = rawHtml || (await fetchHtml(url));
+  const $$ = $ || cheerio.load(html, { decodeEntities: false });
+  let items = parseListPage($$, url);
+
+  if (limit && items.length > limit) items = items.slice(0, limit);
+
+  // —— 轻量并发进入详情页，补充 Artikel-Nr 到 items[].no —— //
+  // 保守并发（3 个），避免对端过载；失败不影响其它条目
+  const CONCURRENCY = 3;
+  const jobs = [];
+  let running = 0, idx = 0;
+
+  const runNext = async () => {
+    if (idx >= items.length) return;
+    const i = idx++;
+    const it = items[i];
+    running++;
+    try {
+      const detail = await parseDetailPage(it.link);
+      if (detail.no) it.no = detail.no;
+      // 如果目录页缺价，详情页兜底补价
+      if (!it.price && detail.price) it.price = detail.price;
+      // 目录页缺图也用详情页图兜底
+      if (!it.img && detail.img) it.img = detail.img;
+    } catch (e) {
+      if (debug) console.warn("[memoryking] detail fail:", it.link, e.message);
+    } finally {
+      running--;
+      await runNext();
+    }
+  };
+
+  for (let k = 0; k < Math.min(CONCURRENCY, items.length); k++) {
+    jobs.push(runNext());
+  }
+  await Promise.all(jobs);
+
+  return items;
 }
