@@ -1,414 +1,290 @@
+// backend/adapters/memoryking.js
 /**
- * Memoryking 适配器（鲁棒版 v3.0 / ESM / 详情页深抓 型号&货号）
- * 功能：
- *  - 目录页抓基础字段（title/url/img/price）
- *  - 对前 limit 条并发进入详情页，提取 Artikel-Nr / SKU / MPN / Model（多策略）
- *  - 详情价/图片兜底，自动挑更清晰图片
+ * Memoryking 目录/详情解析（含详情页补全“货号/型号”）
+ * - 分类页：抓标题/链接/价格/图片 → 并发进入详情页 → 提取 Artikel-Nr./EAN/Hersteller 等
+ * - 详情页：直接抓当前页信息
+ *
+ * 输出字段：
+ *   - no        : 货号（= Artikel-Nr.）
+ *   - sku       : 同 no
+ *   - brand     : Hersteller
+ *   - mpn       : Herstellernummer
+ *   - ean       : EAN/GTIN
+ *   - title/desc/link/img/price 等保持不变
  */
 
 import * as cheerio from "cheerio";
-import { fetchHtml } from "../lib/http.js"; // 仅此一个导入
+import { fetchHtml, abs as absUrl } from "../lib/http.js";
 
+// 并发控制（不要太大，Render 上抓取更稳）
+const CONCURRENCY = 4;
+
+// 判断是否详情页：/details/xxx
+const isDetailUrl = (u = "") => /\/details\//i.test(String(u));
+
+// 常见价格选择器（Shopware）
+const PRICE_SELECTORS = [
+  ".price--default .price--content",
+  ".price--content",
+  ".product--price .price",
+  ".product--price",
+  ".price"
+];
+
+// 分类页 item 容器（尽量宽松，但限定在 listing）
+const LIST_ITEM_SEL = [
+  ".product--box",
+  ".listing--container .product--box",
+  ".is--ctl-listing .product--box"
+];
+
+// 分类页里跳转详情的链接
+const LINK_IN_ITEM_SEL = [
+  "a.product--title",
+  "a.product--image",
+  'a[href*="/details/"]',
+  "a"
+];
+
+// 图片属性兜底顺序
+const IMG_ATTRS = ["data-src", "data-original", "data-lazy", "src", "file"];
+
+/** 从若干候选 selector 中拿到文本 */
+function pickText($scope, selectors = []) {
+  for (const sel of selectors) {
+    const t = $scope.find(sel).first().text().trim();
+    if (t) return t;
+  }
+  return "";
+}
+
+/** 取图片 */
+function pickImg($scope) {
+  const img = $scope.find("img").first();
+  for (const a of IMG_ATTRS) {
+    const v = (img.attr(a) || "").trim();
+    if (v) return v;
+  }
+  return "";
+}
+
+/** 从一个节点下提取 “键: 值” 键值对（覆盖 th/td、dt/dd、li、p 等） */
+function scrapeKv($root) {
+  const map = new Map();
+
+  // 1) table th/td
+  $root.find("table tr").each((_, tr) => {
+    const th = cheerio.load(tr)("th").first().text().trim();
+    const td = cheerio.load(tr)("td").first().text().trim();
+    if (th && td) map.set(normKey(th), td);
+  });
+
+  // 2) dl dt/dd
+  $root.find("dl").each((_, dl) => {
+    const $dl = cheerio.load(dl);
+    const dts = $dl("dt");
+    const dds = $dl("dd");
+    dts.each((i, dt) => {
+      const k = cheerio.load(dt)("*").text().trim() || cheerio.load(dt).text().trim();
+      const v = cheerio.load(dds[i] || "")("*").text().trim() || cheerio.load(dds[i] || "").text().trim();
+      if (k && v) map.set(normKey(k), v);
+    });
+  });
+
+  // 3) li / p ：尝试按冒号拆分
+  $root.find("li, p").each((_, el) => {
+    const txt = cheerio.load(el)("*").text().trim() || cheerio.load(el).text().trim();
+    // 例如：Artikel-Nr.: 6695
+    const m = txt.match(/^([^:：]+)\s*[:：]\s*(.+)$/);
+    if (m) {
+      const k = normKey(m[1]);
+      const v = m[2].trim();
+      if (k && v) map.set(k, v);
+    }
+  });
+
+  return map;
+}
+
+function normKey(k = "") {
+  return k
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .replace(/[．。]+/g, ".")
+    .replace(/[^a-z0-9äöüß\.\-]/g, "");
+}
+
+// 统一从详情页抓取关键字段
+function extractDetailFields($) {
+  const $scope = $(".product--base-info, .product--properties, .product--details, .product--box, body");
+  const kv = scrapeKv($scope);
+
+  // key 兼容：Artikel-Nr / Artikel-Nr. / Artikelnummer / art.-nr.
+  const sku =
+    kv.get("artikel-nr") ||
+    kv.get("artikel-nr.") ||
+    kv.get("artikelnummer") ||
+    kv.get("art.-nr.") ||
+    kv.get("sku") ||
+    "";
+
+  const brand =
+    kv.get("hersteller") ||
+    kv.get("brand") ||
+    "";
+
+  const mpn =
+    kv.get("herstellernummer") ||
+    kv.get("mpn") ||
+    "";
+
+  const ean =
+    kv.get("ean") ||
+    kv.get("gtin") ||
+    "";
+
+  return { sku: (sku || "").trim(), brand: (brand || "").trim(), mpn: (mpn || "").trim(), ean: (ean || "").trim() };
+}
+
+/** 解析详情页 → 单条 item */
+function parseDetailPage($, url) {
+  const title =
+    $(".product--title").first().text().trim() ||
+    $("h1").first().text().trim();
+
+  const price = pickText($, PRICE_SELECTORS);
+  const img = pickImg($);
+
+  const { sku, brand, mpn, ean } = extractDetailFields($);
+
+  const item = {
+    title,
+    desc: title,
+    link: url,
+    img,
+    price,
+    no: sku || "",   // “货号”列
+    sku: sku || "",
+    brand: brand || "",
+    mpn: mpn || "",
+    ean: ean || ""
+  };
+  return item;
+}
+
+/** 解析分类页 → 列表 items（不含编号），随后并发补齐详情 */
+async function parseListingPage($, url, limit, debug) {
+  const items = [];
+  const host = new URL(url).origin;
+
+  // 找每个 product box
+  const boxes = $(LIST_ITEM_SEL.join(",")).toArray();
+  for (const box of boxes) {
+    if (items.length >= limit) break;
+
+    const $box = $(box);
+    // 详情链接（尽量指向 /details/）
+    let link = "";
+    for (const aSel of LINK_IN_ITEM_SEL) {
+      const a = $box.find(aSel).first();
+      const href = (a.attr("href") || "").trim();
+      if (href) {
+        link = absUrl(url, href.includes("http") ? href : href);
+        if (/\/details\//i.test(link)) break;
+      }
+    }
+    if (!link) continue; // 没链接就跳
+
+    const title =
+      $box.find(".product--title").first().text().trim() ||
+      ($box.find("img[alt]").attr("alt") || "").trim() ||
+      $box.text().trim();
+
+    // 价格 + 图片
+    const price = pickText($box, PRICE_SELECTORS);
+    const imgRel = pickImg($box);
+    const img = imgRel ? absUrl(url, imgRel) : "";
+
+    items.push({
+      title,
+      desc: title,
+      link,
+      img,
+      price
+    });
+  }
+
+  if (debug) {
+    console.log("[memoryking:list] found:", items.length);
+  }
+
+  // 并发抓详情页补齐
+  const filled = await enrichWithDetails(items, limit, debug);
+
+  return filled;
+}
+
+/** 并发补齐详情字段 */
+async function enrichWithDetails(items, limit, debug) {
+  const out = [];
+  let idx = 0;
+
+  async function worker() {
+    while (true) {
+      const i = idx++;
+      if (i >= items.length || out.length >= limit) return;
+
+      const it = items[i];
+      try {
+        const html = await fetchHtml(it.link);
+        const $d = cheerio.load(html);
+        const det = parseDetailPage($d, it.link);
+
+        out.push({
+          ...it,
+          ...det,               // 覆盖/补齐：no/sku/brand/mpn/ean
+          img: it.img || det.img
+        });
+      } catch (e) {
+        if (debug) console.warn("[memoryking:enrich:error]", it.link, e.message);
+        out.push(it); // 至少保留基础信息
+      }
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(CONCURRENCY, items.length) }, () => worker());
+  await Promise.all(workers);
+  return out.slice(0, limit);
+}
+
+/** 入口：既支持传 url/rawHtml，也兼容 { $, url, rawHtml, limit, debug } */
 export default async function parseMemoryking(input, limitDefault = 50, debugDefault = false) {
-  // ---- 入参自适配（兼容旧式只传 $ ）----
   let $, pageUrl = "", rawHtml = "", limit = limitDefault, debug = debugDefault;
+
   if (input && typeof input === "object" && (input.$ || input.rawHtml || input.url || input.limit !== undefined || input.debug !== undefined)) {
-    $ = input.$ || input; // 也支持直接传 $
+    $ = input.$ || undefined;
     rawHtml = input.rawHtml || "";
     pageUrl = input.url || "";
     if (input.limit !== undefined) limit = input.limit;
     if (input.debug !== undefined) debug = input.debug;
   } else {
-    $ = input; // 旧式：直接传 $
+    pageUrl = String(input || "");
   }
 
-  const items = [];
-
-  // ---------- 工具 ----------
-  const origin = (() => {
-    try { return pageUrl ? new URL(pageUrl).origin : "https://www.memoryking.de"; }
-    catch { return "https://www.memoryking.de"; }
-  })();
-
-  const abs = (u) => {
-    if (!u) return "";
-    if (/^https?:\/\//i.test(u)) return u;
-    if (u.startsWith("//")) return "https:" + u;
-    return origin + (u.startsWith("/") ? u : "/" + u);
-  };
-
-  const fromSrcset = (s) =>
-    (s || "")
-      .split(",")
-      .map(x => x.trim().split(/\s+/)[0])
-      .filter(Boolean);
-
-  const squareSize = (u) => {
-    const m = u && u.match(/(\d{2,4})x\1\b/);
-    return m ? parseInt(m[1], 10) : 0;
-  };
-
-  const scoreImg = (u) => {
-    if (!u) return -1e9;
-    let s = 0;
-    const sz = squareSize(u);
-    if (sz) s += Math.min(sz, 1200);
-    if (sz >= 600) s += 10;
-    if (/600x600|700x700|800x800/i.test(u)) s += 120;
-    if (/@2x\b/i.test(u)) s += 150;
-    if (/(\?|&)format=webp\b/i.test(u)) s += 5;
-    if (/\.webp(?:$|\?)/i.test(u)) s += 5;
-    else if (/\.jpe?g(?:$|\?)/i.test(u)) s += 3;
-    else if (/\.png(?:$|\?)/i.test(u)) s += 2;
-    if (/meinecloud\.io|cloudfront|cdn/i.test(u)) s += 10;
-    return s;
-  };
-
-  const scrapeUrlsFromHtml = (html) => {
-    if (!html) return [];
-    const out = new Set();
-    const re = /https?:\/\/[^"'()\s<>]+?\.(?:jpe?g|png|webp)(?:\?[^"'()\s<>]*)?/ig;
-    let m; while ((m = re.exec(html))) out.add(m[0]);
-    return [...out];
-  };
-
-  const bestFromImgNode = ($img) => {
-    if (!$img || !$img.length) return "";
-    const cand = new Set();
-
-    // 常见 lazy 属性
-    const ds  = $img.attr("data-src");           if (ds) cand.add(ds);
-    const dss = $img.attr("data-srcset");        if (dss) fromSrcset(dss).forEach(u => cand.add(u));
-    const fb  = $img.attr("data-fallbacksrc");   if (fb) cand.add(fb);
-    const ss  = $img.attr("srcset");             if (ss) fromSrcset(ss).forEach(u => cand.add(u));
-    const s   = $img.attr("src");                if (s && !/loader\.svg/i.test(s)) cand.add(s);
-
-    const real = [...cand].map(abs).filter(u => /\.(jpe?g|png|webp)(?:$|\?)/i.test(u) && !/loader\.svg/i.test(u));
-    if (!real.length) return "";
-    real.sort((a, b) => scoreImg(b) - scoreImg(a));
-    return real[0];
-  };
-
-  const collectBestImg = ($root) => {
-    const cand = new Set();
-
-    // 1) <picture> / <source srcset="">
-    $root.find("picture source[srcset]").each((_, el) => {
-      const ss = el.attribs?.srcset || "";
-      fromSrcset(ss).forEach(u => cand.add(u));
-    });
-
-    // 2) img + lazy 属性
-    $root.find("img").each((_, el) => {
-      const $img = $(el);
-      const best = bestFromImgNode($img);
-      if (best) cand.add(best);
-
-      const extras = [
-        $img.attr("data-src"),
-        $img.attr("data-fallbacksrc"),
-        $img.attr("src")
-      ].filter(Boolean);
-      const ss1 = $img.attr("data-srcset") || $img.attr("srcset") || "";
-      if (ss1) fromSrcset(ss1).forEach(u => extras.push(u));
-      extras.forEach(u => cand.add(u));
-    });
-
-    // 3) 常见容器 data-*
-    $root.find(".image--element").each((_, el) => {
-      const $el = $(el);
-      ["data-img-large","data-original","data-img-small","data-zoom-image","data-img","data-src"]
-        .forEach(k => { const v = $el.attr(k); if (v) cand.add(v); });
-    });
-
-    // 4) 任意属性中含图片扩展名
-    $root.find("*").each((_, node) => {
-      const attrs = node.attribs || {};
-      for (const k in attrs) {
-        const v = attrs[k] || "";
-        if (/\.(jpe?g|png|webp)(?:$|\?)/i.test(v)) cand.add(v);
-      }
-    });
-
-    // 5) 作用域 HTML 直扫
-    const html = $root.html() || "";
-    scrapeUrlsFromHtml(html).forEach(u => cand.add(u));
-
-    const real = [...cand].map(abs).filter(u => u && /\.(jpe?g|png|webp)(?:$|\?)/i.test(u) && !/loader\.svg/i.test(u));
-    if (!real.length) return "";
-    real.sort((a, b) => scoreImg(b) - scoreImg(a));
-    return real[0];
-  };
-
-  const readListBox = ($box) => {
-    const title =
-      $box.find(".product--title, .product--info a, a[title]").first().text().trim() ||
-      $box.find("a").first().attr("title") || "";
-
-    // 详情链接（优先匹配 /details/）
-    let href =
-      $box.find("a").map((_, a) => $(a).attr("href") || "").get()
-        .find(h => h && /\/(details|detail)\//i.test(h)) ||
-      $box.find("a").first().attr("href") || "";
-    href = abs(href);
-
-    // 图片：先 img，再容器，再源码直扫
-    const firstImg = $box.find("img").first();
-    let img = bestFromImgNode(firstImg);
-    if (!img) img = collectBestImg($box);
-    if (!img) {
-      const boxHtml = $box.html() || "";
-      const best = scrapeUrlsFromHtml(boxHtml)
-        .map(abs)
-        .filter(u => /\.(jpe?g|png|webp)(?:$|\?)/i.test(u) && !/loader\.svg/i.test(u))
-        .sort((a, b) => scoreImg(b) - scoreImg(a))[0];
-      img = best || "";
-    }
-
-    const price =
-      $box.find('.price--default, .product--price, .price--content, .price--unit, [itemprop="price"]')
-        .first().text().replace(/\s+/g, " ").trim() || "";
-
-    const sku = ""; // 目录页先留空，详情页再补
-
-    if (img && /loader\.svg/i.test(img)) img = "";
-    return { sku, title, url: href, img, price, currency: "", moq: "" };
-  };
-
-  // ====== 判定是否详情页 ======
-  let isDetail =
-    /\/details\//i.test(pageUrl || "") ||
-    $(".product--detail, .product--details").length > 0 ||
-    (String($('meta[property="og:type"]').attr("content") || "").toLowerCase() === "product");
-
-  // ld+json 中 Product 判断
-  if (!isDetail) {
-    $('script[type="application/ld+json"]').each((_i, el) => {
-      try {
-        const raw = $(el).contents().text() || "";
-        if (!raw) return;
-        const data = JSON.parse(raw);
-        const check = (obj) => {
-          if (!obj) return false;
-          const t = obj["@type"];
-          if (t === "Product") return true;
-          if (Array.isArray(t) && t.includes("Product")) return true;
-          if (obj["@graph"]) return Array.isArray(obj["@graph"]) && obj["@graph"].some(check);
-          return false;
-        };
-        if (Array.isArray(data)) {
-          if (data.some(check)) isDetail = true;
-        } else if (check(data)) {
-          isDetail = true;
-        }
-      } catch {}
-    });
+  if (!$) {
+    if (!rawHtml) rawHtml = await fetchHtml(pageUrl);
+    $ = cheerio.load(rawHtml);
   }
 
-  // ---------- ① 列表 ----------
-  if (!isDetail) {
-    const listSelectors = [
-      ".listing--container .product--box",
-      ".js--isotope .product--box",
-      "#listing .product--box",
-      ".product--listing .product--box",
-    ];
+  if (!pageUrl) pageUrl = $("base").attr("href") || "";
 
-    // 推荐/交叉销售黑名单
-    const BLACKLIST = [
-      ".product--detail", ".product--details", "#detail",
-      ".cross-selling", ".crossselling", ".related", ".related--products",
-      ".similar--products", ".upselling", ".accessories", ".accessory--slider",
-      ".product-slider--container", ".product--slider", ".is--ctl-detail"
-    ].join(", ");
-
-    let boxes = [];
-    for (const sel of listSelectors) {
-      const arr = $(sel).toArray().filter(el => $(el).closest(BLACKLIST).length === 0);
-      if (arr.length) { boxes = arr; break; }
-    }
-
-    if (boxes.length) {
-      boxes.forEach((el) => {
-        const row = readListBox($(el));
-        if (row.title || row.url || row.img) items.push(row);
-      });
-    }
+  // 详情页
+  if (isDetailUrl(pageUrl)) {
+    const item = parseDetailPage($, pageUrl);
+    return [item];
   }
 
-  // ---------- ② 详情兜底 ----------
-  if (items.length === 0 || isDetail) {
-    const $detail = $(".product--details, .product--detail, #content, body");
-
-    const title =
-      $detail.find(".product--title").first().text().trim() ||
-      $("h1").first().text().trim() || "";
-
-    const url =
-      abs($('link[rel="canonical"]').attr("href") || "") ||
-      abs(($('meta[property="og:url"]').attr("content") || "").trim()) ||
-      (pageUrl || "");
-
-    // 图片：og:image → 主区域收集 → 全页直扫（rawHtml 优先）
-    let img = $('meta[property="og:image"]').attr("content") || "";
-    if (!img) img = bestFromImgNode($detail.find("img").first());
-    if (!img) img = collectBestImg($detail);
-    if (!img) {
-      const pageHtml = rawHtml || ($.root().html() || "");
-      img = (scrapeUrlsFromHtml(pageHtml)
-        .map(abs)
-        .filter(u => /\.(jpe?g|png|webp)(?:$|\?)/i.test(u) && !/loader\.svg/i.test(u))
-        .sort((a, b) => scoreImg(b) - scoreImg(a))[0]) || "";
-    }
-    img = abs(img);
-
-    const price =
-      $detail.find('.price--default, .product--price, .price--content, .price--unit, [itemprop="price"]').first()
-        .text().replace(/\s+/g, " ").trim() || "";
-
-    // —— 详情页提取 SKU（多策略）
-    const sku = extractSkuFromDetail($, $detail, rawHtml);
-
-    const row = { sku, title, url, img, price, currency: "", moq: "" };
-    if (row.img && /loader\.svg/i.test(row.img)) row.img = "";
-    if (row.title || row.url || row.img) {
-      // 详情页：只返回 1 条
-      return [row];
-    }
-  }
-
-  // ---------- ③ 目录页并发进入详情页补齐 SKU ----------
-  const needDeep = items.slice(0, Math.min(limit, items.length)).filter(r => r && r.url && !r.sku);
-  await mapWithLimit(needDeep, 4, async (row) => {
-    try {
-      const html = await fetchHtml(row.url);
-      if (!html) return;
-      const $$ = cheerio.load(html, { decodeEntities: false });
-      const $root = $$(".product--details, .product--detail, #content, body");
-
-      // SKU
-      const sku = extractSkuFromDetail($$, $root, html);
-      if (sku) row.sku = sku.trim();
-
-      // 详情价兜底
-      if (!row.price) {
-        const p = $root.find('.price--default, .product--price, .price--content, .price--unit, [itemprop="price"]')
-          .first().text().replace(/\s+/g, " ").trim();
-        if (p) row.price = p;
-      }
-
-      // 图片兜底
-      if (!row.img || /loader\.svg/i.test(row.img)) {
-        let im = $$('meta[property="og:image"]').attr("content") || "";
-        if (!im) im = bestFromImgNode($root.find("img").first());
-        if (!im) im = collectBestImg($root);
-        if (im) row.img = im;
-      }
-    } catch { /* 忽略个别失败 */ }
-  });
-
-  const out = items
-    .map(r => (r && r.img && /loader\.svg/i.test(r.img) ? { ...r, img: "" } : r))
-    .slice(0, limit);
-
-  if (debug) {
-    console.log("[memoryking] isDetail=%s out=%d; first=%o", isDetail, out.length, out[0]);
-  }
-  return out;
-}
-
-/* -------------------- 辅助方法 -------------------- */
-
-// 小并发调度器
-async function mapWithLimit(list, limit, worker) {
-  let i = 0;
-  const runners = Array(Math.min(limit, list.length)).fill(0).map(async () => {
-    while (i < list.length) {
-      const cur = list[i++]; // 递增索引
-      await worker(cur);
-    }
-  });
-  await Promise.all(runners);
-}
-
-// 从详情页提取 SKU / MPN / 型号（多策略）
-function extractSkuFromDetail($, $detail, rawHtml = "") {
-  // 1) JSON-LD
-  let skuFromJson = "";
-  $('script[type="application/ld+json"]').each((_i, el) => {
-    try {
-      const raw = $(el).contents().text() || "";
-      if (!raw) return;
-      const data = JSON.parse(raw);
-      const pick = (obj) => {
-        if (!obj || typeof obj !== "object") return "";
-        if (obj.sku) return String(obj.sku);
-        if (obj.mpn) return String(obj.mpn);
-        if (obj.productID || obj.productId) return String(obj.productID || obj.productId);
-        if (Array.isArray(obj)) {
-          for (const it of obj) { const v = pick(it); if (v) return v; }
-        }
-        if (obj["@graph"]) return pick(obj["@graph"]);
-        if (obj.offers) return pick(obj.offers);
-        if (obj.brand) return pick(obj.brand);
-        return "";
-      };
-      const v = pick(data);
-      if (v && !skuFromJson) skuFromJson = v.trim();
-    } catch {}
-  });
-  if (skuFromJson) return skuFromJson;
-
-  // 2) 结构化标签（dt/dd, th/td, li 等）
-  const LABEL_RE = /(artikel\s*[-–—]?\s*nr|sku|mpn|modell|model|herstellernummer)/i;
-
-  // dl/dt/dd
-  let sku = "";
-  $detail.find("dl").each((_, dl) => {
-    const $dl = $(dl);
-    $dl.find("dt").each((_i2, dt) => {
-      const t = $(dt).text().replace(/\s+/g, " ").trim();
-      if (LABEL_RE.test(t)) {
-        const v = ($(dt).next("dd").text() || "").replace(/\s+/g, " ").trim();
-        if (v && !sku) sku = v;
-      }
-    });
-  });
-  if (sku) return sku;
-
-  // table th/td
-  $detail.find("table").each((_, tb) => {
-    const $tb = $(tb);
-    $tb.find("tr").each((_i2, tr) => {
-      const th = $(tr).find("th,td").first().text().replace(/\s+/g, " ").trim();
-      const td = $(tr).find("td").last().text().replace(/\s+/g, " ").trim();
-      if (LABEL_RE.test(th) && td && !sku) sku = td;
-    });
-  });
-  if (sku) return sku;
-
-  // li / div：左 label 右 value
-  $detail.find("li, .product--properties *").each((_i2, el) => {
-    const txt = $(el).text().replace(/\s+/g, " ").trim();
-    if (LABEL_RE.test(txt)) {
-      const next = $(el).next().text().replace(/\s+/g, " ").trim();
-      if (next && !sku) sku = next;
-    }
-  });
-  if (sku) return sku;
-
-  // 3) 全页文本兜底：Artikel-Nr: XXX / SKU: XXX / MPN: XXX ...
-  const scopeText = ($detail.text() || "") + " " + (rawHtml || "");
-  const RE_LIST = [
-    /Artikel\s*[-–—]?\s*Nr\.?\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
-    /\bSKU\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
-    /\bMPN\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
-    /\bModell|Model\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
-    /\bHerstellernummer\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
-  ];
-  for (const re of RE_LIST) {
-    const m = scopeText.match(re);
-    if (m && m[1]) return m[1].trim();
-  }
-  return "";
+  // 分类页
+  const list = await parseListingPage($, pageUrl, limit, debug);
+  return list;
 }
