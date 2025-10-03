@@ -1,14 +1,14 @@
 /**
- * Memoryking 适配器（鲁棒版 v2.9 / ESM）
- * 修正：
- *  - 详情页（/details/ 或有 .product--detail[s] 或 ld+json: Product）强制返回“主商品 1 条”
- *  - 列表仅匹配真正的 listing 容器；排除 related/cross-selling/accessories/slider 等推荐区
- * 其它：保留 rawHtml 源码直扫兜底、data-* 优先、loader.svg 过滤、清晰度打分
+ * Memoryking 适配器（鲁棒版 v3.0 / ESM / 详情页深抓 型号&货号）
+ * 在 v2.9 基础上新增：
+ *  - 目录页并发进入详情页，提取 Artikel-Nr / SKU / MPN / Model（多策略）
+ *  - 仅对返回的前 limit 条执行深抓，控制请求量
  */
 
 import * as cheerio from 'cheerio';
+import { fetchHtml } from '../lib/http.js'; // 用你现有的 lib/http.js，自动编码/UA/重试
 
-export default function parseMemoryking(input, limitDefault = 50, debugDefault = false) {
+export default async function parseMemoryking(input, limitDefault = 50, debugDefault = false) {
   // ---- 入参自适配 ----
   let $, pageUrl = '', rawHtml = '', limit = limitDefault, debug = debugDefault;
   if (input && typeof input === 'object' && (input.$ || input.rawHtml || input.url || input.limit !== undefined || input.debug !== undefined)) {
@@ -92,7 +92,7 @@ export default function parseMemoryking(input, limitDefault = 50, debugDefault =
 
     // 1) picture/source
     $root.find('picture source[srcset]').each((_, el) => {
-      fromSrcset($(el).attr('srcset')).forEach((u) => cand.add(u));
+      fromSrcset((cheerio.default || cheerio).load('<x/>') ? el.attribs.srcset : $(el).attr('srcset')).forEach((u) => cand.add(u));
     });
 
     // 2) img + bestFromImgNode
@@ -169,9 +169,8 @@ export default function parseMemoryking(input, limitDefault = 50, debugDefault =
       $box.find('.price--default, .product--price, .price--content, .price--unit, [itemprop="price"]')
         .first().text().replace(/\s+/g, ' ').trim() || '';
 
-    const sku =
-      $box.find('.manufacturer--name, .product--supplier').first().text().trim() ||
-      ($box.find('.product--info a').first().text().trim() || '').replace(/\s+/g, ' ');
+    // 初始 sku：先留空（不要用厂商名占位），待详情页补齐
+    const sku = '';
 
     if (img && /loader\.svg/i.test(img)) img = ''; // 阻断占位回填
     return { sku, title, url: href, img, price, currency: '', moq: '' };
@@ -272,9 +271,8 @@ export default function parseMemoryking(input, limitDefault = 50, debugDefault =
       $detail.find('.price--default, .product--price, .price--content, .price--unit, [itemprop="price"]').first()
         .text().replace(/\s+/g, ' ').trim() || '';
 
-    const sku =
-      $detail.find('.manufacturer--name').first().text().trim() ||
-      $detail.find('.product--supplier').first().text().trim() || '';
+    // —— 详情页提取 SKU（多策略）
+    const sku = extractSkuFromDetail($, $detail, rawHtml);
 
     const row = { sku, title, url, img, price, currency: '', moq: '' };
     if (row.img && /loader\.svg/i.test(row.img)) row.img = '';
@@ -283,6 +281,36 @@ export default function parseMemoryking(input, limitDefault = 50, debugDefault =
       return [row];
     }
   }
+
+  // ---------- ③ 目录页并发进入详情页补齐 SKU ----------
+  // 仅对前 limit 条进行深抓；避免对长列表造成过多请求
+  const needDeep = items.slice(0, Math.min(limit, items.length)).filter(r => r && r.url && !r.sku);
+  await mapWithLimit(needDeep, 4, async (row) => {
+    try {
+      const html = await fetchHtml(row.url);
+      if (!html) return;
+      const $$ = cheerio.load(html, { decodeEntities: false });
+      const $root = $$('.product--details, .product--detail, #content, body');
+      // SKU
+      const sku = extractSkuFromDetail($$, $root, html);
+      if (sku) row.sku = sku.trim();
+
+      // 详情价兜底（列表价缺失时）
+      if (!row.price) {
+        const p = $root.find('.price--default, .product--price, .price--content, .price--unit, [itemprop="price"]')
+          .first().text().replace(/\s+/g, ' ').trim();
+        if (p) row.price = p;
+      }
+
+      // 图片兜底（列表图缺失/是 loader.svg 时）
+      if (!row.img || /loader\.svg/i.test(row.img)) {
+        let im = $$('meta[property="og:image"]').attr('content') || '';
+        if (!im) im = bestFromImgNode($root.find('img').first());
+        if (!im) im = collectImgs($root);
+        if (im) row.img = im;
+      }
+    } catch (_) { /* 忽略个别失败 */ }
+  });
 
   // ---------- 出口 ----------
   const out = items
@@ -293,4 +321,104 @@ export default function parseMemoryking(input, limitDefault = 50, debugDefault =
     console.log('[memoryking] isDetail=%s out=%d; first=%o', isDetail, out.length, out[0]);
   }
   return out;
+}
+
+/* -------------------- 辅助方法 -------------------- */
+
+// 小并发调度器
+async function mapWithLimit(list, limit, worker) {
+  let i = 0;
+  const runners = Array(Math.min(limit, list.length)).fill(0).map(async () => {
+    while (i < list.length) {
+      const cur = list[i++]; // 递增索引
+      await worker(cur);
+    }
+  });
+  await Promise.all(runners);
+}
+
+// 详情页提取 SKU / MPN / 型号（多策略）
+function extractSkuFromDetail($, $detail, rawHtml = '') {
+  // 1) JSON-LD
+  let skuFromJson = '';
+  $('script[type="application/ld+json"]').each((_i, el) => {
+    try {
+      const raw = $(el).contents().text() || '';
+      if (!raw) return;
+      const data = JSON.parse(raw);
+      const pick = (obj) => {
+        if (!obj || typeof obj !== 'object') return '';
+        if (obj.sku) return String(obj.sku);
+        if (obj.mpn) return String(obj.mpn);
+        if (obj.productID || obj.productId) return String(obj.productID || obj.productId);
+        if (Array.isArray(obj)) {
+          for (const it of obj) { const v = pick(it); if (v) return v; }
+        }
+        if (obj['@graph']) return pick(obj['@graph']);
+        if (obj.offers) return pick(obj.offers);
+        if (obj.brand) return pick(obj.brand);
+        return '';
+      };
+      const v = pick(data);
+      if (v && !skuFromJson) skuFromJson = v.trim();
+    } catch {}
+  });
+  if (skuFromJson) return skuFromJson;
+
+  // 2) 结构化标签（dt/dd, th/td, li 等）
+  const LABEL_RE = /(artikel\s*[-–—]?\s*nr|sku|mpn|modell|model|herstellernummer)/i;
+
+  // dl/dt/dd
+  let sku = '';
+  $detail.find('dl').each((_, dl) => {
+    const $dl = $(dl);
+    $dl.find('dt').each((_i2, dt) => {
+      const t = $(dt).text().replace(/\s+/g, ' ').trim();
+      if (LABEL_RE.test(t)) {
+        const v = ($(dt).next('dd').text() || '').replace(/\s+/g, ' ').trim();
+        if (v && !sku) sku = v;
+      }
+    });
+  });
+  if (sku) return sku;
+
+  // table th/td
+  $detail.find('table').each((_, tb) => {
+    const $tb = $(tb);
+    $tb.find('tr').each((_i2, tr) => {
+      const th = $(tr).find('th,td').first().text().replace(/\s+/g, ' ').trim();
+      const td = $(tr).find('td').last().text().replace(/\s+/g, ' ').trim();
+      if (LABEL_RE.test(th) && td && !sku) sku = td;
+    });
+  });
+  if (sku) return sku;
+
+  // li / div 行为单位：左 label 右 value
+  $detail.find('li, .product--properties *').each((_i2, el) => {
+    const txt = $(el).text().replace(/\s+/g, ' ').trim();
+    if (LABEL_RE.test(txt)) {
+      const next = $(el).next().text().replace(/\s+/g, ' ').trim();
+      if (next && !sku) sku = next;
+    }
+  });
+  if (sku) return sku;
+
+  // 3) 全页文本兜底：Artikel-Nr: XXX / SKU: XXX / MPN: XXX ...
+  const scopeText =
+    ($detail.text() || '') + ' ' +
+    (rawHtml || '');
+
+  const RE_LIST = [
+    /Artikel\s*[-–—]?\s*Nr\.?\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
+    /\bSKU\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
+    /\bMPN\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
+    /\bModell|Model\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
+    /\bHerstellernummer\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
+  ];
+  for (const re of RE_LIST) {
+    const m = scopeText.match(re);
+    if (m && m[1]) return m[1].trim();
+  }
+
+  return '';
 }
