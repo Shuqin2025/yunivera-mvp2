@@ -1,5 +1,5 @@
 /**
- * Memoryking 适配器（鲁棒版 v4.6）
+ * Memoryking 适配器（鲁棒版 v4.8）
  * 目标：
  *  1) 列表页不误抓 Prüfziffer（如 48680368），只要 Artikel-Nr.（SKU/MPN/Model 亦可兜底）
  *  2) 无论列表有没有抓到，始终并发进入详情页，把“Artikel-Nr.”回填覆盖到列表行
@@ -83,7 +83,7 @@ function scrapeImgsFromHtml(html, origin) {
 
 /** 详情页：提取 SKU/MPN/Model（优先 Artikel-Nr.；显式排除 Prüfziffer/Hersteller） */
 function extractSkuFromDetail($, $root, rawHtml = "") {
-  // 0) 你截图中的强选择器（Shopware 5 常见）：
+  // 0) 你截图里的强选择器（Shopware 5 常见）
   const fromLi = $root.find("li.base-info--entry.entry--sku").first().text().trim();
   let m0 = fromLi.match(/Artikel\s*[-–—]?\s*Nr\.?\s*[:#]?\s*([A-Za-z0-9._\-\/]+)/i);
   if (m0 && m0[1] && !looksLikePruef(m0[1])) return m0[1].trim();
@@ -93,16 +93,14 @@ function extractSkuFromDetail($, $root, rawHtml = "") {
   $root.find("*").each((_i, el) => {
     const txt = ($(el).text() || "").replace(/\s+/g, " ").trim();
     if (/Pr[üu]fziffer|Hersteller\b/i.test(txt)) return; // 显式屏蔽
-
     let m = txt.match(/Artikel\s*[-–—]?\s*Nr\.?\s*[:#]?\s*([A-Za-z0-9._\-\/]+)/i);
     if (m && m[1]) { strong = m[1].trim(); return false; }
-
     m = txt.match(/\b(?:SKU|MPN|Modell|Model|Herstellernummer)\b[^A-Za-z0-9]*([A-Za-z0-9._\-\/]+)/i);
     if (!strong && m && m[1] && !looksLikePruef(m[1])) { strong = m[1].trim(); return false; }
   });
   if (strong) return strong;
 
-  // B) JSON-LD / 结构化数据
+  // B) JSON-LD / 结构化数据（有些站把 Prüfziffer 塞进 sku，这里仍然屏蔽）
   let struct = "";
   $('script[type="application/ld+json"]').each((_i, el) => {
     try {
@@ -175,7 +173,7 @@ function skuFromHrefParam(u) {
   return "";
 }
 
-/** 列表卡片读取（SKU 只做“安全来源” + 强排除 Prüfziffer；最终由详情页覆盖） */
+/** 列表卡片读取（SKU 仅从“安全来源”读取 + 严格排除 Prüfziffer；最终由详情页覆盖） */
 function readListBox($, $box, origin) {
   // 标题
   const title =
@@ -257,14 +255,14 @@ async function mapWithLimit(list, limit, worker) {
       const cur = list[i++];
       await worker(cur);
       // 轻微间隔，降低被风控概率
-      await new Promise(r => setTimeout(r, 130 + Math.floor(Math.random()*90)));
+      await new Promise(r => setTimeout(r, 160 + Math.floor(Math.random()*120)));
     }
   });
   await Promise.all(runners);
 }
 
 /** 小重试 */
-async function withRetry(fn, times = 2, delayMs = 240) {
+async function withRetry(fn, times = 2, delayMs = 320) {
   let lastErr;
   for (let i = 0; i <= times; i++) {
     try { return await fn(); }
@@ -320,7 +318,6 @@ export default async function parseMemoryking(input, limitDefault = 50, debugDef
       const arr = $(sel).toArray().filter(el => $(el).closest(BLACKLIST).length === 0);
       if (arr.length) { boxes = arr; break; }
     }
-
     boxes.forEach(el => {
       const row = readListBox($, $(el), origin);
       if (row.title || row.url || row.img) items.push(row);
@@ -363,6 +360,7 @@ export default async function parseMemoryking(input, limitDefault = 50, debugDef
     "user-agent"                : "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
     "accept"                    : "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "accept-language"           : "de-DE,de;q=0.9,en;q=0.8",
+    "accept-encoding"           : "gzip, deflate, br",
     "upgrade-insecure-requests" : "1",
     "cache-control"             : "no-cache",
     "pragma"                    : "no-cache",
@@ -370,13 +368,13 @@ export default async function parseMemoryking(input, limitDefault = 50, debugDef
   };
 
   // 目录页一定执行回填（哪怕列表已猜到 sku，也以详情页为准）
-  await mapWithLimit(items, 4, async (row) => {
+  await mapWithLimit(items, 3, async (row) => {
     if (!row || !row.url) return;
 
     // 带重试抓详情
     const html = await withRetry(
       () => fetchHtml(row.url, { headers: hdrs }),
-      2, 260
+      2, 320
     ).catch(() => "");
 
     if (!html || html.length < 300) return;
@@ -401,6 +399,6 @@ export default async function parseMemoryking(input, limitDefault = 50, debugDef
   });
 
   const out = items.slice(0, limit);
-  if (debug) console.log("[memoryking/v4.6] total=%d sample=%o", out.length, out[0]);
+  if (debug) console.log("[memoryking/v4.8] total=%d sample=%o", out.length, out[0]);
   return out;
 }
