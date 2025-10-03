@@ -3,11 +3,14 @@ import cors from "cors";
 import axios from "axios";
 import * as cheerio from "cheerio";
 
-// ✅ 新增：memoryking 适配器（仅此一行）
+// ✅ 新增：可选翻译（仅此一行）
+import * as translate from "./lib/translate.js";
+
+// ✅ 已有：memoryking 适配器
 import parseMemoryking from "./adapters/memoryking.js";
-// ✅ 新增：sinotronic 适配器（仅此一行）
+// ✅ 已有：sinotronic 适配器
 import sino from "./adapters/sinotronic.js";
-// ✅ 新增：universal 适配器（仅此一行）
+// ✅ 已有：universal 适配器
 import parseUniversal from "./adapters/universal.js";
 
 const app = express();
@@ -24,9 +27,9 @@ app.get("/v1/api/health", (_req, res) => {
 
 app.get("/v1/api/__version", (_req, res) => {
   res.json({
-    version: "mvp-universal-parse-2025-09-16-b64-img+aliases+cards",
+    version: "mvp-universal-parse-2025-09-16-b64-img+aliases+cards+translate",
     note:
-      "Add /v1/api/image64 & parse?img=base64; aliases for /v1/api/catalog*; robust query; add generic card parser for static HTML & PHP/WordPress (div/li[class*=product]).",
+      "Add /v1/api/image64 & parse?img=base64; aliases for /v1/api/catalog*; generic card parser; optional translate step via translate=EN & translateFields.",
   });
 });
 
@@ -126,14 +129,12 @@ app.get("/v1/api/image", async (req, res) => {
       headers: {
         "User-Agent": UA,
         Accept: "image/avif,image/webp,image/*,*/*;q=0.8",
-        // 有些站点会校验来源域，不要随便带别的站：
         Referer: new URL(url).origin + "/",
       },
       validateStatus: (s) => s >= 200 && s < 400,
     });
 
     const ct = r.headers["content-type"] || "image/jpeg";
-    // 显式 CORS（尽管全局 cors 已处理，加上更稳）
     res.set("Access-Control-Allow-Origin", "*");
 
     if (format === "base64") {
@@ -167,17 +168,15 @@ async function parseAutoSchmuck(listUrl, limit = 50) {
   const items = [];
   const seen = new Set();
 
-  // 优先从每个卡片上找去详情的 a（避免 “Anzeigen” 按钮）
   $(".artbox, .artbox-inner, .artbox-wrap, .product-wrapper, .product, .isotope-item")
     .add("div,li,article")
     .each((_i, el) => {
       if (items.length >= limit) return false;
       const $card = $(el);
-      // 必须要有图片
+
       const $img = $card.find("img").first();
       if (!$img.length) return;
 
-      // 选择不是 “Anzeigen/查看/按钮类”的链接
       let $a = $card
         .find("a[href]")
         .filter((_, a) => !/anzeigen|anmelden|login|cart|filter/i.test(text($(a))))
@@ -187,7 +186,6 @@ async function parseAutoSchmuck(listUrl, limit = 50) {
       const href = abs(listUrl, $a.attr("href") || "");
       if (!href || seen.has(href)) return;
 
-      // 标题优先取 a 的 title/文本，其次取 h3/h2，再兜底 alt
       const title =
         ($a.attr("title") || "").trim() ||
         text($card.find("h3,h2").first()) ||
@@ -206,7 +204,6 @@ async function parseAutoSchmuck(listUrl, limit = 50) {
         "";
       const img = abs(listUrl, (src || "").split("?")[0]);
 
-      // 价格：卡片内文本或显式 price 类
       let priceTxt = text(
         $card.find(
           ".price,.product-price,.price-tag,.artbox-price,.product-list-price,.amount"
@@ -268,6 +265,7 @@ async function parseSImpulsCatalog(listUrl, limit = 50) {
     let $card = $a.closest("div");
     if ($card.length === 0) $card = $a.parent();
     const img = pickImg($card);
+
     const priceTxt =
       text($card.find(".price, .product-price, .amount, .m-price").first()) || "";
     const skuTxt =
@@ -300,16 +298,10 @@ async function parseSImpulsCatalog(listUrl, limit = 50) {
 }
 
 /* ──────────────────────────── Generic 卡片解析（新增） ──────────────────────────── */
-/** 更贴近“静态 HTML / PHP（织梦/WordPress）”页面结构：
- *  - 直接按“卡片容器”选择：div[class*=product], li[class*=product], article[class*=product]
- *  - 卡片中找第一个指向详情的 <a> 与第一张 <img>
- *  - 价格从常见类名与整卡文本兜底匹配
- */
 function parseByCardSelectors($, listUrl, limit = 50) {
   const items = [];
   const seen = new Set();
 
-  // 常见卡片容器
   const CARD_SEL = [
     'div[class*="product"]',
     'li[class*="product"]',
@@ -326,7 +318,6 @@ function parseByCardSelectors($, listUrl, limit = 50) {
     if (items.length >= limit) return false;
     const $card = $(el);
 
-    // 图
     const $img = $card.find("img").first();
     let src =
       $img.attr("data-src") ||
@@ -336,23 +327,22 @@ function parseByCardSelectors($, listUrl, limit = 50) {
       "";
     const img = abs(listUrl, (src || "").split("?")[0]);
 
-    // 链接：第一个合格的 a[href]
-    let $a = $card.find("a[href]").filter((_, a) => !BAD_LINK.test(String($(a).attr("href")))).first();
-    if (!$a.length) return; // 没有详情链接不收
+    let $a = $card
+      .find("a[href]")
+      .filter((_, a) => !BAD_LINK.test(String($(a).attr("href"))))
+      .first();
+    if (!$a.length) return;
 
     let href = abs(listUrl, $a.attr("href") || "");
     if (!href || seen.has(href)) return;
 
-    // 标题：a 的 title/文本 -> h3/h2/h1 -> img alt
     const title =
       ($a.attr("title") || "").trim() ||
       text($card.find("h3,h2,h1").first()) ||
       text($a) ||
       ($img.attr("alt") || "").trim();
-
     if (!title) return;
 
-    // 价格：常见类名兜底
     let priceTxt =
       text(
         $card.find(
@@ -365,7 +355,9 @@ function parseByCardSelectors($, listUrl, limit = 50) {
     }
 
     items.push({
-      sku: text($card.find(".sku,.product-sku,.model,.product-model").first()) || guessSkuFromTitle(title),
+      sku:
+        text($card.find(".sku,.product-sku,.model,.product-model").first()) ||
+        guessSkuFromTitle(title),
       title,
       url: href,
       img,
@@ -553,15 +545,13 @@ async function parseUniversalCatalog(listUrl, limit = 50) {
 
     // ✅ sinotronic-e.com（自动翻页）
     if (host.includes("sinotronic-e.com")) {
-      // 分页样式：/list/?{category}_{page}.html
       const re = /(\?\d+_)(\d+)\.html$/i;
       const makeUrl = (p) => (re.test(listUrl) ? listUrl.replace(re, (_, a) => `${a}${p}.html`) : null);
 
-      const maxPages = 20; // 安全上限
+      const maxPages = 20;
       const seenKey = new Set();
       const out = [];
 
-      // 第 1 页
       const firstHtml = await fetchHtml(listUrl);
       let $ = cheerio.load(firstHtml, { decodeEntities: false });
       let part = sino.parse($, listUrl, { limit });
@@ -573,7 +563,6 @@ async function parseUniversalCatalog(listUrl, limit = 50) {
         if (out.length >= limit) break;
       }
 
-      // 后续页
       for (let p = 2; p <= maxPages && out.length < limit; p++) {
         const nextUrl = makeUrl(p);
         if (!nextUrl) break;
@@ -598,128 +587,120 @@ async function parseUniversalCatalog(listUrl, limit = 50) {
       return out;
     }
 
-// ✅ s-impuls-shop.de（自动翻页，健壮版 v2：清洗无值 page 参数 + 收集页码 + 猜测式翻页）
-if (host.includes("s-impuls-shop.de")) {
-  const maxPages = 50;              // 安全上限
-  const out = [];
-  const visited = new Set();
+    // ✅ s-impuls-shop.de（自动翻页，健壮版）
+    if (host.includes("s-impuls-shop.de")) {
+      const maxPages = 50;
+      const out = [];
+      const visited = new Set();
 
-  // 0) 清洗：去掉尾部无值的 ?page / &page / ?p / &p，避免出现 xxx/catalog/home-cinema&page 这种无效地址
-  listUrl = listUrl.replace(/[?&](page|p)(=[^&]*)?$/i, "");
+      // 清洗尾部无值 page/p
+      listUrl = listUrl.replace(/[?&](page|p)(=[^&]*)?$/i, "");
 
-  // 单页抓取（保持你现有的解析函数）
-  const harvest = async (pageUrl) => {
-    const html = await fetchHtml(pageUrl);
-    const $ = cheerio.load(html, { decodeEntities: false });
-    const part = await parseSImpulsCatalog(pageUrl, limit - out.length);
-    for (const it of part || []) {
-      out.push(it);
-      if (out.length >= limit) break;
-    }
-    return $;
-  };
-
-  // 1) 先抓第 1 页
-  let $ = await harvest(listUrl);
-  if (out.length >= limit) return out;
-
-  // 2) 在分页区域里收集“所有页码链接”，支持 ?page= / ?p= / /page/2 三种
-  const pageSet = new Map(); // pageNo -> url
-  const addPage = (href) => {
-    if (!href) return;
-    const full = abs(listUrl, href);
-    try {
-      const u = new URL(full);
-      // 常见 query 参数：page / p / seite
-      let n =
-        parseInt(
-          u.searchParams.get("page") ||
-            u.searchParams.get("p") ||
-            u.searchParams.get("seite") ||
-            "",
-          10
-        ) || 0;
-      // 路由式 /page/2
-      if (!n) {
-        const m = u.pathname.match(/\/page\/(\d+)/i);
-        if (m) n = parseInt(m[1], 10) || 0;
-      }
-      if (n && n > 1 && !pageSet.has(n)) pageSet.set(n, u.href);
-    } catch {}
-  };
-
-  // 常见的分页容器/链接
-  $(
-    ".pagination a[href], nav.pagination a[href], .pager a[href], .page-pagination a[href], .page-numbers a[href]"
-  ).each((_i, a) => addPage($(a).attr("href")));
-
-  // 3) 如果没收集到明确页码，用“猜测式翻页”试探：?page=N / ?p=N / /page/N
-  const makeCandidates = (base, n) => {
-    const u = new URL(base);
-    const sep = u.search ? "&" : "?";
-    return [
-      `${u.origin}${u.pathname}${u.search}${sep}page=${n}${u.hash}`,
-      `${u.origin}${u.pathname}${u.search}${sep}p=${n}${u.hash}`,
-      `${u.origin}${u.pathname.replace(/\/$/, "")}/page/${n}${u.search}${u.hash}`,
-    ];
-  };
-  const firstKey = (items) => (items?.[0]?.link || items?.[0]?.url || items?.[0]?.href || "").trim();
-
-  if (pageSet.size === 0) {
-    let n = 2;
-    let lastFirst = firstKey(out);
-    while (n <= maxPages && out.length < limit) {
-      let advanced = false;
-      for (const tryUrl of makeCandidates(listUrl, n)) {
-        if (visited.has(tryUrl)) continue;
-        let html = "";
-        try { html = await fetchHtml(tryUrl); } catch {}
-        if (!html) continue;
-
-        const $$ = cheerio.load(html, { decodeEntities: false });
-        const part = await parseSImpulsCatalog(tryUrl, limit - out.length);
-        if (part && part.length) {
-          const fk = firstKey(part);
-          // 与上一页首条不同，认为翻页成功（避免同页重复）
-          if (!fk || fk !== lastFirst) {
-            for (const it of part) {
-              out.push(it);
-              if (out.length >= limit) break;
-            }
-            visited.add(tryUrl);
-            lastFirst = fk || lastFirst;
-            advanced = true;
-            break;
-          }
+      const harvest = async (pageUrl) => {
+        const html = await fetchHtml(pageUrl);
+        const $ = cheerio.load(html, { decodeEntities: false });
+        const part = await parseSImpulsCatalog(pageUrl, limit - out.length);
+        for (const it of part || []) {
+          out.push(it);
+          if (out.length >= limit) break;
         }
+        return $;
+      };
+
+      let $ = await harvest(listUrl);
+      if (out.length >= limit) return out;
+
+      const pageSet = new Map(); // pageNo -> url
+      const addPage = (href) => {
+        if (!href) return;
+        const full = abs(listUrl, href);
+        try {
+          const u = new URL(full);
+          let n =
+            parseInt(
+              u.searchParams.get("page") ||
+                u.searchParams.get("p") ||
+                u.searchParams.get("seite") ||
+                "",
+              10
+            ) || 0;
+          if (!n) {
+            const m = u.pathname.match(/\/page\/(\d+)/i);
+            if (m) n = parseInt(m[1], 10) || 0;
+          }
+          if (n && n > 1 && !pageSet.has(n)) pageSet.set(n, u.href);
+        } catch {}
+      };
+
+      $(
+        ".pagination a[href], nav.pagination a[href], .pager a[href], .page-pagination a[href], .page-numbers a[href]"
+      ).each((_i, a) => addPage($(a).attr("href")));
+
+      const makeCandidates = (base, n) => {
+        const u = new URL(base);
+        const sep = u.search ? "&" : "?";
+        return [
+          `${u.origin}${u.pathname}${u.search}${sep}page=${n}${u.hash}`,
+          `${u.origin}${u.pathname}${u.search}${sep}p=${n}${u.hash}`,
+          `${u.origin}${u.pathname.replace(/\/$/, "")}/page/${n}${u.search}${u.hash}`,
+        ];
+      };
+      const firstKey = (items) =>
+        (items?.[0]?.link || items?.[0]?.url || items?.[0]?.href || "").trim();
+
+      if (pageSet.size === 0) {
+        let n = 2;
+        let lastFirst = firstKey(out);
+        while (n <= maxPages && out.length < limit) {
+          let advanced = false;
+          for (const tryUrl of makeCandidates(listUrl, n)) {
+            if (visited.has(tryUrl)) continue;
+            let html = "";
+            try { html = await fetchHtml(tryUrl); } catch {}
+            if (!html) continue;
+
+            const $$ = cheerio.load(html, { decodeEntities: false });
+            const part = await parseSImpulsCatalog(tryUrl, limit - out.length);
+            if (part && part.length) {
+              const fk = firstKey(part);
+              if (!fk || fk !== lastFirst) {
+                for (const it of part) {
+                  out.push(it);
+                  if (out.length >= limit) break;
+                }
+                visited.add(tryUrl);
+                lastFirst = fk || lastFirst;
+                advanced = true;
+                break;
+              }
+            }
+          }
+          if (!advanced) break;
+          n += 1;
+        }
+        return out;
       }
-      if (!advanced) break; // 三种格式都失败，停止
-      n += 1;
+
+      const pages = [...pageSet.entries()]
+        .sort((a, b) => a[0] - b[0])
+        .map(([, href]) => href)
+        .slice(0, maxPages - 1);
+
+      for (const pageUrl of pages) {
+        if (out.length >= limit) break;
+        if (visited.has(pageUrl)) continue;
+        $ = await harvest(pageUrl);
+      }
+
+      return out;
     }
-    return out;
-  }
-
-  // 4) 正常路径：有明确页码链接，按页号升序抓
-  const pages = [...pageSet.entries()]
-    .sort((a, b) => a[0] - b[0])
-    .map(([, href]) => href)
-    .slice(0, maxPages - 1);
-
-  for (const pageUrl of pages) {
-    if (out.length >= limit) break;
-    if (visited.has(pageUrl)) continue;
-    $ = await harvest(pageUrl);
-  }
-
-  return out;
-}
 
     if (host.includes("auto-schmuck.com")) {
       return await parseAutoSchmuck(listUrl, limit);
     }
   } catch {}
 
-  // ✅ 新增兜底：尝试外部 universal 适配器（若成功且有数据，直接返回）
+  // 外部通用适配器
   try {
     const uni = await parseUniversal({ url: listUrl, limit });
     if (Array.isArray(uni) && uni.length) return uni;
@@ -728,21 +709,17 @@ if (host.includes("s-impuls-shop.de")) {
   const html = await fetchHtml(listUrl);
   const $ = cheerio.load(html);
 
-  // ① 通用卡片解析
   const cardItems = parseByCardSelectors($, listUrl, limit);
   if (cardItems.length) return cardItems;
 
-  // ② WooCommerce
   const wcCards = $("ul.products li.product");
   if (wcCards.length) return parseWooFromHtml($, listUrl, limit);
 
-  // ③ 超通用回退
   return parseGenericFromHtml($, listUrl, limit);
 }
 
 /* ──────────────────────────── API: 解析 ──────────────────────────── */
 app.get("/v1/api/catalog/parse", async (req, res) => {
-  // 兼容多种参数名（url/u/link/l）
   const listUrl =
     String(req.query.url ?? req.query.u ?? req.query.link ?? req.query.l ?? "").trim();
 
@@ -764,11 +741,25 @@ app.get("/v1/api/catalog/parse", async (req, res) => {
     limit
   );
 
+  // ✅ 可选翻译：translate=EN（或 DE/FR/ES...）
+  const targetLang = String(req.query.translate || req.query.t || "").trim().toUpperCase();
+  const translateFields = String(
+    req.query.translateFields || "title,desc,description"
+  )
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const translateCount = Math.min(
+    parseInt(String(req.query.translateCount || String(limit)), 10) || limit,
+    limit
+  );
+
   if (!listUrl) return res.status(400).json({ ok: false, error: "missing url" });
 
   const t0 = Date.now();
   try {
     const items = await parseUniversalCatalog(listUrl, limit);
+
     if (enrich && items.length) {
       await Promise.all(items.slice(0, enrichCount).map(enrichDetail));
     }
@@ -795,6 +786,52 @@ app.get("/v1/api/catalog/parse", async (req, res) => {
       );
     }
 
+    // ✅ 可选翻译（仅在设置 translate 时执行）
+    if (items.length && targetLang) {
+      const suffix = "_" + targetLang.toLowerCase();
+
+      // 统一一个“翻译单条”的安全封装（兼容多种导出形式）
+      const translateOne = async (text) => {
+        try {
+          if (!text) return text;
+          if (typeof translate.translateText === "function") {
+            return await translate.translateText(text, targetLang);
+          }
+          if (typeof translate.translateBatch === "function") {
+            const out = await translate.translateBatch([text], targetLang);
+            return Array.isArray(out) ? out[0] : text;
+          }
+          if (typeof translate.default === "function") {
+            return await translate.default(text, targetLang);
+          }
+          if (typeof translate.translate === "function") {
+            return await translate.translate(text, targetLang);
+          }
+        } catch (e) {
+          console.warn("[translate:one] fail:", e?.message || e);
+        }
+        return text;
+      };
+
+      // 逐条、逐字段翻译（数量由 translateCount 控制）
+      for (let i = 0; i < Math.min(items.length, translateCount); i++) {
+        const it = items[i];
+        for (const f of translateFields) {
+          const key = String(f).trim();
+          if (!key || !Object.prototype.hasOwnProperty.call(it, key)) continue;
+          try {
+            const val = it[key];
+            if (val && typeof val === "string") {
+              const translated = await translateOne(val);
+              it[`${key}${suffix}`] = translated;
+            }
+          } catch (e) {
+            console.warn(`[translate:field] ${key} fail:`, e?.message || e);
+          }
+        }
+      }
+    }
+
     res.setHeader("X-Lang", "de");
     res.json({ ok: true, url: listUrl, count: items.length, products: items, items });
     console.log("[parse:done]", {
@@ -805,6 +842,9 @@ app.get("/v1/api/catalog/parse", async (req, res) => {
       enrichCount,
       wantImgBase64,
       imgCount,
+      targetLang,
+      translateFields,
+      translateCount,
     });
   } catch (err) {
     console.error("[parse:fail]", {
