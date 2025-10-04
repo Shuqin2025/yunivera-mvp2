@@ -1,3 +1,4 @@
+// （完整 server.js，含你现有的所有分支；仅按需补充 detailSku 能力）
 import express from "express";
 import cors from "cors";
 import axios from "axios";
@@ -24,9 +25,9 @@ app.get("/v1/api/health", (_req, res) => {
 
 app.get("/v1/api/__version", (_req, res) => {
   res.json({
-    version: "mvp-universal-parse-2025-10-04-memoryking-v5.1-routing+debug",
+    version: "mvp-universal-parse-2025-10-04-memoryking-v5.1-routing+detailSku",
     note:
-      "Explicit domain routing + debug passthrough; memoryking adapter forced; aliases kept; image base64; optional translate.",
+      "Explicit domain routing; akkuman fast passthrough; generic detailSku overwrite (opt-in); aliases kept; optional translate.",
   });
 });
 
@@ -444,8 +445,73 @@ async function enrichDetail(item) {
   } catch {}
 }
 
+/* ──────────────────────────── 通用详情覆写 SKU（可选） ──────────────────────────── */
+async function overwriteSkuFromDetailGeneric(items, maxCount = 30) {
+  const LABEL = /^(artikel-?nr\.?|artikelnummer|art\.-?nr\.?|bestellnummer|item\s*(?:no\.?|number))/i;
+  const BAD   = /(prüfziffer|hersteller|manufacturer|brand)/i;
+
+  const take = Math.min(items.length, maxCount);
+  const jobs = [];
+  for (let i = 0; i < take; i++) {
+    const it = items[i];
+    const hasGoodSku = it.sku && /\b\d{4,}\b/.test(String(it.sku));
+    if (hasGoodSku || !it.url) continue;
+    jobs.push({ i, url: it.url });
+  }
+  if (!jobs.length) return;
+
+  const CONC = 8, TIMEOUT = 10000;
+  let p = 0;
+
+  async function worker() {
+    while (p < jobs.length) {
+      const { i, url } = jobs[p++];
+      try {
+        const r = await axios.get(url, {
+          headers: { "User-Agent": UA, "Accept-Language": "de,en;q=0.8" },
+          timeout: TIMEOUT, validateStatus: s => s >= 200 && s < 400
+        });
+        const $ = cheerio.load(r.data);
+
+        let found = "";
+        $('script[type="application/ld+json"]').each((_k, el) => {
+          try {
+            const raw = $(el).contents().text().trim();
+            if (!raw) return;
+            const data = JSON.parse(raw);
+            const arr  = Array.isArray(data) ? data : [data];
+            for (const o of arr) {
+              const kv = Object.entries(o).find(([k]) => LABEL.test(k));
+              if (kv && !BAD.test(kv[0]) && kv[1]) { found = String(kv[1]); break; }
+            }
+          } catch {}
+        });
+
+        if (!found) {
+          // label → value
+          $('*:contains("Artikel"), *:contains("Art.-Nr"), *:contains("Bestellnummer"), *:contains("Item")').each((_k, el) => {
+            const txt = ($(el).text() || "").replace(/\s+/g,' ').trim();
+            if (LABEL.test(txt) && !BAD.test(txt)) {
+              const val = ($(el).next().text() || $(el).parent().text() || "")
+                           .replace(txt,'').replace(/[:：]/,'').trim();
+              if (val && /\S{3,}/.test(val)) { found = val; return false; }
+            }
+          });
+        }
+
+        if (found) items[i].sku = String(found).trim();
+      } catch {}
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(CONC, jobs.length) }, worker));
+}
+
 /* ──────────────────────────── 统一入口 ──────────────────────────── */
-async function parseUniversalCatalog(listUrl, limit = 50, { debug = false, fast = false } = {}) {
+async function parseUniversalCatalog(
+  listUrl,
+  limit = 50,
+  { debug = false, fast = false, detailSku = false, detailSkuMax = 30 } = {}
+) {
   let adapter = "generic";
   try {
     const host = new URL(listUrl).hostname;
@@ -469,16 +535,13 @@ async function parseUniversalCatalog(listUrl, limit = 50, { debug = false, fast 
       return { items, adapter };
     }
 
-    // ✅ akkuman.de → 使用模板适配器（目录→详情覆写 Artikelnummer/SKU）
+    // ✅ akkuman.de → 使用模板适配器（目录→详情覆写 Artikelnummer/SKU），fast 透传
     if (/(\.|^)akkuman\.de$/i.test(host)) {
       adapter = "exampleSite";
       const html = await fetchHtml(listUrl);
       const $ = cheerio.load(html, { decodeEntities: false });
       const parseExample = (await import("./adapters/exampleSite.js")).default;
-
-      // ⭐ 新增：把 fast 透传给模板适配器（仅此处）
       const items = await parseExample({ $, url: listUrl, rawHtml: html, limit, debug, fast });
-
       return { items, adapter };
     }
 
@@ -653,7 +716,13 @@ async function parseUniversalCatalog(listUrl, limit = 50, { debug = false, fast 
   const $ = cheerio.load(html);
 
   const cardItems = parseByCardSelectors($, listUrl, limit);
-  if (cardItems.length) return { items: cardItems, adapter: "generic-cards" };
+  if (cardItems.length) {
+    if (detailSku) {
+      await overwriteSkuFromDetailGeneric(cardItems, Math.min(detailSkuMax || 30, limit));
+      return { items: cardItems, adapter: "generic-cards+detailSku" };
+    }
+    return { items: cardItems, adapter: "generic-cards" };
+  }
 
   const wcCards = $("ul.products li.product");
   if (wcCards.length) return { items: parseWooFromHtml($, listUrl, limit), adapter: "woocommerce" };
@@ -684,7 +753,7 @@ app.get("/v1/api/catalog/parse", async (req, res) => {
     limit
   );
 
-  // ✅ 可选翻译：translate=EN（或 DE/FR/ES...）
+  // ✅ 可选翻译
   const targetLang = String(req.query.translate || req.query.t || "").trim().toUpperCase();
   const translateFields = String(
     req.query.translateFields || "title,desc,description"
@@ -697,16 +766,22 @@ app.get("/v1/api/catalog/parse", async (req, res) => {
     limit
   );
 
-  // ✅ 新增：debug 透传
+  // ✅ 新增：debug / fast / detailSku 透传
   const debug = /^(1|true|yes|on)$/i.test(String(req.query.debug || ""));
-  // ⭐ 新增：fast 透传（仅 akkuman 分支会用到）
   const fast  = /^(1|true|yes|on)$/i.test(String(req.query.fast || ""));
+  const detailSku = /^(1|true|yes|on)$/i.test(String(req.query.detailSku || ""));
+  const detailSkuMax = Math.min(
+    parseInt(String(req.query.detailSkuMax || "30"), 10) || 30,
+    limit
+  );
 
   if (!listUrl) return res.status(400).json({ ok: false, error: "missing url" });
 
   const t0 = Date.now();
   try {
-    const { items, adapter } = await parseUniversalCatalog(listUrl, limit, { debug, fast });
+    const { items, adapter } = await parseUniversalCatalog(listUrl, limit, {
+      debug, fast, detailSku, detailSkuMax
+    });
 
     if (enrich && items.length) {
       await Promise.all(items.slice(0, enrichCount).map(enrichDetail));
@@ -796,6 +871,8 @@ app.get("/v1/api/catalog/parse", async (req, res) => {
       translateCount,
       debug,
       fast,
+      detailSku,
+      detailSkuMax,
     });
   } catch (err) {
     console.error("[parse:fail]", {
