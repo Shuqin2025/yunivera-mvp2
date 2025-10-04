@@ -1,5 +1,4 @@
 // backend/adapters/universal.js
-
 import * as cheerio from "cheerio";
 import * as http from "../lib/http.js";
 import * as images from "../lib/images.js";
@@ -67,7 +66,7 @@ const KEY_PRIORITY = [
 ];
 function normKey(k) { return String(k || "").toLowerCase().replace(/[\s._-]/g, ""); }
 
-// ✨ 新增：直接从同一节点的“强标签 + 值”里抠出值（处理 “Artikelnummer: 1000028645” 没有邻居节点的情况）
+// ✨ 兼容“标签+值在同一节点”的行内形式
 function extractInlineLabelValue(s) {
   if (!s) return "";
   const reList = [
@@ -87,7 +86,7 @@ function extractInlineLabelValue(s) {
 async function overwriteSkuFromDetailGeneric(items, { takeMax = 30, conc = 6, fetchHtml, headers = {} } = {}) {
   if (!items?.length || !fetchHtml) return;
 
-  // 选取要进入详情的行：优先“缺/疑似 Prüfziffer”的，再补到 takeMax（即便已有短型号也会进入）
+  // 先选“缺/疑似 Prüfziffer”的，再补齐到 takeMax（即便有短型号也会进详情）
   const picked = new Set();
   const jobs = [];
   for (let i = 0; i < items.length && jobs.length < takeMax; i++) {
@@ -120,7 +119,18 @@ async function overwriteSkuFromDetailGeneric(items, { takeMax = 30, conc = 6, fe
         const $ = cheerio.load(html);
         let found = "";
 
-        // (0) 结构化/属性：itemprop=sku / data-sku / meta[name=sku]
+        // ✨（0）Shopware 常见的“订单号/Artikel-Nr.展示块”
+        if (!found) {
+          const $blk = $('.entry--sku, .product--ordernumber, .is--ordernumber').first();
+          if ($blk.length) {
+            const raw = text($blk);
+            // 例如：Artikel-Nr.: 1000028645
+            const inline = extractInlineLabelValue(raw) || raw.replace(/^.*?:\s*/, "");
+            if (inline && !LABEL_BAD.test(raw)) found = inline.trim();
+          }
+        }
+
+        // (1) 结构化/属性：itemprop=sku / data-sku / meta[name=sku]
         if (!found) {
           const metaSel = [
             '[itemprop="sku"]','[data-sku]','meta[name="sku"]','meta[itemprop="sku"]'
@@ -132,7 +142,7 @@ async function overwriteSkuFromDetailGeneric(items, { takeMax = 30, conc = 6, fe
           }
         }
 
-        // (1) JSON-LD（按 KEY_PRIORITY 明确优先级）
+        // (2) JSON-LD（按 KEY_PRIORITY 明确优先级；排除 Hersteller/Prüfziffer）
         if (!found) {
           $('script[type="application/ld+json"]').each((_i, el) => {
             if (found) return;
@@ -155,7 +165,7 @@ async function overwriteSkuFromDetailGeneric(items, { takeMax = 30, conc = 6, fe
           });
         }
 
-        // (2) <dl> / <table>：只认强标签（fuzzy），取紧邻值
+        // (3) <dl> / <table>：只认强标签（fuzzy），取紧邻值 + 行内“标签:值”
         if (!found) {
           $("dl").each((_, dl) => {
             if (found) return false;
@@ -164,7 +174,6 @@ async function overwriteSkuFromDetailGeneric(items, { takeMax = 30, conc = 6, fe
               if (LABEL_STRONG_FUZZY.test(k) && !LABEL_BAD.test(k)) {
                 const v = text($(dt).next("dd"));
                 if (v) { found = v; return false; }
-                // ✨ 新增：同节点行内形式
                 const inline = extractInlineLabelValue(k);
                 if (inline) { found = inline; return false; }
               }
@@ -179,32 +188,28 @@ async function overwriteSkuFromDetailGeneric(items, { takeMax = 30, conc = 6, fe
               const th = text($cells.first());
               const td = text($cells.last());
               if (LABEL_STRONG_FUZZY.test(th) && !LABEL_BAD.test(th) && td) { found = td; return false; }
-              // ✨ 新增：同单元格行内形式
               const inline = extractInlineLabelValue(th);
               if (!found && inline) { found = inline; return false; }
             });
           });
         }
 
-        // (3) 邻近文本（只在强标签附近取“兄弟/同块”）
+        // (4) 邻近文本（强标签附近的兄弟/同块 + 行内“标签:值”）
         if (!found) {
           const $cands = $("*").filter((_, el) => LABEL_STRONG_FUZZY.test(text($(el))) && !LABEL_BAD.test(text($(el))));
           $cands.each((_k, el) => {
             if (found) return false;
             const $el = $(el);
-            // 3.1 兄弟节点
             const v1 = text($el.next());
             if (v1) { found = v1; return false; }
-            // 3.2 同块紧邻
             const v2 = text($el.parent().children().eq($el.index() + 1));
             if (v2) { found = v2; return false; }
-            // 3.3 ✨ 行内“标签+值”
             const inline = extractInlineLabelValue(text($el));
             if (inline) { found = inline; return false; }
           });
         }
 
-        // (4) 文本兜底：只保留“强标签”正则
+        // (5) 全文兜底：仍然只匹配强标签正则，排除 Prüfziffer/Hersteller
         if (!found) {
           const body = $("body").text().replace(/\s+/g, " ");
           const reList = [
@@ -254,7 +259,7 @@ function parseCards($, base, limit) {
       text($card.find("h3,h2,.title").first()) ||
       text($a);
     if (!title) return;
-    if (/^(produkt|zum\s+produkt)\b/i.test(title)) return; // 过滤“纯跳转到产品页”的卡片
+    if (/^(produkt|zum\s+produkt)\b/i.test(title)) return; // 过滤纯“Zum Produkt …”卡片
 
     const titleKey = title.toLowerCase().replace(/\s+/g, " ").trim();
     if (seenTitle.has(titleKey)) return;
