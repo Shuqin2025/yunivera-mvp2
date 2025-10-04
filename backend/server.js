@@ -445,7 +445,7 @@ async function enrichDetail(item) {
 }
 
 /* ──────────────────────────── 统一入口 ──────────────────────────── */
-async function parseUniversalCatalog(listUrl, limit = 50, { debug = false } = {}) {
+async function parseUniversalCatalog(listUrl, limit = 50, { debug = false, fast = false } = {}) {
   let adapter = "generic";
   try {
     const host = new URL(listUrl).hostname;
@@ -475,7 +475,10 @@ async function parseUniversalCatalog(listUrl, limit = 50, { debug = false } = {}
       const html = await fetchHtml(listUrl);
       const $ = cheerio.load(html, { decodeEntities: false });
       const parseExample = (await import("./adapters/exampleSite.js")).default;
-      const items = await parseExample({ $, url: listUrl, rawHtml: html, limit, debug });
+
+      // ⭐ 新增：把 fast 透传给模板适配器（仅此处）
+      const items = await parseExample({ $, url: listUrl, rawHtml: html, limit, debug, fast });
+
       return { items, adapter };
     }
 
@@ -694,14 +697,16 @@ app.get("/v1/api/catalog/parse", async (req, res) => {
     limit
   );
 
-  // ✅ 新增：debug=1 透传到适配器（用于确认是否命中 memoryking/v5.1）
+  // ✅ 新增：debug 透传
   const debug = /^(1|true|yes|on)$/i.test(String(req.query.debug || ""));
+  // ⭐ 新增：fast 透传（仅 akkuman 分支会用到）
+  const fast  = /^(1|true|yes|on)$/i.test(String(req.query.fast || ""));
 
   if (!listUrl) return res.status(400).json({ ok: false, error: "missing url" });
 
   const t0 = Date.now();
   try {
-    const { items, adapter } = await parseUniversalCatalog(listUrl, limit, { debug });
+    const { items, adapter } = await parseUniversalCatalog(listUrl, limit, { debug, fast });
 
     if (enrich && items.length) {
       await Promise.all(items.slice(0, enrichCount).map(enrichDetail));
@@ -790,6 +795,7 @@ app.get("/v1/api/catalog/parse", async (req, res) => {
       translateFields,
       translateCount,
       debug,
+      fast,
     });
   } catch (err) {
     console.error("[parse:fail]", {
