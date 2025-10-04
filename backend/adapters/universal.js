@@ -7,6 +7,7 @@ import { crawlPages } from "../lib/pagination.js";
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 
+// ---------------- utils ----------------
 function abs(base, href) { if (!href) return ""; try { return new URL(href, base).href; } catch { return ""; } }
 function text($el) { return ($el.text() || "").replace(/\s+/g, " ").trim(); }
 function firstSrcFromSet(ss) {
@@ -14,8 +15,12 @@ function firstSrcFromSet(ss) {
   const cand = ss.split(",").map(s => s.trim().split(/\s+/)[0]).find(s => /^https?:/i.test(s));
   return cand || "";
 }
+// 规范化 URL：去掉 ? 与 #，用来去重/识别详情
+function cleanUrl(u, base) {
+  try { const x = new URL(u, base || undefined); x.search = ""; x.hash = ""; return x.href; } catch { return u || ""; }
+}
 
-// —— 兜底取图
+// ---- 兜底取图（如未接入 lib/images.js 的智能挑图） ----
 function fallbackPickImg($root, base) {
   const $img = $root.find("img").first();
   const src =
@@ -42,13 +47,29 @@ function findPrice($card) {
   return s || null;
 }
 
-/* ================== 详情覆写（增强版） ================== */
-// 弱特例：只在“文本兜底”时屏蔽极像 Prüfziffer 的 48xxxxxx…，有明确标签时不屏蔽
+/* ============ 详情覆写：只认“强标签”+ 排除 Hersteller ============ */
+// 只在“文本兜底”时屏蔽极像 Prüfziffer 的 48xxxxxx…（像 memoryking），有明确标签不屏蔽
 function looksLikePruef(v) { return v ? /^48\d{6,10}$/.test(String(v).trim()) : false; }
+
+// 强标签（白名单）：只从这些里取
+const LABEL_STRONG_RE =
+  /^(artikel-?nr\.?|artikelnummer|art\.-?nr\.?|bestellnummer|item\s*no\.?|sku|mpn)$/i;
+// DOM/文本里用于匹配的“包含式”版本（考虑到站点可能有“Artikelnummer:”）
+const LABEL_STRONG_FUZZY =
+  /(artikel\s*[-–—]?\s*nr\.?|artikelnummer|art\.\s*[-–—]?\s*nr\.?|bestellnummer|item\s*no\.?|sku|mpn)/i;
+// 显式排除
+const LABEL_BAD = /(prüfziffer|hersteller-?nr\.?|hersteller)/i;
+
+// JSON-LD 键名归一化 + 优先级
+const KEY_PRIORITY = [
+  "artikelnummer", "artikel-nr", "art.-nr", "bestellnummer", "itemno", "sku", "mpn"
+];
+function normKey(k) { return String(k || "").toLowerCase().replace(/[\s._-]/g, ""); }
 
 async function overwriteSkuFromDetailGeneric(items, { takeMax = 30, conc = 6, fetchHtml, headers = {} } = {}) {
   if (!items?.length || !fetchHtml) return;
 
+  // 选取要进入详情的行：优先“缺/疑似 Prüfziffer”的，再补到 takeMax
   const picked = new Set();
   const jobs = [];
   for (let i = 0; i < items.length && jobs.length < takeMax; i++) {
@@ -57,13 +78,10 @@ async function overwriteSkuFromDetailGeneric(items, { takeMax = 30, conc = 6, fe
   }
   for (let i = 0; i < items.length && jobs.length < takeMax; i++) {
     if (picked.has(i)) continue;
-    const it = items[i]; if (it?.url) { jobs.push({ i, url: it.url }); picked.add(i); }
+    const it = items[i];
+    if (it?.url) { jobs.push({ i, url: it.url }); picked.add(i); }
   }
   if (!jobs.length) return;
-
-  // 只看“标签”是否命中白名单；显式排除 Prüfziffer / Hersteller / Hersteller-Nr.
-  const LABEL = /^(artikel-?nr\.?|artikelnummer|art\.-?nr\.?|bestellnummer|item\s*no\.?|sku|mpn|modell|model|herstellernummer|hersteller-?nr\.?)/i;
-  const BAD   = /(prüfziffer|hersteller-?nr\.?|hersteller)/i;
 
   // 进程内 15 分钟缓存
   const cache = (overwriteSkuFromDetailGeneric.__cache ||= new Map());
@@ -84,26 +102,36 @@ async function overwriteSkuFromDetailGeneric(items, { takeMax = 30, conc = 6, fe
         const $ = cheerio.load(html);
         let found = "";
 
-        // 1) JSON-LD
+        // 1) JSON-LD（按 KEY_PRIORITY 明确优先级）
         $('script[type="application/ld+json"]').each((_i, el) => {
           if (found) return;
           try {
             const raw = $(el).contents().text().trim(); if (!raw) return;
             const data = JSON.parse(raw); const arr = Array.isArray(data) ? data : [data];
-            for (const o of arr) {
-              const hit = Object.entries(o).find(([k]) => LABEL.test(k));
-              if (hit && !BAD.test(hit[0]) && hit[1]) { const v = String(hit[1]).trim(); if (v) { found = v; break; } }
+            for (const obj of arr) {
+              const dict = Object.create(null);
+              for (const [k, v] of Object.entries(obj)) {
+                const nk = normKey(k);
+                if (LABEL_BAD.test(k)) continue;
+                dict[nk] = v;
+              }
+              for (const want of KEY_PRIORITY) {
+                if (dict[want]) { const v = String(dict[want]).trim(); if (v) { found = v; break; } }
+              }
+              if (found) break;
             }
           } catch {}
         });
 
-        // 2) <dl> / <table>
+        // 2) <dl> / <table>：只认强标签（fuzzy），取紧邻值
         if (!found) {
           $("dl").each((_, dl) => {
             if (found) return false;
             $(dl).find("dt").each((_j, dt) => {
-              const k = text($(dt)); if (LABEL.test(k) && !BAD.test(k)) {
-                const v = text($(dt).next("dd")); if (v) { found = v; return false; }
+              const k = text($(dt));
+              if (LABEL_STRONG_FUZZY.test(k) && !LABEL_BAD.test(k)) {
+                const v = text($(dt).next("dd"));
+                if (v) { found = v; return false; }
               }
             });
           });
@@ -114,33 +142,25 @@ async function overwriteSkuFromDetailGeneric(items, { takeMax = 30, conc = 6, fe
             $(tb).find("tr").each((_j, tr) => {
               const th = text($(tr).find("th,td").first());
               const td = text($(tr).find("td").last());
-              if (LABEL.test(th) && !BAD.test(th) && td) { found = td; return false; }
+              if (LABEL_STRONG_FUZZY.test(th) && !LABEL_BAD.test(th) && td) { found = td; return false; }
             });
           });
         }
 
-        // 3) 邻近文本（beamer-discount 等常用结构）
+        // 3) 邻近文本（只在强标签附近取“兄弟/同块”）
         if (!found) {
-          const $cands = $("*").filter((_, el) => LABEL.test(text($(el))) && !BAD.test(text($(el))));
+          const $cands = $("*").filter((_, el) => LABEL_STRONG_FUZZY.test(text($(el))) && !LABEL_BAD.test(text($(el))));
           $cands.each((_k, el) => {
             if (found) return false;
             const $el = $(el);
-
-            // 同行/同块：取紧邻兄弟
-            const v1 = text($el.next());
+            const v1 = text($el.next());             // 紧邻兄弟
             if (v1) { found = v1; return false; }
-
-            // 有些站点是 label/value 两个 span 挨着，再退一步找 “: ” 后面的纯文本
-            const m = ($el.parent().text() || "").replace(/\s+/g, " ").match(/:\s*([A-Z0-9._\-\/]+)/i);
-            if (m && m[1]) { found = m[1].trim(); return false; }
-
-            // 再往下找接下来的若干兄弟里第一个非空文本
-            const near = $el.nextAll().toArray().map(n => text($(n))).find(s => s);
-            if (near) { found = near; return false; }
+            const v2 = text($el.parent().children().eq($el.index() + 1)); // 同块紧邻
+            if (v2) { found = v2; return false; }
           });
         }
 
-        // 4) 文本兜底（仅当上面都失败时）
+        // 4) 文本兜底：只保留“强标签”正则
         if (!found) {
           const body = $("body").text().replace(/\s+/g, " ");
           const reList = [
@@ -149,9 +169,6 @@ async function overwriteSkuFromDetailGeneric(items, { takeMax = 30, conc = 6, fe
             /\bItem\s*no\.?\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
             /\bSKU\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
             /\bMPN\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
-            /\b(?:Modell|Model)\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
-            /\bHerstellernummer\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
-            /\bHersteller-?Nr\.?\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
           ];
           for (const re of reList) {
             const m = body.match(re);
@@ -166,27 +183,34 @@ async function overwriteSkuFromDetailGeneric(items, { takeMax = 30, conc = 6, fe
   await Promise.all(Array.from({ length: Math.min(conc, jobs.length) }, worker));
 }
 
-/* ================== 列表解析（加重“Zum Produkt …”过滤） ================== */
+/* ============ 列表解析 ============ */
 function parseCards($, base, limit) {
   const items = [], seenUrl = new Set(), seenTitle = new Set();
   const CARD_SEL = [
     'div[class*="product"]','li[class*="product"]','article[class*="product"]',
     ".product-item",".product-card",".prod-item",".good",".goods",".item",".grid__item",
   ].join(", ");
-  const BAD = /add-to-cart|wishlist|compare|login|register|cart|filter|sort|mailto:/i;
+  const BAD_HREF = /add-to-cart|wishlist|compare|login|register|cart|filter|sort|mailto:/i;
 
   $(CARD_SEL).each((_i, el) => {
     if (items.length >= limit) return false;
     const $card = $(el);
-    const $a = $card.find("a[href]").filter((_, a) => !BAD.test(String($(a).attr("href")))).first();
+    const $a = $card.find("a[href]").filter((_, a) => !BAD_HREF.test(String($(a).attr("href")))).first();
     if (!$a.length) return;
 
-    const href = abs(base, $a.attr("href") || ""); if (!href || seenUrl.has(href)) return;
-    const img = pickImg($card, base); if (!img) return;
+    const href0 = $a.attr("href") || "";
+    const href = cleanUrl(abs(base, href0), base);
+    if (!href || seenUrl.has(href)) return;
 
-    const title = ($a.attr("title") || "").trim() || text($card.find("h3,h2,.title").first()) || text($a);
+    const img = pickImg($card, base);
+    if (!img) return;
+
+    const title =
+      ($a.attr("title") || "").trim() ||
+      text($card.find("h3,h2,.title").first()) ||
+      text($a);
     if (!title) return;
-    if (/^(produkt|zum\s+produkt)\b/i.test(title)) return;          // ← 更狠
+    if (/^(produkt|zum\s+produkt)\b/i.test(title)) return; // 过滤纯“产品页链接”卡片
 
     const titleKey = title.toLowerCase().replace(/\s+/g, " ").trim();
     if (seenTitle.has(titleKey)) return;
@@ -195,22 +219,24 @@ function parseCards($, base, limit) {
     items.push({ sku: guessSkuFromTitle(title), title, url: href, img, price, currency: "", moq: "" });
     seenUrl.add(href); seenTitle.add(titleKey);
   });
+
   return items;
 }
 
 function parseWoo($, base, limit) {
-  const items = [], seenTitle = new Set();
+  const items = [], seenTitle = new Set(), seenUrl = new Set();
   const $cards = $("ul.products li.product"); if (!$cards.length) return items;
 
   $cards.each((_i, li) => {
     if (items.length >= limit) return false;
     const $li = $(li);
     const $a = $li.find("a.woocommerce-LoopProduct-link, a[href]").first();
-    const href = abs(base, $a.attr("href") || "");
+
+    const href = cleanUrl(abs(base, $a.attr("href") || ""), base);
     const title =
       text($li.find(".woocommerce-loop-product__title").first()) ||
       ($a.attr("title") || "").trim() || text($a);
-    if (!href || !title) return;
+    if (!href || !title || seenUrl.has(href)) return;
     if (/^(produkt|zum\s+produkt)\b/i.test(title)) return;
 
     const titleKey = title.toLowerCase().replace(/\s+/g, " ").trim();
@@ -219,8 +245,9 @@ function parseWoo($, base, limit) {
     const img = pickImg($li, base);
     const price = text($li.find(".price .amount,.price").first()) || null;
     items.push({ sku: guessSkuFromTitle(title), title, url: href, img, price, currency: "", moq: "" });
-    seenTitle.add(titleKey);
+    seenTitle.add(titleKey); seenUrl.add(href);
   });
+
   return items;
 }
 
@@ -231,23 +258,31 @@ function parseAnchors($, base, limit) {
   $("a[href]").each((_i, a) => {
     if (items.length >= limit) return false;
     const $a = $(a);
-    const href = abs(base, $a.attr("href") || "");
+    const href = cleanUrl(abs(base, $a.attr("href") || ""), base);
     if (!href || seenUrl.has(href) || BAD.test(href)) return;
 
+    // 仅抓看起来像详情的 URL
     let isDetail = false;
-    try { const u = new URL(href, base); const p = (u.pathname || "").toLowerCase();
+    try {
+      const u = new URL(href);
+      const p = (u.pathname || "").toLowerCase();
       isDetail = /(product|item|sku|artikel|detail|details|view)/.test(p);
     } catch {}
     if (!isDetail) return;
 
-    let $card = $a.closest("li,article,div"); if (!$card.length) $card = $a.parent();
-    const img = pickImg($card, base); if (!img && !$card.find("img").length) return;
+    let $card = $a.closest("li,article,div");
+    if (!$card.length) $card = $a.parent();
+
+    const img = pickImg($card, base);
+    if (!img && !$card.find("img").length) return;
 
     const title = ($a.attr("title") || "").trim() || text($card.find("h3,h2").first()) || text($a);
     if (!title) return;
     if (/^(produkt|zum\s+produkt)\b/i.test(title)) return;
 
-    const titleKey = title.toLowerCase().replace(/\s+/g, " ").trim(); if (seenTitle.has(titleKey)) return;
+    const titleKey = title.toLowerCase().replace(/\s+/g, " ").trim();
+    if (seenTitle.has(titleKey)) return;
+
     const price = findPrice($card);
     items.push({ sku: guessSkuFromTitle(title), title, url: href, img, price, currency: "", moq: "" });
     seenUrl.add(href); seenTitle.add(titleKey);
@@ -255,7 +290,7 @@ function parseAnchors($, base, limit) {
   return items;
 }
 
-/* ================== 导出 ================== */
+/* ============ 导出 ============ */
 export default async function parseUniversal({ url, limit = 60, debug = false } = {}) {
   if (!url) return [];
 
@@ -277,6 +312,7 @@ export default async function parseUniversal({ url, limit = 60, debug = false } 
 
   const items = await crawlPages(startHtml, url, 40, limit, parseOne, fetchHtml, { samePathOnly: true, debug });
 
+  // 详情覆写（只认强标签）
   await overwriteSkuFromDetailGeneric(items, {
     takeMax: Math.min(30, limit),
     conc: 6,
