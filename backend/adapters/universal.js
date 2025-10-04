@@ -69,30 +69,36 @@ function looksLikePruef(v) {
   return /^\d{8,}$/.test(s) || /^48\d{6,10}$/.test(s);
 }
 
-// 仅对“sku 为空或疑似 Prüfziffer”的前 takeMax 条，进入详情页抓取
+// 仅对“sku 为空或疑似 Prüfziffer”的前 takeMax 条优先，若不足再补齐到 takeMax 进行一次标签覆写
 async function overwriteSkuFromDetailGeneric(items, {
-  takeMax = 20,
+  takeMax = 12,          // 小样本即可；默认 12
   conc = 6,
   fetchHtml,
   headers = {}
 } = {}) {
   if (!items || !items.length || !fetchHtml) return;
 
-  // 仅挑选需处理的条目：sku 为空或疑似 Prüfziffer，且有 url
+  // 先挑“空/疑似 Prüfziffer”
+  const picked = new Set();
   const jobs = [];
   for (let i = 0; i < items.length && jobs.length < takeMax; i++) {
     const it = items[i];
     const need = (!it.sku || looksLikePruef(it.sku)) && it.url;
-    if (need) jobs.push({ i, url: it.url });
+    if (need) { jobs.push({ i, url: it.url }); picked.add(i); }
+  }
+  // 若不足，再从头部补一些（仅当有 url），用于“尝试用标签覆写”
+  for (let i = 0; i < items.length && jobs.length < takeMax; i++) {
+    if (picked.has(i)) continue;
+    const it = items[i];
+    if (it && it.url) { jobs.push({ i, url: it.url }); picked.add(i); }
   }
   if (!jobs.length) return;
 
-  // Label 规则：覆盖 Artikel-Nr. / Artikelnummer / Art.-Nr. / Bestellnummer / Item no. / SKU / MPN / Modell / Model / Herstellernummer / Hersteller-Nr.
-  // 显式排除：Prüfziffer / Hersteller / Hersteller-Nr.
+  // 标签白名单 + 排除词
   const LABEL = /^(artikel-?nr\.?|artikelnummer|art\.-?nr\.?|bestellnummer|item\s*no\.?|sku|mpn|modell|model|herstellernummer|hersteller-?nr\.?)/i;
   const BAD   = /(prüfziffer|hersteller-?nr\.?|hersteller)/i;
 
-  // 进程内的极简缓存：避免同一目录二次抓取时重复请求
+  // 进程内缓存（15 分钟）
   const cache = (overwriteSkuFromDetailGeneric.__cache ||= new Map());
   const now = Date.now();
   for (const [k, v] of cache) if (now - v.ts > 15 * 60_000) cache.delete(k);
@@ -133,7 +139,7 @@ async function overwriteSkuFromDetailGeneric(items, {
           } catch {}
         });
 
-        // 2) 结构化 <dl> / <table>
+        // 2) <dl> / <table>
         if (!found) {
           $("dl").each((_, dl) => {
             if (found) return false;
@@ -159,7 +165,7 @@ async function overwriteSkuFromDetailGeneric(items, {
           });
         }
 
-        // 3) 文本兜底：只接受“标签 : 值”的场景，依然排除 Prüfziffer / Hersteller
+        // 3) 文本兜底（标签 : 值）
         if (!found) {
           const body = $("body").text().replace(/\s+/g, " ");
           const reList = [
@@ -186,7 +192,7 @@ async function overwriteSkuFromDetailGeneric(items, {
   await Promise.all(Array.from({ length: Math.min(conc, jobs.length) }, worker));
 }
 
-/* ---------- 层 1：通用“卡片”解析（加“Zum Produkt/Produkt”过滤 + 标题去重） ---------- */
+/* ---------- 层 1：通用“卡片”解析（加强“Produkt / Zum Produkt …”过滤 + 标题去重） ---------- */
 function parseCards($, base, limit) {
   const items = [];
   const seenUrl = new Set();
@@ -224,8 +230,8 @@ function parseCards($, base, limit) {
       text($a);
     if (!title) return;
 
-    // 过滤辅助跳转文案
-    if (/^(zum\s+produkt|produkt)$/i.test(title)) return;
+    // 新：过滤“Produkt”以及任何“Zum Produkt …”开头的辅助跳转
+    if (/^produkt\b/i.test(title) || /^zum\s+produkt\b/i.test(title)) return;
 
     const titleKey = title.toLowerCase().replace(/\s+/g, " ").trim();
     if (seenTitle.has(titleKey)) return;
@@ -258,7 +264,7 @@ function parseWoo($, base, limit) {
       text($a);
     if (!href || !title) return;
 
-    if (/^(zum\s+produkt|produkt)$/i.test(title)) return;
+    if (/^produkt\b/i.test(title) || /^zum\s+produkt\b/i.test(title)) return;
     const titleKey = title.toLowerCase().replace(/\s+/g, " ").trim();
     if (seenTitle.has(titleKey)) return;
 
@@ -271,7 +277,7 @@ function parseWoo($, base, limit) {
   return items;
 }
 
-/* ---------- 层 3：超通用链接兜底（加“Zum Produkt/Produkt”过滤 + 标题去重） ---------- */
+/* ---------- 层 3：超通用链接兜底（同样加强过滤 + 标题去重） ---------- */
 function parseAnchors($, base, limit) {
   const items = [];
   const seenUrl = new Set();
@@ -305,7 +311,7 @@ function parseAnchors($, base, limit) {
       text($a);
     if (!title) return;
 
-    if (/^(zum\s+produkt|produkt)$/i.test(title)) return;
+    if (/^produkt\b/i.test(title) || /^zum\s+produkt\b/i.test(title)) return;
 
     const titleKey = title.toLowerCase().replace(/\s+/g, " ").trim();
     if (seenTitle.has(titleKey)) return;
@@ -347,20 +353,20 @@ export default async function parseUniversal({ url, limit = 60, debug = false } 
     return part;
   };
 
-  // 让自动翻页框架驱动：最多翻 40 页，整体条数上限 limit
+  // 自动翻页：最多 40 页，整体条数上限 limit
   const items = await crawlPages(
     startHtml,
     url,
-    40,             // maxPages 保护
-    limit,          // 总条数保护
+    40,
+    limit,
     parseOne,
     fetchHtml,
     { samePathOnly: true, debug }
   );
 
-  // 列表无可靠 SKU 时，轻量进入详情页覆写（仅标签取值 + 排除 Prüfziffer/Hersteller）
+  // 轻量详情覆写（仅标签；排除 Prüfziffer/Hersteller；优先“空/Prüfziffer”，不足补齐到 takeMax）
   await overwriteSkuFromDetailGeneric(items, {
-    takeMax: Math.min(20, limit),
+    takeMax: Math.min(12, limit),
     conc: 6,
     fetchHtml,
     headers: { "User-Agent": UA, "Accept-Language": "de,en;q=0.8" }
