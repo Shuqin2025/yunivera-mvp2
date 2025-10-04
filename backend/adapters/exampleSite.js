@@ -348,4 +348,141 @@ async function mapWithLimit(list, limit, worker) {
   await Promise.all(runners);
 }
 
-async function withRetry(fn, times = 3, delayMs = 3
+async function withRetry(fn, times = 3, delayMs = 360) {
+  let lastErr;
+  for (let i = 0; i <= times; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastErr = e;
+    }
+    await new Promise((r) =>
+      setTimeout(r, delayMs + Math.floor(Math.random() * 240))
+    );
+  }
+  if (lastErr) throw lastErr;
+}
+
+/* ---------------- ⑥ 入口（签名与 memoryking.js 保持一致） ---------------- */
+
+export default async function parseExampleSite(input, limitDefault = 50, debugDefault = false) {
+  let $, pageUrl = "", rawHtml = "", limit = limitDefault, debug = debugDefault;
+  if (input && typeof input === "object" && (input.$ || input.rawHtml || input.url || input.limit !== undefined || input.debug !== undefined)) {
+    $       = input.$ || input;
+    rawHtml = input.rawHtml || "";
+    pageUrl = input.url || "";
+    if (input.limit !== undefined) limit = input.limit;
+    if (input.debug !== undefined) debug = input.debug;
+  } else {
+    $ = input;
+  }
+
+  const origin = (() => {
+    try { return pageUrl ? new URL(pageUrl).origin : SITE_ORIGIN_FALLBACK; }
+    catch { return SITE_ORIGIN_FALLBACK; }
+  })();
+
+  const items = [];
+  const isDetail =
+    /\/details?\//i.test(pageUrl || "") ||
+    $(DETAIL_ROOT).length > 0;
+
+  // A) 目录页：只做卡片扫描（SKU 占位）
+  if (!isDetail) {
+    let boxes = [];
+    for (const sel of LIST_CARD_SELECTORS) {
+      const arr = $(sel).toArray().filter((el) => $(el).closest(LIST_BLACKLIST).length === 0);
+      if (arr.length) { boxes = arr; break; }
+    }
+    boxes.forEach((el) => {
+      const row = readListBox($, $(el), origin);
+      if (row.title || row.url || row.img) items.push(row);
+    });
+  }
+
+  // B) 单条详情：直接返回 1 条
+  if (items.length === 0 && isDetail) {
+    const $detail = $(DETAIL_ROOT);
+    const title =
+      $detail.find(".product--title, .product-title").first().text().trim() ||
+      $("h1").first().text().trim() ||
+      "";
+
+    const url =
+      absolutize($('link[rel="canonical"]').attr("href") || "", origin) ||
+      absolutize(($('meta[property="og:url"]').attr("content") || "").trim(), origin) ||
+      (pageUrl || "");
+
+    let img = $('meta[property="og:image"]').attr("content") || "";
+    if (!img) img = bestFromImgNode($, $detail.find("img").first(), origin);
+    if (!img) {
+      const extras = scrapeImgsFromHtml(rawHtml || ($.root().html() || ""), origin).filter(u => !/loader\.svg/i.test(u));
+      if (extras.length) img = extras[0];
+    }
+
+    const price =
+      $detail
+        .find('.price--default, .product--price, .product-price, .price--content, .price--unit, [itemprop="price"]')
+        .first()
+        .text()
+        .replace(/\s+/g, " ")
+        .trim() || "";
+
+    let sku = extractSkuFromDetail($, $detail, rawHtml);
+    if (!sku) sku = extractPruefFromDetail($, $detail, rawHtml); // 兜底以不留空
+
+    const row = { sku, title, url, img, price, currency: "", moq: "" };
+    if (row.title || row.url || row.img) return [row];
+  }
+
+  // C) 统一进入详情覆写 SKU（并发 + 重试）
+  const headers = {
+    "user-agent":
+      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
+    accept:
+      "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "accept-language": "de-DE,de;q=0.9,en;q=0.8",
+    "accept-encoding": "gzip, deflate, br",
+    "upgrade-insecure-requests": "1",
+    "cache-control": "no-cache",
+    pragma: "no-cache",
+    referer: pageUrl || origin,
+  };
+
+  await mapWithLimit(items, 3, async (row) => {
+    if (!row || !row.url) return;
+    const html = await withRetry(
+      () => getHtml(row.url, { headers, timeout: 18000 }),
+      3,
+      360
+    ).catch(() => "");
+    if (!html || html.length < 300) return;
+
+    const $$ = cheerio.load(html, { decodeEntities: false });
+    const $root = $$(DETAIL_ROOT);
+
+    let sku = extractSkuFromDetail($$, $root, html);
+    if (!sku) sku = extractPruefFromDetail($$, $root, html); // 不留空
+    if (sku) row.sku = sku.trim();
+
+    if (!row.price) {
+      const p = $root
+        .find('.price--default, .product--price, .product-price, .price--content, .price--unit, [itemprop="price"]')
+        .first()
+        .text()
+        .replace(/\s+/g, " ")
+        .trim();
+      if (p) row.price = p;
+    }
+
+    if (!row.img || /loader\.svg/i.test(row.img)) {
+      let im = $$('meta[property="og:image"]').attr("content") || "";
+      if (!im) im = bestFromImgNode($$, $root.find("img").first(), new URL(row.url).origin);
+      if (im) row.img = im;
+    }
+  });
+
+  const out = items.slice(0, limit);
+  if (debug) console.log("[exampleSite] items=%d sample=%o", out.length, out[0]);
+  return out;
+}
