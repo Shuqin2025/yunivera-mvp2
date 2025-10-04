@@ -811,4 +811,4 @@ app.get(["/v1/api/catalog", "/v1/api/catalog.json", "/v1/api/catalog/parse.json"
 
 /* ──────────────────────────── listen ──────────────────────────── */
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`[mvp2-backend] listening on :${PO
+app.listen(PORT, () => console.log(`[mvp2-backend] listening on :${PORT}`));
