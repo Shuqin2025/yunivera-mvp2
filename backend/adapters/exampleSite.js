@@ -508,4 +508,3 @@ export default async function parseExampleSite(input, limitDefault = 50, debugDe
   if (debug) console.log("[exampleSite] mode=%s items=%d sample=%o", fast ? "fast" : "normal", out.length, out[0]);
   return out;
 }
-
