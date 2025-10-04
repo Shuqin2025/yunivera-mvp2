@@ -3,33 +3,30 @@ import cors from "cors";
 import axios from "axios";
 import * as cheerio from "cheerio";
 
-// ✅ 新增：可选翻译（仅此一行）
+// ✅ 可选翻译
 import * as translate from "./lib/translate.js";
 
-// ✅ 已有：memoryking 适配器
+// ✅ 站点适配器
 import parseMemoryking from "./adapters/memoryking.js";
-// ✅ 已有：sinotronic 适配器
 import sino from "./adapters/sinotronic.js";
-// ✅ 已有：universal 适配器
 import parseUniversal from "./adapters/universal.js";
 
 const app = express();
-app.use(cors({ origin: "*", exposedHeaders: ["X-Lang"] }));
+app.use(cors({ origin: "*", exposedHeaders: ["X-Lang", "X-Adapter"] }));
 
 /* ──────────────────────────── health ──────────────────────────── */
 app.get(["/", "/healthz", "/health", "/api/health"], (_req, res) =>
   res.type("text/plain").send("ok")
 );
-// JSON 版健康检查（前端更易用）
 app.get("/v1/api/health", (_req, res) => {
   res.json({ ok: true, status: "up", ts: Date.now() });
 });
 
 app.get("/v1/api/__version", (_req, res) => {
   res.json({
-    version: "mvp-universal-parse-2025-09-16-b64-img+aliases+cards+translate",
+    version: "mvp-universal-parse-2025-10-04-memoryking-v5.1-routing+debug",
     note:
-      "Add /v1/api/image64 & parse?img=base64; aliases for /v1/api/catalog*; generic card parser; optional translate step via translate=EN & translateFields.",
+      "Explicit domain routing + debug passthrough; memoryking adapter forced; aliases kept; image base64; optional translate.",
   });
 });
 
@@ -117,7 +114,6 @@ function priceFromJsonLd($) {
 }
 
 /* ──────────────────────────── image proxy ──────────────────────────── */
-// 二进制（默认）
 app.get("/v1/api/image", async (req, res) => {
   const url = String(req.query.url || "").trim();
   const format = String(req.query.format || "").toLowerCase();
@@ -154,8 +150,6 @@ app.get("/v1/api/image", async (req, res) => {
     res.status(502).send("image fetch failed");
   }
 });
-
-// 显式 base64（和上面等价，便于前端书写）
 app.get("/v1/api/image64", async (req, res) => {
   req.query.format = "base64";
   return app._router.handle(req, res, () => {});
@@ -297,7 +291,7 @@ async function parseSImpulsCatalog(listUrl, limit = 50) {
   return items;
 }
 
-/* ──────────────────────────── Generic 卡片解析（新增） ──────────────────────────── */
+/* ──────────────────────────── Generic 卡片解析 ──────────────────────────── */
 function parseByCardSelectors($, listUrl, limit = 50) {
   const items = [];
   const seen = new Set();
@@ -370,7 +364,7 @@ function parseByCardSelectors($, listUrl, limit = 50) {
   return items;
 }
 
-/* ──────────────────────────── WooCommerce (保留) ──────────────────────────── */
+/* ──────────────────────────── Woo ──────────────────────────── */
 function parseWooFromHtml($, listUrl, limit = 50) {
   const items = [];
   const $cards = $("ul.products li.product");
@@ -417,87 +411,6 @@ function parseWooFromHtml($, listUrl, limit = 50) {
   return items;
 }
 
-/* ──────────────────────────── Generic（原“超通用链接”回退） ──────────────────────────── */
-function parseGenericFromHtml($, listUrl, limit = 50) {
-  const items = [];
-  const seen = new Set();
-
-  const stopWord = /^(EUR|USD|GBP|CHF|CNY|HKD|JPY|AUD|CAD)$/i;
-
-  const anchors = $("a[href]")
-    .toArray()
-    .filter((a) => {
-      const $a = $(a);
-      const t = text($a);
-      if (!t || t.length <= 2 || stopWord.test(t)) return false;
-      const href = $a.attr("href") || "";
-      try {
-        const u = new URL(href, listUrl);
-        const p = (u.pathname || "").toLowerCase();
-        const isDetail = /(product|produkt|artikel|item|sku|detail|details|view)/.test(p);
-        const isBad =
-          /\.(jpg|jpeg|png|webp|gif|svg)$/i.test(p) ||
-          /(add-to-cart|cart|login|wishlist|compare|filter)/i.test(u.search + p);
-        return isDetail && !isBad;
-      } catch {
-        return false;
-      }
-    });
-
-  for (const a of anchors) {
-    if (items.length >= limit) break;
-    const $a = $(a);
-    let href = $a.attr("href") || "";
-    try {
-      href = new URL(href, listUrl).href;
-    } catch {
-      continue;
-    }
-
-    let $card = $a.closest("li,article,div");
-    if (!$card.length) $card = $a.parent();
-
-    const txtAll = $card.text();
-    const hasPrice = /\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2})\s*(?:€|EUR)/i.test(txtAll);
-    const hasImg = $card.find("img").length > 0;
-    if (!hasImg && !hasPrice) continue;
-
-    const $img = $card.find("img").first();
-    let src =
-      $img.attr("data-src") ||
-      $img.attr("data-original") ||
-      ($img.attr("srcset") || "").split(" ").find((s) => /^https?:/i.test(s)) ||
-      $img.attr("src") ||
-      "";
-    const img = abs(listUrl, (src || "").split("?")[0]);
-
-    const title =
-      ($a.attr("title") || "").trim() ||
-      text($card.find("h3,h2,a").first()) ||
-      text($a);
-    const priceTxt =
-      text(
-        $card
-          .find(".price,.product-price,.amount,.money,.price--default")
-          .first()
-      ) || (txtAll.match(/\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2})\s*(?:€|EUR)/i)?.[0] || "");
-
-    if (!title) continue;
-
-    items.push({
-      sku: guessSkuFromTitle(title),
-      title,
-      url: href,
-      img,
-      price: priceTxt || null,
-      currency: "",
-      moq: "",
-    });
-  }
-
-  return items;
-}
-
 /* ──────────────────────────── 详情富化（价格/MOQ） ──────────────────────────── */
 async function enrichDetail(item) {
   try {
@@ -532,19 +445,23 @@ async function enrichDetail(item) {
 }
 
 /* ──────────────────────────── 统一入口 ──────────────────────────── */
-async function parseUniversalCatalog(listUrl, limit = 50) {
+async function parseUniversalCatalog(listUrl, limit = 50, { debug = false } = {}) {
+  let adapter = "generic";
   try {
     const host = new URL(listUrl).hostname;
 
-    // ✅ memoryking.de
+    // ✅ memoryking.de → 强制走专用适配器（支持 debug 透传）
     if (host.includes("memoryking.de")) {
+      adapter = "memoryking/v5.1";
       const html = await fetchHtml(listUrl);
       const $ = cheerio.load(html, { decodeEntities: false });
-      return await parseMemoryking({ $, url: listUrl, rawHtml: html, limit });
+      const items = await parseMemoryking({ $, url: listUrl, rawHtml: html, limit, debug });
+      return { items, adapter };
     }
 
     // ✅ sinotronic-e.com（自动翻页）
     if (host.includes("sinotronic-e.com")) {
+      adapter = "sinotronic";
       const re = /(\?\d+_)(\d+)\.html$/i;
       const makeUrl = (p) => (re.test(listUrl) ? listUrl.replace(re, (_, a) => `${a}${p}.html`) : null);
 
@@ -584,16 +501,16 @@ async function parseUniversalCatalog(listUrl, limit = 50) {
         if (!add) break;
       }
 
-      return out;
+      return { items: out, adapter };
     }
 
     // ✅ s-impuls-shop.de（自动翻页，健壮版）
     if (host.includes("s-impuls-shop.de")) {
+      adapter = "s-impuls-shop";
       const maxPages = 50;
       const out = [];
       const visited = new Set();
 
-      // 清洗尾部无值 page/p
       listUrl = listUrl.replace(/[?&](page|p)(=[^&]*)?$/i, "");
 
       const harvest = async (pageUrl) => {
@@ -608,7 +525,7 @@ async function parseUniversalCatalog(listUrl, limit = 50) {
       };
 
       let $ = await harvest(listUrl);
-      if (out.length >= limit) return out;
+      if (out.length >= limit) return { items: out, adapter };
 
       const pageSet = new Map(); // pageNo -> url
       const addPage = (href) => {
@@ -678,7 +595,7 @@ async function parseUniversalCatalog(listUrl, limit = 50) {
           if (!advanced) break;
           n += 1;
         }
-        return out;
+        return { items: out, adapter };
       }
 
       const pages = [...pageSet.entries()]
@@ -692,30 +609,33 @@ async function parseUniversalCatalog(listUrl, limit = 50) {
         $ = await harvest(pageUrl);
       }
 
-      return out;
+      return { items: out, adapter };
     }
 
     if (host.includes("auto-schmuck.com")) {
-      return await parseAutoSchmuck(listUrl, limit);
+      adapter = "auto-schmuck";
+      const items = await parseAutoSchmuck(listUrl, limit);
+      return { items, adapter };
     }
   } catch {}
 
   // 外部通用适配器
   try {
     const uni = await parseUniversal({ url: listUrl, limit });
-    if (Array.isArray(uni) && uni.length) return uni;
+    if (Array.isArray(uni) && uni.length) return { items: uni, adapter: "universal-ext" };
   } catch {}
 
+  // 内置多级回退
   const html = await fetchHtml(listUrl);
   const $ = cheerio.load(html);
 
   const cardItems = parseByCardSelectors($, listUrl, limit);
-  if (cardItems.length) return cardItems;
+  if (cardItems.length) return { items: cardItems, adapter: "generic-cards" };
 
   const wcCards = $("ul.products li.product");
-  if (wcCards.length) return parseWooFromHtml($, listUrl, limit);
+  if (wcCards.length) return { items: parseWooFromHtml($, listUrl, limit), adapter: "woocommerce" };
 
-  return parseGenericFromHtml($, listUrl, limit);
+  return { items: parseGenericFromHtml($, listUrl, limit), adapter: "generic-links" };
 }
 
 /* ──────────────────────────── API: 解析 ──────────────────────────── */
@@ -754,11 +674,14 @@ app.get("/v1/api/catalog/parse", async (req, res) => {
     limit
   );
 
+  // ✅ 新增：debug=1 透传到适配器（用于确认是否命中 memoryking/v5.1）
+  const debug = /^(1|true|yes|on)$/i.test(String(req.query.debug || ""));
+
   if (!listUrl) return res.status(400).json({ ok: false, error: "missing url" });
 
   const t0 = Date.now();
   try {
-    const items = await parseUniversalCatalog(listUrl, limit);
+    const { items, adapter } = await parseUniversalCatalog(listUrl, limit, { debug });
 
     if (enrich && items.length) {
       await Promise.all(items.slice(0, enrichCount).map(enrichDetail));
@@ -786,11 +709,10 @@ app.get("/v1/api/catalog/parse", async (req, res) => {
       );
     }
 
-    // ✅ 可选翻译（仅在设置 translate 时执行）
+    // ✅ 可选翻译
     if (items.length && targetLang) {
       const suffix = "_" + targetLang.toLowerCase();
 
-      // 统一一个“翻译单条”的安全封装（兼容多种导出形式）
       const translateOne = async (text) => {
         try {
           if (!text) return text;
@@ -813,7 +735,6 @@ app.get("/v1/api/catalog/parse", async (req, res) => {
         return text;
       };
 
-      // 逐条、逐字段翻译（数量由 translateCount 控制）
       for (let i = 0; i < Math.min(items.length, translateCount); i++) {
         const it = items[i];
         for (const f of translateFields) {
@@ -833,9 +754,12 @@ app.get("/v1/api/catalog/parse", async (req, res) => {
     }
 
     res.setHeader("X-Lang", "de");
-    res.json({ ok: true, url: listUrl, count: items.length, products: items, items });
+    res.setHeader("X-Adapter", adapter || "unknown");
+    res.json({ ok: true, url: listUrl, count: items.length, adapter, products: items, items });
+
     console.log("[parse:done]", {
       url: listUrl,
+      adapter,
       count: items.length,
       ms: Date.now() - t0,
       enrich,
@@ -845,6 +769,7 @@ app.get("/v1/api/catalog/parse", async (req, res) => {
       targetLang,
       translateFields,
       translateCount,
+      debug,
     });
   } catch (err) {
     console.error("[parse:fail]", {
@@ -886,4 +811,4 @@ app.get(["/v1/api/catalog", "/v1/api/catalog.json", "/v1/api/catalog/parse.json"
 
 /* ──────────────────────────── listen ──────────────────────────── */
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`[mvp2-backend] listening on :${PORT}`));
+app.listen(PORT, () => console.log(`[mvp2-backend] listening on :${PO
