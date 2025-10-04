@@ -76,6 +76,7 @@ function extractInlineLabelValue(s) {
 
 async function overwriteSkuFromDetailGeneric(items, { takeMax = 30, conc = 6, fetchHtml, headers = {} } = {}) {
   if (!items?.length || !fetchHtml) return;
+
   const picked = new Set(), jobs = [];
   for (let i = 0; i < items.length && jobs.length < takeMax; i++) {
     const it = items[i];
@@ -215,13 +216,11 @@ function parseCards($, base, limit) {
     const href = cleanUrl(abs(base, href0), base);
     if (!href || seenUrl.has(href)) return;
 
-    // 这里改：没有图片也不丢弃
+    // 没图也不丢弃，尽量兜底一张
     let img = pickImg($card, base);
     if (!img) {
       const $imgAlt = $card.find("img").first();
-      if ($imgAlt.length) {
-        img = abs(base, $imgAlt.attr("src") || $imgAlt.attr("data-src") || "");
-      }
+      if ($imgAlt.length) img = abs(base, $imgAlt.attr("src") || $imgAlt.attr("data-src") || "");
     }
 
     const title =
@@ -337,7 +336,40 @@ export default async function parseUniversal({ url, limit = 60, debug = false } 
 
   const seenUrl = new Set(), seenTitle = new Set();
   const items = [];
+
   for (const it of itemsRaw) {
     if (!it?.url || !it?.title) continue;
     if (titleLooksLikeJunk(it.title)) continue;
-    const u = cleanUrl(it.url, url
+
+    const u = cleanUrl(it.url, url); // ← 这里已补上右括号
+    const titleKey = it.title.toLowerCase().replace(/\s+/g, " ").trim();
+    if (seenUrl.has(u) || seenTitle.has(titleKey)) continue;
+
+    // 统一兜底图片（防止前面解析阶段空图导致被筛掉）
+    let img = it.img || "";
+    if (!img) img = ""; // 可以继续增强，但先保证字段存在
+
+    items.push({
+      sku: it.sku || "",
+      title: it.title,
+      url: u,
+      img: img || null,
+      price: it.price || null,
+      currency: it.currency || "",
+      moq: it.moq || ""
+    });
+
+    seenUrl.add(u); seenTitle.add(titleKey);
+    if (items.length >= limit) break;
+  }
+
+  // 进入详情页覆写 SKU（强标签），优先修复 Prüfziffer 或短码
+  await overwriteSkuFromDetailGeneric(items, {
+    takeMax: Math.min(30, limit),
+    conc: 6,
+    fetchHtml,
+    headers: { "User-Agent": UA }
+  });
+
+  return items;
+}
