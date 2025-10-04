@@ -59,26 +59,28 @@ function findPrice($card) {
 }
 
 /* ----------------------------------------------------------------
- * 通用“详情覆写 SKU”（仅标签取值 + 显式排除 Prüfziffer/Hersteller）
+ * 通用“详情覆写 SKU”
+ * 规则：只认白名单标签；显式排除“Prüfziffer/Hersteller/Hersteller-Nr.”标签；
+ *      不再因为“长纯数字”而丢弃（比如 1000028645）。
  * ---------------------------------------------------------------- */
 
-// 像 Prüfziffer（8+ 位纯数字，或 48 开头 8~10 位）
+// 仅在“文本兜底”阶段需要的弱判定（保留，可用于以后扩展）
 function looksLikePruef(v) {
   if (!v) return false;
   const s = String(v).trim();
-  return /^\d{8,}$/.test(s) || /^48\d{6,10}$/.test(s);
+  // 留个弱特例：以 48 开头的 8~10 位，在部分站点确实是 Prüfziffer；但不用它来屏蔽“有标签”的命中
+  return /^48\d{6,10}$/.test(s);
 }
 
-// 仅对“sku 为空或疑似 Prüfziffer”的前 takeMax 条优先，若不足再补齐到 takeMax 进行一次标签覆写
+// 对“空/疑似 Prüfziffer”的卡片优先，若不足再从前面补齐到 takeMax
 async function overwriteSkuFromDetailGeneric(items, {
-  takeMax = 12,          // 小样本即可；默认 12
+  takeMax = 12,
   conc = 6,
   fetchHtml,
   headers = {}
 } = {}) {
   if (!items || !items.length || !fetchHtml) return;
 
-  // 先挑“空/疑似 Prüfziffer”
   const picked = new Set();
   const jobs = [];
   for (let i = 0; i < items.length && jobs.length < takeMax; i++) {
@@ -86,7 +88,6 @@ async function overwriteSkuFromDetailGeneric(items, {
     const need = (!it.sku || looksLikePruef(it.sku)) && it.url;
     if (need) { jobs.push({ i, url: it.url }); picked.add(i); }
   }
-  // 若不足，再从头部补一些（仅当有 url），用于“尝试用标签覆写”
   for (let i = 0; i < items.length && jobs.length < takeMax; i++) {
     if (picked.has(i)) continue;
     const it = items[i];
@@ -94,7 +95,7 @@ async function overwriteSkuFromDetailGeneric(items, {
   }
   if (!jobs.length) return;
 
-  // 标签白名单 + 排除词
+  // 标签白名单 + 排除词（只看“标签”，不再对取到的值做“长数字”屏蔽）
   const LABEL = /^(artikel-?nr\.?|artikelnummer|art\.-?nr\.?|bestellnummer|item\s*no\.?|sku|mpn|modell|model|herstellernummer|hersteller-?nr\.?)/i;
   const BAD   = /(prüfziffer|hersteller-?nr\.?|hersteller)/i;
 
@@ -133,7 +134,7 @@ async function overwriteSkuFromDetailGeneric(items, {
               const hit = Object.entries(o).find(([k]) => LABEL.test(k));
               if (hit && !BAD.test(hit[0]) && hit[1]) {
                 const v = String(hit[1]).trim();
-                if (v && !looksLikePruef(v)) { found = v; break; }
+                if (v) { found = v; break; }     // ← 不再因“长数字”丢弃
               }
             }
           } catch {}
@@ -147,7 +148,7 @@ async function overwriteSkuFromDetailGeneric(items, {
               const k = text($(dt));
               if (LABEL.test(k) && !BAD.test(k)) {
                 const v = text($(dt).next("dd"));
-                if (v && !looksLikePruef(v)) { found = v; return false; }
+                if (v) { found = v; return false; }  // ← 不再因“长数字”丢弃
               }
             });
           });
@@ -158,8 +159,8 @@ async function overwriteSkuFromDetailGeneric(items, {
             $(tb).find("tr").each((_j, tr) => {
               const th = text($(tr).find("th,td").first());
               const td = text($(tr).find("td").last());
-              if (LABEL.test(th) && !BAD.test(th) && td && !looksLikePruef(td)) {
-                found = td; return false;
+              if (LABEL.test(th) && !BAD.test(th) && td) {
+                found = td; return false;            // ← 不再因“长数字”丢弃
               }
             });
           });
@@ -180,7 +181,10 @@ async function overwriteSkuFromDetailGeneric(items, {
           ];
           for (const re of reList) {
             const m = body.match(re);
-            if (m && m[1] && !looksLikePruef(m[1])) { found = m[1].trim(); break; }
+            // 文本兜底也不再因为“长数字”丢弃（但保留一个非常弱的 48xxxx 的 Prüfziffer特例）
+            if (m && m[1] && !/^prüfziffer/i.test(m[0]) && !looksLikePruef(m[1])) {
+              found = m[1].trim(); break;
+            }
           }
         }
 
@@ -230,7 +234,7 @@ function parseCards($, base, limit) {
       text($a);
     if (!title) return;
 
-    // 新：过滤“Produkt”以及任何“Zum Produkt …”开头的辅助跳转
+    // 过滤“Produkt / Zum Produkt …”型的辅助卡片
     if (/^produkt\b/i.test(title) || /^zum\s+produkt\b/i.test(title)) return;
 
     const titleKey = title.toLowerCase().replace(/\s+/g, " ").trim();
@@ -326,7 +330,7 @@ function parseAnchors($, base, limit) {
   return items;
 }
 
-/* ---------- 导出：通用适配器（自动翻页） ---------- */
+/* ---------- 导出：通用适配器（自动翻页 + 轻量详情覆写） ---------- */
 export default async function parseUniversal({ url, limit = 60, debug = false } = {}) {
   if (!url) return [];
 
@@ -339,9 +343,9 @@ export default async function parseUniversal({ url, limit = 60, debug = false } 
   // 首页 HTML
   const startHtml = await fetchHtml(url);
 
-  // 单页解析函数（供 crawlPages 调用，不改签名）
+  // 单页解析函数（供 crawlPages 调用）
   const parseOne = ($, pageUrl) => {
-    const need = limit; // 交给 crawlPages 控制整体数量
+    const need = limit;
     let part = parseCards($, pageUrl, need);
     if (part.length < Math.min(3, need)) {
       part = part.concat(parseWoo($, pageUrl, need - part.length));
@@ -364,7 +368,7 @@ export default async function parseUniversal({ url, limit = 60, debug = false } 
     { samePathOnly: true, debug }
   );
 
-  // 轻量详情覆写（仅标签；排除 Prüfziffer/Hersteller；优先“空/Prüfziffer”，不足补齐到 takeMax）
+  // 详情覆写（仅标签 + 显式排除 Prüfziffer/Hersteller 标签；不屏蔽“纯数字”）
   await overwriteSkuFromDetailGeneric(items, {
     takeMax: Math.min(12, limit),
     conc: 6,
