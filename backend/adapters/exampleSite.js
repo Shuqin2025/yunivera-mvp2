@@ -1,10 +1,10 @@
 /**
- * exampleSite.js — 通用模板适配器 v1.1 (fix + fast mode)
+ * exampleSite.js — 通用模板适配器 v1.0 (fix: detail detection)
  * 用途：目录页不含可靠货号，需进入详情页提取 “Artikel-Nr./SKU/MPN” 后覆写。
- * 改动点：
- *  - 修复：详情页检测不再包含 body，避免把目录页误判成详情。
- *  - 新增：fast 模式（并发↑10，重试↓1，间隔↓60–120ms，超时↓9s），默认仍是稳健参数。
+ * 兼容：lib/http.js 的 fetchHtml(url, opts) 可能返回 { html, ... }。
+ * 注意：按站点实际 DOM，**仅需改动顶部的“站点特有配置”少量选择器/关键词**。
  */
+
 import * as cheerio from "cheerio";
 import { fetchHtml } from "../lib/http.js";
 
@@ -22,7 +22,7 @@ const LIST_CARD_SELECTORS = [
   ".product",
   ".product-wrapper",
   "li.product",
-  ".artbox", // 兼容常见主题
+  ".artbox",            // 兼容常见主题
 ];
 
 // 不要误抓关联/推荐等区块
@@ -42,13 +42,7 @@ const DETAIL_ROOT =
 const LABEL_RE =
   /(artikel\s*[-–—]?\s*nr|artikelnummer|art\.\s*[-–—]?\s*nr|sku|mpn|modell|model|herstellernummer)/i;
 
-/* ---------------- ② 速度档位（新增） ---------------- */
-const SPEED = {
-  normal: { CONC: 3, RETRY: 3, DELAY_MIN: 220, DELAY_MAX: 440, TIMEOUT: 18000 },
-  fast:   { CONC:10, RETRY: 1, DELAY_MIN:  60, DELAY_MAX: 120, TIMEOUT:  9000 },
-};
-
-/* ---------------- ③ 通用工具（通常无需改） ---------------- */
+/* ---------------- ② 通用工具（通常无需改） ---------------- */
 
 const looksLikePruef = (v) => {
   if (!v) return false;
@@ -125,7 +119,7 @@ async function getHtml(url, opts = {}) {
   return "";
 }
 
-/* ---------------- ④ 列表卡片解析（SKU 只是占位，详情覆写） ---------------- */
+/* ---------------- ③ 列表卡片解析（SKU 只是占位，详情覆写） ---------------- */
 
 function readListBox($, $box, origin) {
   const title =
@@ -220,7 +214,7 @@ function readListBox($, $box, origin) {
   return { sku, title, url, img, price, currency: "", moq: "" };
 }
 
-/* ---------------- ⑤ 详情页提取：强匹配“Artikel-Nr.”（屏蔽 Prüfziffer） ---------------- */
+/* ---------------- ④ 详情页提取：强匹配“Artikel-Nr.”（屏蔽 Prüfziffer） ---------------- */
 
 function extractSkuFromDetail($, $root, rawHtml = "") {
   // 常见 DOM：li.base-info--entry.entry--sku / .product-sku / .entry--sku ...
@@ -340,25 +334,26 @@ function extractPruefFromDetail($, $root, rawHtml = "") {
   return v || "";
 }
 
-/* ---------------- ⑥ 并发 + 重试（支持速度档位） ---------------- */
+/* ---------------- ⑤ 并发 + 重试 ---------------- */
 
-async function mapWithLimit(list, conc, worker, delayMin, delayMax) {
+async function mapWithLimit(list, limit, worker) {
   let i = 0;
-  const runners = Array(Math.min(conc, Math.max(list.length, 1)))
+  const n = Math.min(limit, Math.max(list.length, 1));
+  const runners = Array(n)
     .fill(0)
     .map(async () => {
       while (i < list.length) {
         const cur = list[i++];
         await worker(cur);
-        // 控制间隔，避免触发风控
-        const d = delayMin + Math.floor(Math.random() * (delayMax - delayMin + 1));
-        await new Promise((r) => setTimeout(r, d));
+        await new Promise((r) =>
+          setTimeout(r, 220 + Math.floor(Math.random() * 220))
+        );
       }
     });
   await Promise.all(runners);
 }
 
-async function withRetry(fn, times = 3, delayMin = 220, delayMax = 440) {
+async function withRetry(fn, times = 3, delayMs = 360) {
   let lastErr;
   for (let i = 0; i <= times; i++) {
     try {
@@ -366,23 +361,23 @@ async function withRetry(fn, times = 3, delayMin = 220, delayMax = 440) {
     } catch (e) {
       lastErr = e;
     }
-    const d = delayMin + Math.floor(Math.random() * (delayMax - delayMin + 1));
-    await new Promise((r) => setTimeout(r, d));
+    await new Promise((r) =>
+      setTimeout(r, delayMs + Math.floor(Math.random() * 240))
+    );
   }
   if (lastErr) throw lastErr;
 }
 
-/* ---------------- ⑦ 入口（签名与 memoryking.js 保持一致） ---------------- */
+/* ---------------- ⑥ 入口（签名与 memoryking.js 保持一致） ---------------- */
 
 export default async function parseExampleSite(input, limitDefault = 50, debugDefault = false) {
-  let $, pageUrl = "", rawHtml = "", limit = limitDefault, debug = debugDefault, fast = false;
-  if (input && typeof input === "object" && (input.$ || input.rawHtml || input.url || input.limit !== undefined || input.debug !== undefined || input.fast !== undefined)) {
+  let $, pageUrl = "", rawHtml = "", limit = limitDefault, debug = debugDefault;
+  if (input && typeof input === "object" && (input.$ || input.rawHtml || input.url || input.limit !== undefined || input.debug !== undefined)) {
     $       = input.$ || input;
     rawHtml = input.rawHtml || "";
     pageUrl = input.url || "";
     if (input.limit !== undefined) limit = input.limit;
     if (input.debug !== undefined) debug = input.debug;
-    if (input.fast  !== undefined) fast  = !!input.fast;
   } else {
     $ = input;
   }
@@ -447,9 +442,7 @@ export default async function parseExampleSite(input, limitDefault = 50, debugDe
     if (row.title || row.url || row.img) return [row];
   }
 
-  // C) 统一进入详情覆写 SKU（并发 + 重试，按速度档位）
-  const mode = fast ? SPEED.fast : SPEED.normal;
-
+  // C) 统一进入详情覆写 SKU（并发 + 重试）
   const headers = {
     "user-agent":
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
@@ -463,48 +456,40 @@ export default async function parseExampleSite(input, limitDefault = 50, debugDe
     referer: pageUrl || origin,
   };
 
-  await mapWithLimit(
-    items,
-    mode.CONC,
-    async (row) => {
-      if (!row || !row.url) return;
+  await mapWithLimit(items, 3, async (row) => {
+    if (!row || !row.url) return;
+    const html = await withRetry(
+      () => getHtml(row.url, { headers, timeout: 18000 }),
+      3,
+      360
+    ).catch(() => "");
+    if (!html || html.length < 300) return;
 
-      const html = await withRetry(
-        () => getHtml(row.url, { headers, timeout: mode.TIMEOUT }),
-        mode.RETRY,
-        mode.DELAY_MIN,
-        mode.DELAY_MAX
-      ).catch(() => "");
-      if (!html || html.length < 300) return;
+    const $$ = cheerio.load(html, { decodeEntities: false });
+    const $root = $$(DETAIL_ROOT);
 
-      const $$ = cheerio.load(html, { decodeEntities: false });
-      const $root = $$(DETAIL_ROOT);
+    let sku = extractSkuFromDetail($$, $root, html);
+    if (!sku) sku = extractPruefFromDetail($$, $root, html); // 不留空
+    if (sku) row.sku = sku.trim();
 
-      let sku = extractSkuFromDetail($$, $root, html);
-      if (!sku) sku = extractPruefFromDetail($$, $root, html); // 不留空
-      if (sku) row.sku = sku.trim();
+    if (!row.price) {
+      const p = $root
+        .find('.price--default, .product--price, .product-price, .price--content, .price--unit, [itemprop="price"]')
+        .first()
+        .text()
+        .replace(/\s+/g, " ")
+        .trim();
+      if (p) row.price = p;
+    }
 
-      if (!row.price) {
-        const p = $root
-          .find('.price--default, .product--price, .product-price, .price--content, .price--unit, [itemprop="price"]')
-          .first()
-          .text()
-          .replace(/\s+/g, " ")
-          .trim();
-        if (p) row.price = p;
-      }
-
-      if (!row.img || /loader\.svg/i.test(row.img)) {
-        let im = $$('meta[property="og:image"]').attr("content") || "";
-        if (!im) im = bestFromImgNode($$, $root.find("img").first(), new URL(row.url).origin);
-        if (im) row.img = im;
-      }
-    },
-    mode.DELAY_MIN,
-    mode.DELAY_MAX
-  );
+    if (!row.img || /loader\.svg/i.test(row.img)) {
+      let im = $$('meta[property="og:image"]').attr("content") || "";
+      if (!im) im = bestFromImgNode($$, $root.find("img").first(), new URL(row.url).origin);
+      if (im) row.img = im;
+    }
+  });
 
   const out = items.slice(0, limit);
-  if (debug) console.log("[exampleSite] mode=%s items=%d sample=%o", fast ? "fast" : "normal", out.length, out[0]);
+  if (debug) console.log("[exampleSite] items=%d sample=%o", out.length, out[0]);
   return out;
 }
