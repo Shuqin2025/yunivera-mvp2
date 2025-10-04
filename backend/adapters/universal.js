@@ -59,7 +59,7 @@ function findPrice($card) {
 }
 
 /* ----------------------------------------------------------------
- * 新增：通用“详情覆写 SKU”工具（仅对需要的条目执行）
+ * 通用“详情覆写 SKU”（仅标签取值 + 显式排除 Prüfziffer/Hersteller）
  * ---------------------------------------------------------------- */
 
 // 像 Prüfziffer（8+ 位纯数字，或 48 开头 8~10 位）
@@ -69,7 +69,7 @@ function looksLikePruef(v) {
   return /^\d{8,}$/.test(s) || /^48\d{6,10}$/.test(s);
 }
 
-// 仅对“列表无可靠 SKU”的前 takeMax 条，进入详情页抓取 SKU（显式排除 Prüfziffer / Hersteller / Hersteller-Nr.）
+// 仅对“sku 为空或疑似 Prüfziffer”的前 takeMax 条，进入详情页抓取
 async function overwriteSkuFromDetailGeneric(items, {
   takeMax = 20,
   conc = 6,
@@ -87,9 +87,9 @@ async function overwriteSkuFromDetailGeneric(items, {
   }
   if (!jobs.length) return;
 
-  // Label 规则：覆盖 Artikel-Nr. / Artikelnummer / Art.-Nr. / Bestellnummer / Item no. / SKU / MPN / Modell / Model / Herstellernummer
+  // Label 规则：覆盖 Artikel-Nr. / Artikelnummer / Art.-Nr. / Bestellnummer / Item no. / SKU / MPN / Modell / Model / Herstellernummer / Hersteller-Nr.
   // 显式排除：Prüfziffer / Hersteller / Hersteller-Nr.
-  const LABEL = /^(artikel-?nr\.?|artikelnummer|art\.-?nr\.?|bestellnummer|item\s*no\.?|sku|mpn|modell|model|herstellernummer)/i;
+  const LABEL = /^(artikel-?nr\.?|artikelnummer|art\.-?nr\.?|bestellnummer|item\s*no\.?|sku|mpn|modell|model|herstellernummer|hersteller-?nr\.?)/i;
   const BAD   = /(prüfziffer|hersteller-?nr\.?|hersteller)/i;
 
   // 进程内的极简缓存：避免同一目录二次抓取时重复请求
@@ -159,7 +159,7 @@ async function overwriteSkuFromDetailGeneric(items, {
           });
         }
 
-        // 3) 文本兜底（避免匹配到 Prüfziffer / Hersteller）
+        // 3) 文本兜底：只接受“标签 : 值”的场景，依然排除 Prüfziffer / Hersteller
         if (!found) {
           const body = $("body").text().replace(/\s+/g, " ");
           const reList = [
@@ -170,6 +170,7 @@ async function overwriteSkuFromDetailGeneric(items, {
             /\bMPN\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
             /\b(?:Modell|Model)\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
             /\bHerstellernummer\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
+            /\bHersteller-?Nr\.?\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
           ];
           for (const re of reList) {
             const m = body.match(re);
@@ -185,10 +186,12 @@ async function overwriteSkuFromDetailGeneric(items, {
   await Promise.all(Array.from({ length: Math.min(conc, jobs.length) }, worker));
 }
 
-/* ---------- 层 1：通用“卡片”解析 ---------- */
+/* ---------- 层 1：通用“卡片”解析（加“Zum Produkt/Produkt”过滤 + 标题去重） ---------- */
 function parseCards($, base, limit) {
   const items = [];
-  const seen = new Set();
+  const seenUrl = new Set();
+  const seenTitle = new Set();
+
   const CARD_SEL = [
     'div[class*="product"]',
     'li[class*="product"]',
@@ -210,7 +213,7 @@ function parseCards($, base, limit) {
     if (!$a.length) return;
 
     const href = abs(base, $a.attr("href") || "");
-    if (!href || seen.has(href)) return;
+    if (!href || seenUrl.has(href)) return;
 
     const img = pickImg($card, base);
     if (!img) return;
@@ -221,9 +224,17 @@ function parseCards($, base, limit) {
       text($a);
     if (!title) return;
 
+    // 过滤辅助跳转文案
+    if (/^(zum\s+produkt|produkt)$/i.test(title)) return;
+
+    const titleKey = title.toLowerCase().replace(/\s+/g, " ").trim();
+    if (seenTitle.has(titleKey)) return;
+
     const price = findPrice($card);
     items.push({ sku: guessSkuFromTitle(title), title, url: href, img, price, currency: "", moq: "" });
-    seen.add(href);
+
+    seenUrl.add(href);
+    seenTitle.add(titleKey);
   });
   return items;
 }
@@ -231,6 +242,8 @@ function parseCards($, base, limit) {
 /* ---------- 层 2：WooCommerce ---------- */
 function parseWoo($, base, limit) {
   const items = [];
+  const seenTitle = new Set();
+
   const $cards = $("ul.products li.product");
   if (!$cards.length) return items;
 
@@ -245,25 +258,31 @@ function parseWoo($, base, limit) {
       text($a);
     if (!href || !title) return;
 
+    if (/^(zum\s+produkt|produkt)$/i.test(title)) return;
+    const titleKey = title.toLowerCase().replace(/\s+/g, " ").trim();
+    if (seenTitle.has(titleKey)) return;
+
     const img = pickImg($li, base);
     const price = text($li.find(".price .amount,.price").first()) || null;
 
     items.push({ sku: guessSkuFromTitle(title), title, url: href, img, price, currency: "", moq: "" });
+    seenTitle.add(titleKey);
   });
   return items;
 }
 
-/* ---------- 层 3：超通用链接兜底 ---------- */
+/* ---------- 层 3：超通用链接兜底（加“Zum Produkt/Produkt”过滤 + 标题去重） ---------- */
 function parseAnchors($, base, limit) {
   const items = [];
-  const seen = new Set();
+  const seenUrl = new Set();
+  const seenTitle = new Set();
   const BAD = /add-to-cart|cart|login|wishlist|compare|filter|sort|mailto:/i;
 
   $("a[href]").each((_i, a) => {
     if (items.length >= limit) return false;
     const $a = $(a);
     const href = abs(base, $a.attr("href") || "");
-    if (!href || seen.has(href) || BAD.test(href)) return;
+    if (!href || seenUrl.has(href) || BAD.test(href)) return;
 
     let isDetail = false;
     try {
@@ -286,9 +305,16 @@ function parseAnchors($, base, limit) {
       text($a);
     if (!title) return;
 
+    if (/^(zum\s+produkt|produkt)$/i.test(title)) return;
+
+    const titleKey = title.toLowerCase().replace(/\s+/g, " ").trim();
+    if (seenTitle.has(titleKey)) return;
+
     const price = findPrice($card);
     items.push({ sku: guessSkuFromTitle(title), title, url: href, img, price, currency: "", moq: "" });
-    seen.add(href);
+
+    seenUrl.add(href);
+    seenTitle.add(titleKey);
   });
 
   return items;
@@ -332,7 +358,7 @@ export default async function parseUniversal({ url, limit = 60, debug = false } 
     { samePathOnly: true, debug }
   );
 
-  // 新增：仅当“列表没有可靠 SKU”时，轻量进入详情页覆写（显式排除 Prüfziffer / Hersteller）
+  // 列表无可靠 SKU 时，轻量进入详情页覆写（仅标签取值 + 排除 Prüfziffer/Hersteller）
   await overwriteSkuFromDetailGeneric(items, {
     takeMax: Math.min(20, limit),
     conc: 6,
