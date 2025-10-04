@@ -1,4 +1,5 @@
 // backend/adapters/universal.js
+
 import * as cheerio from "cheerio";
 import * as http from "../lib/http.js";
 import * as images from "../lib/images.js";
@@ -20,7 +21,7 @@ function cleanUrl(u, base) {
   try { const x = new URL(u, base || undefined); x.search = ""; x.hash = ""; return x.href; } catch { return u || ""; }
 }
 
-// ---- 兜底取图（如未接入 lib/images.js 的智能挑图） ----
+// ---- 兜底取图 ----
 function fallbackPickImg($root, base) {
   const $img = $root.find("img").first();
   const src =
@@ -48,13 +49,13 @@ function findPrice($card) {
 }
 
 /* ============ 详情覆写：只认“强标签”+ 排除 Hersteller ============ */
-// 只在“文本兜底”时屏蔽极像 Prüfziffer 的 48xxxxxx…（像 memoryking），有明确标签不屏蔽
+// 仅在“纯文本兜底”时屏蔽极像 Prüfziffer 的 48xxxxxx…（像 memoryking）
 function looksLikePruef(v) { return v ? /^48\d{6,10}$/.test(String(v).trim()) : false; }
 
 // 强标签（白名单）：只从这些里取
 const LABEL_STRONG_RE =
   /^(artikel-?nr\.?|artikelnummer|art\.-?nr\.?|bestellnummer|item\s*no\.?|sku|mpn)$/i;
-// DOM/文本里用于匹配的“包含式”版本（考虑到站点可能有“Artikelnummer:”）
+// DOM/文本“包含式”版本
 const LABEL_STRONG_FUZZY =
   /(artikel\s*[-–—]?\s*nr\.?|artikelnummer|art\.\s*[-–—]?\s*nr\.?|bestellnummer|item\s*no\.?|sku|mpn)/i;
 // 显式排除
@@ -66,10 +67,27 @@ const KEY_PRIORITY = [
 ];
 function normKey(k) { return String(k || "").toLowerCase().replace(/[\s._-]/g, ""); }
 
+// ✨ 新增：直接从同一节点的“强标签 + 值”里抠出值（处理 “Artikelnummer: 1000028645” 没有邻居节点的情况）
+function extractInlineLabelValue(s) {
+  if (!s) return "";
+  const reList = [
+    /(?:Artikel\s*[-–—]?\s*Nr|Artikelnummer|Art\.\s*[-–—]?\s*Nr)\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
+    /\bBestellnummer\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
+    /\bItem\s*no\.?\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
+    /\bSKU\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
+    /\bMPN\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
+  ];
+  for (const re of reList) {
+    const m = s.match(re);
+    if (m && m[1]) return String(m[1]).trim();
+  }
+  return "";
+}
+
 async function overwriteSkuFromDetailGeneric(items, { takeMax = 30, conc = 6, fetchHtml, headers = {} } = {}) {
   if (!items?.length || !fetchHtml) return;
 
-  // 选取要进入详情的行：优先“缺/疑似 Prüfziffer”的，再补到 takeMax
+  // 选取要进入详情的行：优先“缺/疑似 Prüfziffer”的，再补到 takeMax（即便已有短型号也会进入）
   const picked = new Set();
   const jobs = [];
   for (let i = 0; i < items.length && jobs.length < takeMax; i++) {
@@ -102,28 +120,42 @@ async function overwriteSkuFromDetailGeneric(items, { takeMax = 30, conc = 6, fe
         const $ = cheerio.load(html);
         let found = "";
 
-        // 1) JSON-LD（按 KEY_PRIORITY 明确优先级）
-        $('script[type="application/ld+json"]').each((_i, el) => {
-          if (found) return;
-          try {
-            const raw = $(el).contents().text().trim(); if (!raw) return;
-            const data = JSON.parse(raw); const arr = Array.isArray(data) ? data : [data];
-            for (const obj of arr) {
-              const dict = Object.create(null);
-              for (const [k, v] of Object.entries(obj)) {
-                const nk = normKey(k);
-                if (LABEL_BAD.test(k)) continue;
-                dict[nk] = v;
-              }
-              for (const want of KEY_PRIORITY) {
-                if (dict[want]) { const v = String(dict[want]).trim(); if (v) { found = v; break; } }
-              }
-              if (found) break;
-            }
-          } catch {}
-        });
+        // (0) 结构化/属性：itemprop=sku / data-sku / meta[name=sku]
+        if (!found) {
+          const metaSel = [
+            '[itemprop="sku"]','[data-sku]','meta[name="sku"]','meta[itemprop="sku"]'
+          ].join(",");
+          const $m = $(metaSel).first();
+          if ($m.length) {
+            const v = $m.attr("content") || $m.attr("data-sku") || text($m);
+            if (v) found = String(v).trim();
+          }
+        }
 
-        // 2) <dl> / <table>：只认强标签（fuzzy），取紧邻值
+        // (1) JSON-LD（按 KEY_PRIORITY 明确优先级）
+        if (!found) {
+          $('script[type="application/ld+json"]').each((_i, el) => {
+            if (found) return;
+            try {
+              const raw = $(el).contents().text().trim(); if (!raw) return;
+              const data = JSON.parse(raw); const arr = Array.isArray(data) ? data : [data];
+              for (const obj of arr) {
+                const dict = Object.create(null);
+                for (const [k, v] of Object.entries(obj)) {
+                  const nk = normKey(k);
+                  if (LABEL_BAD.test(k)) continue;
+                  dict[nk] = v;
+                }
+                for (const want of KEY_PRIORITY) {
+                  if (dict[want]) { const v = String(dict[want]).trim(); if (v) { found = v; break; } }
+                }
+                if (found) break;
+              }
+            } catch {}
+          });
+        }
+
+        // (2) <dl> / <table>：只认强标签（fuzzy），取紧邻值
         if (!found) {
           $("dl").each((_, dl) => {
             if (found) return false;
@@ -132,6 +164,9 @@ async function overwriteSkuFromDetailGeneric(items, { takeMax = 30, conc = 6, fe
               if (LABEL_STRONG_FUZZY.test(k) && !LABEL_BAD.test(k)) {
                 const v = text($(dt).next("dd"));
                 if (v) { found = v; return false; }
+                // ✨ 新增：同节点行内形式
+                const inline = extractInlineLabelValue(k);
+                if (inline) { found = inline; return false; }
               }
             });
           });
@@ -140,27 +175,36 @@ async function overwriteSkuFromDetailGeneric(items, { takeMax = 30, conc = 6, fe
           $("table").each((_, tb) => {
             if (found) return false;
             $(tb).find("tr").each((_j, tr) => {
-              const th = text($(tr).find("th,td").first());
-              const td = text($(tr).find("td").last());
+              const $cells = $(tr).find("th,td");
+              const th = text($cells.first());
+              const td = text($cells.last());
               if (LABEL_STRONG_FUZZY.test(th) && !LABEL_BAD.test(th) && td) { found = td; return false; }
+              // ✨ 新增：同单元格行内形式
+              const inline = extractInlineLabelValue(th);
+              if (!found && inline) { found = inline; return false; }
             });
           });
         }
 
-        // 3) 邻近文本（只在强标签附近取“兄弟/同块”）
+        // (3) 邻近文本（只在强标签附近取“兄弟/同块”）
         if (!found) {
           const $cands = $("*").filter((_, el) => LABEL_STRONG_FUZZY.test(text($(el))) && !LABEL_BAD.test(text($(el))));
           $cands.each((_k, el) => {
             if (found) return false;
             const $el = $(el);
-            const v1 = text($el.next());             // 紧邻兄弟
+            // 3.1 兄弟节点
+            const v1 = text($el.next());
             if (v1) { found = v1; return false; }
-            const v2 = text($el.parent().children().eq($el.index() + 1)); // 同块紧邻
+            // 3.2 同块紧邻
+            const v2 = text($el.parent().children().eq($el.index() + 1));
             if (v2) { found = v2; return false; }
+            // 3.3 ✨ 行内“标签+值”
+            const inline = extractInlineLabelValue(text($el));
+            if (inline) { found = inline; return false; }
           });
         }
 
-        // 4) 文本兜底：只保留“强标签”正则
+        // (4) 文本兜底：只保留“强标签”正则
         if (!found) {
           const body = $("body").text().replace(/\s+/g, " ");
           const reList = [
@@ -176,7 +220,7 @@ async function overwriteSkuFromDetailGeneric(items, { takeMax = 30, conc = 6, fe
           }
         }
 
-        if (found) items[i].sku = found;
+        if (found) items[i].sku = found; // ✅ 命中强标签即覆盖
       } catch {}
     }
   }
@@ -210,7 +254,7 @@ function parseCards($, base, limit) {
       text($card.find("h3,h2,.title").first()) ||
       text($a);
     if (!title) return;
-    if (/^(produkt|zum\s+produkt)\b/i.test(title)) return; // 过滤纯“产品页链接”卡片
+    if (/^(produkt|zum\s+produkt)\b/i.test(title)) return; // 过滤“纯跳转到产品页”的卡片
 
     const titleKey = title.toLowerCase().replace(/\s+/g, " ").trim();
     if (seenTitle.has(titleKey)) return;
@@ -310,7 +354,17 @@ export default async function parseUniversal({ url, limit = 60, debug = false } 
     return part;
   };
 
-  const items = await crawlPages(startHtml, url, 40, limit, parseOne, fetchHtml, { samePathOnly: true, debug });
+  const itemsRaw = await crawlPages(startHtml, url, 40, limit, parseOne, fetchHtml, { samePathOnly: true, debug });
+
+  // ✨ 全局去重（跨通道/跨分页）：按“规范化详情 URL”
+  const seen = new Set();
+  const items = [];
+  for (const it of itemsRaw) {
+    const u = cleanUrl(it.url || "", url);
+    if (!u || seen.has(u)) continue;
+    seen.add(u);
+    items.push({ ...it, url: u });
+  }
 
   // 详情覆写（只认强标签）
   await overwriteSkuFromDetailGeneric(items, {
@@ -322,3 +376,4 @@ export default async function parseUniversal({ url, limit = 60, debug = false } 
 
   return items.slice(0, limit);
 }
+
