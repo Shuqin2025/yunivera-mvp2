@@ -90,6 +90,9 @@ function isDetailPage($) {
   const $bcLast = $('.breadcrumb li:last, .breadcrumbs li:last, nav[aria-label="breadcrumb"] li:last').last();
   if ($bcLast.length && $bcLast.find("a").length === 0 && $bcLast.text().trim().length > 0) return true;
 
+  // ★ 新增：只要页面上能抽到一个“强标签 SKU”，也视作详情页（兜底）
+  if (extractSkuFromDocument($)) return true;
+
   return false;
 }
 
@@ -221,7 +224,10 @@ function parseDetailPage($, pageUrl) {
 }
 
 // ============ 列表解析 ============
-function titleLooksLikeJunk(t){ return /^(produkt|zum\s+produkt)\b/i.test((t||"").trim()); }
+// ★ 扩展“垃圾标题”过滤：避免把详情页里的推荐块当成产品
+function titleLooksLikeJunk(t){
+  return /^(produkt|zum\s+produkt|weitere|vorschau|versandkosten|technische\b)/i.test((t||"").trim());
+}
 
 function parseCards($, base, limit) {
   const items = [], seenUrl = new Set(), seenTitle = new Set();
@@ -407,7 +413,7 @@ export default async function parseUniversal({ url, limit = 60, debug = false } 
     if (items.length >= limit) break;
   }
 
-  // 3) 进入详情页覆写 SKU（强标签），优先修复 Prüfziffer 或短码
+  // 3) 进入详情覆写 SKU（强标签），优先修复 Prüfziffer 或短码
   await overwriteSkuFromDetailGeneric(items, {
     takeMax: Math.min(30, limit),
     conc: 6,
