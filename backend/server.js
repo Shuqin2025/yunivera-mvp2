@@ -1,4 +1,5 @@
 // （完整 server.js，含你现有的所有分支；仅按需补充 detailSku 能力）
+
 import express from "express";
 import cors from "cors";
 import axios from "axios";
@@ -536,12 +537,17 @@ async function parseUniversalCatalog(
     }
 
     // ✅ akkuman.de → 使用模板适配器（目录→详情覆写 Artikelnummer/SKU），fast 透传
+    // 关键修改：默认使用 fast（不进详情）；只有当 detailSku=1 时才允许进详情覆写
     if (/(\.|^)akkuman\.de$/i.test(host)) {
       adapter = "exampleSite";
       const html = await fetchHtml(listUrl);
       const $ = cheerio.load(html, { decodeEntities: false });
       const parseExample = (await import("./adapters/exampleSite.js")).default;
-      const items = await parseExample({ $, url: listUrl, rawHtml: html, limit, debug, fast });
+
+      const wantsDetail = !!detailSku;
+      const fastEffective = !wantsDetail; // ← **强制**：没开 detailSku 就 fast
+
+      const items = await parseExample({ $, url: listUrl, rawHtml: html, limit, debug, fast: fastEffective });
       return { items, adapter };
     }
 
