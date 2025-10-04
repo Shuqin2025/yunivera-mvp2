@@ -1,5 +1,5 @@
 /**
- * exampleSite.js — 通用模板适配器 v1.0
+ * exampleSite.js — 通用模板适配器 v1.0 (fix: detail detection)
  * 用途：目录页不含可靠货号，需进入详情页提取 “Artikel-Nr./SKU/MPN” 后覆写。
  * 兼容：lib/http.js 的 fetchHtml(url, opts) 可能返回 { html, ... }。
  * 注意：按站点实际 DOM，**仅需改动顶部的“站点特有配置”少量选择器/关键词**。
@@ -18,7 +18,11 @@ const LIST_CARD_SELECTORS = [
   ".product--box",
   ".product-card",
   ".product-item",
+  ".product-tile",
+  ".product",
+  ".product-wrapper",
   "li.product",
+  ".artbox",            // 兼容常见主题
 ];
 
 // 不要误抓关联/推荐等区块
@@ -30,8 +34,9 @@ const LIST_BLACKLIST = [
   ".is--ctl-detail",
 ].join(", ");
 
-// 详情页主容器（尽量宽松，适配大多数主题）
-const DETAIL_ROOT = ".product--detail, .product--details, .product-page, #content, body";
+// 详情页主容器（⚠️ 不能包含 body，否则所有页面都会命中）
+const DETAIL_ROOT =
+  ".product--detail, .product--details, .product-detail, .product-page, .product-single, .detail-main, .product-view, #content .product--details";
 
 // 识别“Artikel-Nr. / SKU / MPN / Modell / Herstellernummer”的关键词
 const LABEL_RE =
@@ -383,9 +388,11 @@ export default async function parseExampleSite(input, limitDefault = 50, debugDe
   })();
 
   const items = [];
+
+  // 目录/详情判定：不要用 body；用更稳的启发式
   const isDetail =
-    /\/details?\//i.test(pageUrl || "") ||
-    $(DETAIL_ROOT).length > 0;
+    /\/(details?|product|produkt)\//i.test(pageUrl || "") ||
+    ($(DETAIL_ROOT).length > 0 && $(LIST_CARD_SELECTORS.join(", ")).length <= 2);
 
   // A) 目录页：只做卡片扫描（SKU 占位）
   if (!isDetail) {
