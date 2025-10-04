@@ -1,4 +1,5 @@
 // backend/adapters/universal.js
+
 import * as cheerio from "cheerio";
 import * as http from "../lib/http.js";          // fetchHtml（带编码/重试/UA）
 import * as images from "../lib/images.js";      // 统一取图（支持 data-* / srcset 等）
@@ -55,6 +56,133 @@ function findPrice($card) {
     if (m) s = m[0].replace(/\s+/g, " ");
   }
   return s || null;
+}
+
+/* ----------------------------------------------------------------
+ * 新增：通用“详情覆写 SKU”工具（仅对需要的条目执行）
+ * ---------------------------------------------------------------- */
+
+// 像 Prüfziffer（8+ 位纯数字，或 48 开头 8~10 位）
+function looksLikePruef(v) {
+  if (!v) return false;
+  const s = String(v).trim();
+  return /^\d{8,}$/.test(s) || /^48\d{6,10}$/.test(s);
+}
+
+// 仅对“列表无可靠 SKU”的前 takeMax 条，进入详情页抓取 SKU（显式排除 Prüfziffer / Hersteller / Hersteller-Nr.）
+async function overwriteSkuFromDetailGeneric(items, {
+  takeMax = 20,
+  conc = 6,
+  fetchHtml,
+  headers = {}
+} = {}) {
+  if (!items || !items.length || !fetchHtml) return;
+
+  // 仅挑选需处理的条目：sku 为空或疑似 Prüfziffer，且有 url
+  const jobs = [];
+  for (let i = 0; i < items.length && jobs.length < takeMax; i++) {
+    const it = items[i];
+    const need = (!it.sku || looksLikePruef(it.sku)) && it.url;
+    if (need) jobs.push({ i, url: it.url });
+  }
+  if (!jobs.length) return;
+
+  // Label 规则：覆盖 Artikel-Nr. / Artikelnummer / Art.-Nr. / Bestellnummer / Item no. / SKU / MPN / Modell / Model / Herstellernummer
+  // 显式排除：Prüfziffer / Hersteller / Hersteller-Nr.
+  const LABEL = /^(artikel-?nr\.?|artikelnummer|art\.-?nr\.?|bestellnummer|item\s*no\.?|sku|mpn|modell|model|herstellernummer)/i;
+  const BAD   = /(prüfziffer|hersteller-?nr\.?|hersteller)/i;
+
+  // 进程内的极简缓存：避免同一目录二次抓取时重复请求
+  const cache = (overwriteSkuFromDetailGeneric.__cache ||= new Map());
+  const now = Date.now();
+  for (const [k, v] of cache) if (now - v.ts > 15 * 60_000) cache.delete(k);
+
+  let p = 0;
+  async function worker() {
+    while (p < jobs.length) {
+      const { i, url } = jobs[p++];
+      try {
+        let html = "";
+        const c = cache.get(url);
+        if (c && (now - c.ts < 15 * 60_000)) {
+          html = c.html;
+        } else {
+          html = await fetchHtml(url, { headers });
+          cache.set(url, { html, ts: Date.now() });
+        }
+        if (!html) continue;
+
+        const $ = cheerio.load(html);
+        let found = "";
+
+        // 1) JSON-LD
+        $('script[type="application/ld+json"]').each((_i, el) => {
+          if (found) return;
+          try {
+            const raw = $(el).contents().text().trim();
+            if (!raw) return;
+            const data = JSON.parse(raw);
+            const arr = Array.isArray(data) ? data : [data];
+            for (const o of arr) {
+              const hit = Object.entries(o).find(([k]) => LABEL.test(k));
+              if (hit && !BAD.test(hit[0]) && hit[1]) {
+                const v = String(hit[1]).trim();
+                if (v && !looksLikePruef(v)) { found = v; break; }
+              }
+            }
+          } catch {}
+        });
+
+        // 2) 结构化 <dl> / <table>
+        if (!found) {
+          $("dl").each((_, dl) => {
+            if (found) return false;
+            $(dl).find("dt").each((_j, dt) => {
+              const k = text($(dt));
+              if (LABEL.test(k) && !BAD.test(k)) {
+                const v = text($(dt).next("dd"));
+                if (v && !looksLikePruef(v)) { found = v; return false; }
+              }
+            });
+          });
+        }
+        if (!found) {
+          $("table").each((_, tb) => {
+            if (found) return false;
+            $(tb).find("tr").each((_j, tr) => {
+              const th = text($(tr).find("th,td").first());
+              const td = text($(tr).find("td").last());
+              if (LABEL.test(th) && !BAD.test(th) && td && !looksLikePruef(td)) {
+                found = td; return false;
+              }
+            });
+          });
+        }
+
+        // 3) 文本兜底（避免匹配到 Prüfziffer / Hersteller）
+        if (!found) {
+          const body = $("body").text().replace(/\s+/g, " ");
+          const reList = [
+            /(?:Artikel\s*[-–—]?\s*Nr|Artikelnummer|Art\.\s*[-–—]?\s*Nr)\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
+            /\bBestellnummer\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
+            /\bItem\s*no\.?\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
+            /\bSKU\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
+            /\bMPN\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
+            /\b(?:Modell|Model)\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
+            /\bHerstellernummer\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
+          ];
+          for (const re of reList) {
+            const m = body.match(re);
+            if (m && m[1] && !looksLikePruef(m[1])) { found = m[1].trim(); break; }
+          }
+        }
+
+        if (found) items[i].sku = found;
+      } catch {}
+    }
+  }
+
+  await Promise.all(Array.from({ length: Math.min(conc, jobs.length) }, worker));
 }
 
 /* ---------- 层 1：通用“卡片”解析 ---------- */
@@ -173,8 +301,8 @@ export default async function parseUniversal({ url, limit = 60, debug = false } 
   // 统一的抓取函数（带 UA / 编码识别 / 重试）
   const fetchHtml =
     (http && typeof http.fetchHtml === "function")
-      ? (u) => http.fetchHtml(u, { headers: { "User-Agent": UA } })
-      : async (u) => (await fetch(u, { headers: { "User-Agent": UA } })).text();
+      ? (u, opt = {}) => http.fetchHtml(u, { headers: { "User-Agent": UA, ...(opt.headers || {}) } })
+      : async (u, opt = {}) => (await fetch(u, { headers: { "User-Agent": UA, ...(opt.headers || {}) } })).text();
 
   // 首页 HTML
   const startHtml = await fetchHtml(url);
@@ -203,6 +331,14 @@ export default async function parseUniversal({ url, limit = 60, debug = false } 
     fetchHtml,
     { samePathOnly: true, debug }
   );
+
+  // 新增：仅当“列表没有可靠 SKU”时，轻量进入详情页覆写（显式排除 Prüfziffer / Hersteller）
+  await overwriteSkuFromDetailGeneric(items, {
+    takeMax: Math.min(20, limit),
+    conc: 6,
+    fetchHtml,
+    headers: { "User-Agent": UA, "Accept-Language": "de,en;q=0.8" }
+  });
 
   return items.slice(0, limit);
 }
