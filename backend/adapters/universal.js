@@ -376,4 +376,3 @@ export default async function parseUniversal({ url, limit = 60, debug = false } 
 
   return items.slice(0, limit);
 }
-
