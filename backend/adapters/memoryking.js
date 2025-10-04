@@ -1,5 +1,5 @@
 /**
- * Memoryking 适配器（v5.0，含“应急回退”）
+ * Memoryking 适配器（v5.1）
  * 目标：
  *  1) 列表页不误抓 Prüfziffer（如 48680368），只要 Artikel-Nr.
  *  2) 无论列表是否拿到，统一进入详情页，用详情的 Artikel-Nr 覆盖
@@ -9,14 +9,15 @@
 import * as cheerio from "cheerio";
 import { fetchHtml } from "../lib/http.js";
 
-/** 像 Prüfziffer：8 位及以上纯数字，或以 48 开头的 8~10 位数字 */
+/* ———————— 工具 ———————— */
+
 const looksLikePruef = (v) => {
   if (!v) return false;
   const s = String(v).trim();
+  // 站内常见 Prüfziffer：纯数字 8 位起，或 48 开头的 8~10 位
   return (/^\d{8,}$/.test(s) || /^48\d{6,10}$/.test(s));
 };
 
-/** 绝对地址 */
 function absolutize(u, origin) {
   if (!u) return "";
   if (/^https?:\/\//i.test(u)) return u;
@@ -28,11 +29,9 @@ function absolutize(u, origin) {
   } catch { return u; }
 }
 
-/** srcset 拆分 */
 const splitSrcset = (s) =>
   (s || "").split(",").map(x => x.trim().split(/\s+/)[0]).filter(Boolean);
 
-/** 从 <img>/<picture> 里挑最靠谱的图片 */
 function bestFromImgNode($, $img, origin) {
   if (!$img || !$img.length) return "";
   const bag = new Set();
@@ -51,7 +50,6 @@ function bestFromImgNode($, $img, origin) {
     /\.(?:jpe?g|png|webp)(?:$|\?)/i.test(u) && !/loader\.svg/i.test(u)
   );
   if (!list.length) return "";
-
   const score = (u) => {
     let s = 0;
     const m = u.match(/(\d{2,4})x(\d{2,4})/);
@@ -63,7 +61,6 @@ function bestFromImgNode($, $img, origin) {
   return list.sort((a,b)=>score(b)-score(a))[0];
 }
 
-/** 从 html 文本兜底找图 */
 function scrapeImgsFromHtml(html, origin) {
   if (!html) return [];
   const out = new Set();
@@ -72,40 +69,40 @@ function scrapeImgsFromHtml(html, origin) {
   return [...out].map(u => absolutize(u, origin));
 }
 
-/** 详情页提取 SKU（优先 Artikel-Nr.；显式屏蔽 Prüfziffer/Hersteller） */
-function extractSkuFromDetail($, $root, rawHtml = "") {
-  // 0) 你截图里的强选择器
-  const fromLi = $root.find("li.base-info--entry.entry--sku").first().text().trim();
-  let m0 = fromLi.match(/Artikel\s*[-–—]?\s*Nr\.?\s*[:#]?\s*([A-Za-z0-9._\-\/]+)/i);
-  if (m0 && m0[1] && !looksLikePruef(m0[1])) return m0[1].trim();
+/* ———————— 详情页提取：优先 Artikel-Nr，屏蔽 Prüfziffer/Hersteller ———————— */
 
-  // A) 全页优先抓“Artikel-Nr.”，屏蔽 Prüfziffer / Hersteller
+const LABEL_RE = /(artikel\s*[-–—]?\s*nr|artikelnummer|art\.\s*[-–—]?\s*nr|sku|mpn|modell|model|herstellernummer)/i;
+
+function extractSkuFromDetail($, $root, rawHtml = "") {
+  // 你截图里的 li.base-info--entry.entry--sku
+  const liTxt = $root.find("li.base-info--entry.entry--sku").first().text().trim();
+  let m = liTxt.match(/Artikel\s*[-–—]?\s*Nr\.?\s*[:#]?\s*([A-Za-z0-9._\-\/]+)/i);
+  if (m && m[1] && !looksLikePruef(m[1])) return m[1].trim();
+
+  // A) 强匹配：遍历文本节点，跳过含 Prüfziffer/Hersteller 的节点
   let strong = "";
   $root.find("*").each((_i, el) => {
     const txt = ($(el).text() || "").replace(/\s+/g, " ").trim();
-    if (/Pr[üu]fziffer|Hersteller\b/i.test(txt)) return; // 跳过
-    let m = txt.match(/Artikel\s*[-–—]?\s*Nr\.?\s*[:#]?\s*([A-Za-z0-9._\-\/]+)/i);
-    if (m && m[1]) { strong = m[1].trim(); return false; }
-    m = txt.match(/\b(?:SKU|MPN|Modell|Model|Herstellernummer)\b[^A-Za-z0-9]*([A-Za-z0-9._\-\/]+)/i);
-    if (!strong && m && m[1] && !looksLikePruef(m[1])) { strong = m[1].trim(); return false; }
+    if (!txt) return;
+    if (/Pr[üu]fziffer|Hersteller\b/i.test(txt)) return; // 跳过干扰行
+    let t = txt.match(/(?:Artikel\s*[-–—]?\s*Nr|Artikelnummer|Art\.\s*[-–—]?\s*Nr)\.?\s*[:#]?\s*([A-Za-z0-9._\-\/]+)/i);
+    if (t && t[1] && !looksLikePruef(t[1])) { strong = t[1].trim(); return false; }
   });
   if (strong) return strong;
 
-  // B) JSON-LD / 结构化数据（若是 Prüfziffer 直接丢弃）
+  // B) JSON-LD
   let struct = "";
   $('script[type="application/ld+json"]').each((_i, el) => {
     try {
-      const raw = $(el).contents().text() || "";
-      if (!raw) return;
-      const data = JSON.parse(raw);
-      const walk = (obj) => {
-        if (!obj || typeof obj !== "object") return "";
-        const take = (k) => obj[k] ? String(obj[k]) : "";
+      const data = JSON.parse($(el).contents().text() || "{}");
+      const walk = (o) => {
+        if (!o || typeof o !== "object") return "";
+        const take = (k) => o[k] ? String(o[k]) : "";
         const v = take("sku") || take("mpn") || take("productID") || take("productId");
         if (v) return v;
-        if (Array.isArray(obj)) for (const it of obj) { const r = walk(it); if (r) return r; }
-        if (obj["@graph"]) return walk(obj["@graph"]);
-        if (obj.offers) return walk(obj.offers);
+        if (Array.isArray(o)) for (const it of o) { const r = walk(it); if (r) return r; }
+        if (o["@graph"]) return walk(o["@graph"]);
+        if (o.offers) return walk(o.offers);
         return "";
       };
       const v = walk(data);
@@ -115,9 +112,7 @@ function extractSkuFromDetail($, $root, rawHtml = "") {
   if (struct) return struct;
 
   // C) <dl>/<table>
-  const LABEL_RE = /(artikel\s*[-–—]?\s*nr|sku|mpn|modell|model|herstellernummer)/i;
   let byStruct = "";
-
   $root.find("dl").each((_, dl) => {
     $(dl).find("dt").each((_i2, dt) => {
       const t = $(dt).text().replace(/\s+/g, " ").trim();
@@ -138,40 +133,39 @@ function extractSkuFromDetail($, $root, rawHtml = "") {
   });
   if (byStruct) return byStruct;
 
-  // D) 文本兜底
+  // D) 文本兜底（屏蔽 Prüfziffer）
   const scope = ($root.text() || "") + " " + (rawHtml || "");
   const RE_LIST = [
-    /Artikel\s*[-–—]?\s*Nr\.?\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
+    /(?:Artikel\s*[-–—]?\s*Nr|Artikelnummer|Art\.\s*[-–—]?\s*Nr)\.?\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
     /\bSKU\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
     /\bMPN\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
     /\b(?:Modell|Model)\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
     /\bHerstellernummer\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
   ];
   for (const re of RE_LIST) {
-    const m = scope.match(re);
-    if (m && m[1] && !looksLikePruef(m[1])) return m[1].trim();
+    const r = scope.match(re);
+    if (r && r[1] && !looksLikePruef(r[1])) return r[1].trim();
   }
   return "";
 }
 
-/** 从详情页容忍性地提取 Prüfziffer（仅作为“应急回退”） */
 function extractPruefFromDetail($, $root, rawHtml = "") {
   const t = ($root.text() || "") + " " + (rawHtml || "");
   let m = t.match(/Pr[üu]fziffer\s*[:#]?\s*(\d{6,})/i);
   if (m && m[1]) return m[1].trim();
-  // 有些 JSON-LD 的 sku 就是 Prüfziffer
+
   let v = "";
   $('script[type="application/ld+json"]').each((_i, el) => {
     try {
       const data = JSON.parse($(el).contents().text() || "{}");
-      const walk = (obj) => {
-        if (!obj || typeof obj !== "object") return "";
-        const take = (k) => obj[k] ? String(obj[k]) : "";
+      const walk = (o) => {
+        if (!o || typeof o !== "object") return "";
+        const take = (k) => o[k] ? String(o[k]) : "";
         const s = take("sku") || take("productID") || take("productId");
         if (s) return s;
-        if (Array.isArray(obj)) for (const it of obj) { const r = walk(it); if (r) return r; }
-        if (obj["@graph"]) return walk(obj["@graph"]);
-        if (obj.offers) return walk(obj.offers);
+        if (Array.isArray(o)) for (const it of o) { const r = walk(it); if (r) return r; }
+        if (o["@graph"]) return walk(o["@graph"]);
+        if (o.offers) return walk(o.offers);
         return "";
       };
       const s = walk(data);
@@ -181,7 +175,6 @@ function extractPruefFromDetail($, $root, rawHtml = "") {
   return v || "";
 }
 
-/** 从 href 兜底 (?number= / ?sArticle=) */
 function skuFromHrefParam(u) {
   try {
     const url = new URL(u);
@@ -191,7 +184,8 @@ function skuFromHrefParam(u) {
   return "";
 }
 
-/** 列表卡片读取（SKU 只从“安全来源”；最终由详情覆盖） */
+/* ———————— 列表卡片读取（SKU 先占位，最终统一由详情覆盖） ———————— */
+
 function readListBox($, $box, origin) {
   const title =
     $box.find(".product--title, .product--info a, a[title]").first().text().trim() ||
@@ -229,7 +223,7 @@ function readListBox($, $box, origin) {
     $box.find('.price--default, .product--price, .price--content, .price--unit, [itemprop="price"]')
       .first().text().replace(/\s+/g, " ").trim() || "";
 
-  // —— 列表“安全来源”SKU（严格排除 Prüfziffer）
+  // SKU 占位（严格排除 Prüfziffer；真正值由详情覆盖）
   const probe = (v) => (v && !looksLikePruef(v) ? String(v).trim() : "");
   let sku =
     probe($box.attr("data-ordernumber")) ||
@@ -242,7 +236,6 @@ function readListBox($, $box, origin) {
     probe($box.find("[data-product-ordernumber]").attr("data-product-ordernumber")) ||
     "";
 
-  // 购物按钮里的货号
   if (!sku) {
     sku =
       probe($box.find('form[action*="sAdd"] input[name="sAdd"]').attr("value")) ||
@@ -251,20 +244,19 @@ function readListBox($, $box, origin) {
       "";
   }
 
-  // 文本里的 “Artikel-Nr.”
   if (!sku) {
     const inline = ($box.text() || "").replace(/\s+/g, " ");
-    const m = inline.match(/Artikel\s*[-–—]?\s*Nr\.?\s*[:#]?\s*([A-Za-z0-9._\-\/]+)/i);
+    const m = inline.match(/(?:Artikel\s*[-–—]?\s*Nr|Artikelnummer|Art\.\s*[-–—]?\s*Nr)\.?\s*[:#]?\s*([A-Za-z0-9._\-\/]+)/i);
     if (m && m[1] && !looksLikePruef(m[1])) sku = m[1].trim();
   }
 
-  // 链接参数兜底
   if (!sku) sku = skuFromHrefParam(url);
 
   return { sku, title, url, img, price, currency: "", moq: "" };
 }
 
-/** 小并发执行器（并发 3，稳中求快） */
+/* ———————— 并发 + 重试 ———————— */
+
 async function mapWithLimit(list, limit, worker) {
   let i = 0;
   const n = Math.min(limit, Math.max(list.length, 1));
@@ -272,14 +264,12 @@ async function mapWithLimit(list, limit, worker) {
     while (i < list.length) {
       const cur = list[i++];
       await worker(cur);
-      // 轻微间隔，降低风控概率
       await new Promise(r => setTimeout(r, 220 + Math.floor(Math.random()*220)));
     }
   });
   await Promise.all(runners);
 }
 
-/** 重试 */
 async function withRetry(fn, times = 3, delayMs = 360) {
   let lastErr;
   for (let i = 0; i <= times; i++) {
@@ -290,8 +280,10 @@ async function withRetry(fn, times = 3, delayMs = 360) {
   if (lastErr) throw lastErr;
 }
 
+/* ———————— 入口 ———————— */
+
 export default async function parseMemoryking(input, limitDefault = 50, debugDefault = false) {
-  // ------- 入参 -------
+  // 入参
   let $, pageUrl = "", rawHtml = "", limit = limitDefault, debug = debugDefault;
   if (input && typeof input === "object" && (input.$ || input.rawHtml || input.url || input.limit !== undefined || input.debug !== undefined)) {
     $       = input.$ || input;
@@ -310,7 +302,7 @@ export default async function parseMemoryking(input, limitDefault = 50, debugDef
 
   const items = [];
 
-  // ========== A. 列表页 ==========
+  // A. 列表页
   const isDetail =
     /\/details\//i.test(pageUrl || "") ||
     $(".product--detail, .product--details").length > 0;
@@ -341,7 +333,7 @@ export default async function parseMemoryking(input, limitDefault = 50, debugDef
     });
   }
 
-  // ========== B. 详情页（单条） ==========
+  // B. 单条详情（直接返回一条，SKU 同样做应急回退）
   if (items.length === 0 && isDetail) {
     const $detail = $(".product--details, .product--detail, #content, body");
     const title =
@@ -366,13 +358,13 @@ export default async function parseMemoryking(input, limitDefault = 50, debugDef
         .text().replace(/\s+/g, " ").trim() || "";
 
     let sku = extractSkuFromDetail($, $detail, rawHtml);
-    if (!sku) sku = extractPruefFromDetail($, $detail, rawHtml); // ← 单条也启用应急回退
+    if (!sku) sku = extractPruefFromDetail($, $detail, rawHtml); // 应急回退
 
     const row = { sku, title, url, img, price, currency: "", moq: "" };
     if (row.title || row.url || row.img) return [row];
   }
 
-  // ========== C. 进入详情页并覆盖 SKU ==========
+  // C. 统一进入详情页覆写 SKU（并发 3）
   const headers = {
     "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
     "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -397,13 +389,11 @@ export default async function parseMemoryking(input, limitDefault = 50, debugDef
     const $$ = cheerio.load(html, { decodeEntities: false });
     const $root = $$(".product--details, .product--detail, #content, body");
 
-    // 先 Artikel-Nr.
     let sku = extractSkuFromDetail($$, $root, html);
+    if (!sku) sku = extractPruefFromDetail($$, $root, html); // 最终兜底（不留空）
 
-    // —— 应急回退：实在拿不到，再容忍用 Prüfziffer 顶上，保证不留空
-    if (!sku) sku = extractPruefFromDetail($$, $root, html);
+    if (sku) row.sku = sku.trim();
 
-    if (sku) row.sku = sku.trim();          // ← 用详情统一覆盖
     if (!row.price) {
       const p = $root.find('.price--default, .product--price, .price--content, .price--unit, [itemprop="price"]')
         .first().text().replace(/\s+/g, " ").trim();
@@ -417,6 +407,6 @@ export default async function parseMemoryking(input, limitDefault = 50, debugDef
   });
 
   const out = items.slice(0, limit);
-  if (debug) console.log("[memoryking/v5.0] total=%d sample=%o", out.length, out[0]);
+  if (debug) console.log("[memoryking/v5.1] items=%d sample=%o", out.length, out[0]);
   return out;
 }
