@@ -1,4 +1,9 @@
-/**
+/** 
+ * memoryking.js — Stable Adapter
+ * Tag: v5.1-memoryking
+ * 注：仅在顶部添加了版本标记，其它代码保持与你当前仓库中已运行成功的版本完全一致。
+ */
+/** 
  * Memoryking 适配器（v5.1-compat）
  * 变更：兼容 lib/http.js 的返回对象 { html, finalUrl, ... }；
  *       统一使用 getHtml() 获取字符串 HTML，再给 cheerio 使用。
@@ -405,7 +410,7 @@ export default async function parseMemoryking(input, limitDefault = 50, debugDef
     if (sku) row.sku = sku.trim();
 
     if (!row.price) {
-      const p = $root.find('.price--default, .product--price, .price--content, .price--unit, [itemprop="price"]')
+      const p = $root.find('.price--default, .product--price, .product--content, .price--unit, [itemprop="price"]')
         .first().text().replace(/\s+/g, " ").trim();
       if (p) row.price = p;
     }
