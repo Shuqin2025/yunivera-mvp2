@@ -74,125 +74,150 @@ function extractInlineLabelValue(s) {
   return "";
 }
 
-async function overwriteSkuFromDetailGeneric(items, { takeMax = 30, conc = 6, fetchHtml, headers = {} } = {}) {
-  if (!items?.length || !fetchHtml) return;
+// -------------- 详情页识别 & 详情抽取 --------------
+function isDetailPage($) {
+  // 明确信号：OpenGraph Product
+  const ogType = $('meta[property="og:type"]').attr("content") || "";
+  if (/product/i.test(ogType)) return true;
 
-  const picked = new Set(), jobs = [];
-  for (let i = 0; i < items.length && jobs.length < takeMax; i++) {
-    const it = items[i];
-    if ((!it.sku || looksLikePruef(it.sku)) && it.url) { jobs.push({ i, url: it.url }); picked.add(i); }
-  }
-  for (let i = 0; i < items.length && jobs.length < takeMax; i++) {
-    if (picked.has(i)) continue;
-    const it = items[i];
-    if (it?.url) { jobs.push({ i, url: it.url }); picked.add(i); }
-  }
-  if (!jobs.length) return;
+  // 有明显的商品主标题 + 购买区域
+  const hasH1 = !!$("h1").first().text().trim();
+  const hasBuy = !!($('form[action*="cart" i], form[action*="warenkorb" i]').length ||
+                    $('button, a').filter((_,el) => /in den warenkorb|add to cart/i.test($(el).text())).length);
+  if (hasH1 && hasBuy) return true;
 
-  const cache = (overwriteSkuFromDetailGeneric.__cache ||= new Map());
-  const now = Date.now();
-  for (const [k, v] of cache) if (now - v.ts > 15 * 60_000) cache.delete(k);
+  // 面包屑最后一个是当前商品名（许多德站常见）
+  const $bcLast = $('.breadcrumb li:last, .breadcrumbs li:last, nav[aria-label="breadcrumb"] li:last').last();
+  if ($bcLast.length && $bcLast.find("a").length === 0 && $bcLast.text().trim().length > 0) return true;
 
-  let p = 0;
-  async function worker(){
-    while(p < jobs.length){
-      const { i, url } = jobs[p++];
-      try{
-        let html = "";
-        const c = cache.get(url);
-        if (c && (now - c.ts < 15 * 60_000)) html = c.html;
-        else { html = await fetchHtml(url, { headers }); cache.set(url, { html, ts: Date.now() }); }
-        if (!html) continue;
+  return false;
+}
 
-        const $ = cheerio.load(html);
-        let found = "";
+function extractSkuFromDocument($) {
+  let found = "";
 
-        // Shopware 常见展示块
-        if (!found) {
-          const $blk = $('.entry--sku, .product--ordernumber, .is--ordernumber').first();
-          if ($blk.length) {
-            const raw = text($blk);
-            const inline = extractInlineLabelValue(raw) || raw.replace(/^.*?:\s*/, "");
-            if (inline && !LABEL_BAD.test(raw)) found = inline.trim();
-          }
-        }
-        // itemprop=sku / data-sku / meta[name=sku]
-        if (!found) {
-          const $m = $('[itemprop="sku"],[data-sku],meta[name="sku"],meta[itemprop="sku"]').first();
-          if ($m.length) {
-            const v = $m.attr("content") || $m.attr("data-sku") || text($m);
-            if (v) found = String(v).trim();
-          }
-        }
-        // JSON-LD
-        if (!found) {
-          $('script[type="application/ld+json"]').each((_i, el) => {
-            if (found) return;
-            try{
-              const raw = $(el).contents().text().trim(); if (!raw) return;
-              const data = JSON.parse(raw); const arr = Array.isArray(data) ? data : [data];
-              for (const obj of arr) {
-                const dict = Object.create(null);
-                for (const [k,v] of Object.entries(obj)) {
-                  if (LABEL_BAD.test(k)) continue;
-                  dict[normKey(k)] = v;
-                }
-                for (const want of KEY_PRIORITY) {
-                  if (dict[want]) { const v = String(dict[want]).trim(); if (v) { found = v; break; } }
-                }
-                if (found) break;
-              }
-            }catch{}
-          });
-        }
-        // <dl>/<table>
-        if (!found) {
-          $("dl").each((_, dl) => {
-            if (found) return false;
-            $(dl).find("dt").each((_j, dt) => {
-              const k = text($(dt));
-              if (LABEL_STRONG_FUZZY.test(k) && !LABEL_BAD.test(k)) {
-                const v = text($(dt).next("dd"));
-                if (v) { found = v; return false; }
-                const inline = extractInlineLabelValue(k);
-                if (inline) { found = inline; return false; }
-              }
-            });
-          });
-        }
-        if (!found) {
-          $("table").each((_, tb) => {
-            if (found) return false;
-            $(tb).find("tr").each((_j, tr) => {
-              const $cells = $(tr).find("th,td");
-              const th = text($cells.first());
-              const td = text($cells.last());
-              if (LABEL_STRONG_FUZZY.test(th) && !LABEL_BAD.test(th) && td) { found = td; return false; }
-              const inline = extractInlineLabelValue(th);
-              if (!found && inline) { found = inline; return false; }
-            });
-          });
-        }
-        // 全文兜底
-        if (!found) {
-          const body = $("body").text().replace(/\s+/g," ");
-          const reList = [
-            /(?:Artikel\s*[-–—]?\s*Nr|Artikelnummer|Art\.\s*[-–—]?\s*Nr)\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
-            /\bBestellnummer\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
-            /\bItem\s*no\.?\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
-            /\bSKU\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
-            /\bMPN\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
-          ];
-          for (const re of reList) {
-            const m = body.match(re);
-            if (m && m[1] && !/^prüfziffer/i.test(m[0]) && !looksLikePruef(m[1])) { found = m[1].trim(); break; }
-          }
-        }
-        if (found) items[i].sku = found;
-      }catch{}
+  // Shopware 常见展示
+  if (!found) {
+    const $blk = $('.entry--sku, .product--ordernumber, .is--ordernumber').first();
+    if ($blk.length) {
+      const raw = text($blk);
+      const inline = extractInlineLabelValue(raw) || raw.replace(/^.*?:\s*/, "");
+      if (inline && !LABEL_BAD.test(raw)) found = inline.trim();
     }
   }
-  await Promise.all(Array.from({ length: Math.min(conc, jobs.length) }, worker));
+  // itemprop / data-sku / meta
+  if (!found) {
+    const $m = $('[itemprop="sku"],[data-sku],meta[name="sku"],meta[itemprop="sku"]').first();
+    if ($m.length) {
+      const v = $m.attr("content") || $m.attr("data-sku") || text($m);
+      if (v) found = String(v).trim();
+    }
+  }
+  // JSON-LD
+  if (!found) {
+    $('script[type="application/ld+json"]').each((_i, el) => {
+      if (found) return;
+      try{
+        const raw = $(el).contents().text().trim(); if (!raw) return;
+        const data = JSON.parse(raw); const arr = Array.isArray(data) ? data : [data];
+        for (const obj of arr) {
+          const dict = Object.create(null);
+          for (const [k,v] of Object.entries(obj)) {
+            if (LABEL_BAD.test(k)) continue;
+            dict[normKey(k)] = v;
+          }
+          for (const want of KEY_PRIORITY) {
+            if (dict[want]) { const v = String(dict[want]).trim(); if (v) { found = v; break; } }
+          }
+          if (found) break;
+        }
+      }catch{}
+    });
+  }
+  // <dl>/<table>
+  if (!found) {
+    $("dl").each((_, dl) => {
+      if (found) return false;
+      $(dl).find("dt").each((_j, dt) => {
+        const k = text($(dt));
+        if (LABEL_STRONG_FUZZY.test(k) && !LABEL_BAD.test(k)) {
+          const v = text($(dt).next("dd"));
+          if (v) { found = v; return false; }
+          const inline = extractInlineLabelValue(k);
+          if (inline) { found = inline; return false; }
+        }
+      });
+    });
+  }
+  if (!found) {
+    $("table").each((_, tb) => {
+      if (found) return false;
+      $(tb).find("tr").each((_j, tr) => {
+        const $cells = $(tr).find("th,td");
+        const th = text($cells.first());
+        const td = text($cells.last());
+        if (LABEL_STRONG_FUZZY.test(th) && !LABEL_BAD.test(th) && td) { found = td; return false; }
+        const inline = extractInlineLabelValue(th);
+        if (!found && inline) { found = inline; return false; }
+      });
+    });
+  }
+  // 全文兜底
+  if (!found) {
+    const body = $("body").text().replace(/\s+/g," ");
+    const reList = [
+      /(?:Artikel\s*[-–—]?\s*Nr|Artikelnummer|Art\.\s*[-–—]?\s*Nr)\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
+      /\bBestellnummer\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
+      /\bItem\s*no\.?\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
+      /\bSKU\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
+      /\bMPN\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
+    ];
+    for (const re of reList) {
+      const m = body.match(re);
+      if (m && m[1] && !/^prüfziffer/i.test(m[0]) && !looksLikePruef(m[1])) { found = m[1].trim(); break; }
+    }
+  }
+  return found || "";
+}
+
+function pickDetailImage($, base) {
+  // 先 og:image
+  const og = $('meta[property="og:image"]').attr("content");
+  if (og) return abs(base, og.split("?")[0]);
+  // 再主图容器
+  const $hero = $('.image--container,.product--image,img.product--image,.product-gallery').first();
+  if ($hero.length) {
+    const $img = $hero.find("img").first();
+    const src = $img.attr("data-zoom-image") || $img.attr("data-src") || firstSrcFromSet($img.attr("srcset")) || $img.attr("src");
+    if (src) return abs(base, (src || "").split("?")[0]);
+  }
+  // 兜底
+  return fallbackPickImg($("body"), base);
+}
+
+function parseDetailPage($, pageUrl) {
+  const title =
+    text($('h1.product--title, h1[itemprop="name"], h1.entry--name, h1').first()) ||
+    text($('meta[property="og:title"]').first()) || "";
+
+  const price =
+    text($('.price--content,.price,.product--price,.price--default').first()) ||
+    findPrice($("body"));
+
+  const img = pickDetailImage($, pageUrl);
+  const sku = extractSkuFromDocument($);
+
+  if (!title && !sku) return null;
+
+  return [{
+    sku: sku || guessSkuFromTitle(title),
+    title: title || "",
+    url: cleanUrl(pageUrl, pageUrl),
+    img: img || null,
+    price: price || null,
+    currency: "",
+    moq: ""
+  }];
 }
 
 // ============ 列表解析 ============
@@ -209,6 +234,10 @@ function parseCards($, base, limit) {
   $(CARD_SEL).each((_i, el) => {
     if (items.length >= limit) return false;
     const $card = $(el);
+
+    // 常见「推荐/更多该品牌商品」容器：直接跳过（避免详情页上误抓）
+    if (/(recommend|similar|upsell|cross|weitere|brand-products|related)/i.test(($card.attr("class")||""))) return;
+
     const $a = $card.find("a[href]").filter((_, a) => !BAD_HREF.test(String($(a).attr("href")))).first();
     if (!$a.length) return;
 
@@ -237,6 +266,7 @@ function parseCards($, base, limit) {
     items.push({ sku: guessSkuFromTitle(title), title, url: href, img, price, currency: "", moq: "" });
     seenUrl.add(href); seenTitle.add(titleKey);
   });
+
   return items;
 }
 
@@ -268,6 +298,7 @@ function parseWoo($, base, limit) {
     items.push({ sku: guessSkuFromTitle(title), title, url: href, img, price, currency: "", moq: "" });
     seenTitle.add(titleKey); seenUrl.add(href);
   });
+
   return items;
 }
 
@@ -289,7 +320,10 @@ function parseAnchors($, base, limit) {
     } catch {}
     if (!isDetail) return;
 
+    // 避免推荐区块
     let $card = $a.closest("li,article,div");
+    if (/(recommend|similar|upsell|cross|weitere|brand-products|related)/i.test(($card.attr("class")||""))) return;
+
     if (!$card.length) $card = $a.parent();
 
     let img = pickImg($card, base);
@@ -309,6 +343,7 @@ function parseAnchors($, base, limit) {
     items.push({ sku: guessSkuFromTitle(title), title, url: href, img, price, currency: "", moq: "" });
     seenUrl.add(href); seenTitle.add(titleKey);
   });
+
   return items;
 }
 
@@ -322,7 +357,17 @@ export default async function parseUniversal({ url, limit = 60, debug = false } 
       : async (u, opt = {}) => (await fetch(u, { headers: { "User-Agent": UA, ...(opt.headers || {}) } })).text();
 
   const startHtml = await fetchHtml(url);
+  const $start = cheerio.load(startHtml);
 
+  // 1) 如果这是详情页：只抽主商品，直接返回
+  if (isDetailPage($start)) {
+    const detail = parseDetailPage($start, url) || [];
+    if (debug) console.log(`[universal] detail-mode items=${detail.length} url=${url}`);
+    if (detail.length) return detail;
+    // 若极少数站点 detail 识别失败，才继续走列表兜底
+  }
+
+  // 2) 目录页：按卡片/woo/锚点三路解析
   const parseOne = ($, pageUrl) => {
     const need = limit;
     let part = parseCards($, pageUrl, need);
@@ -341,13 +386,12 @@ export default async function parseUniversal({ url, limit = 60, debug = false } 
     if (!it?.url || !it?.title) continue;
     if (titleLooksLikeJunk(it.title)) continue;
 
-    const u = cleanUrl(it.url, url); // ← 这里已补上右括号
+    const u = cleanUrl(it.url, url);
     const titleKey = it.title.toLowerCase().replace(/\s+/g, " ").trim();
     if (seenUrl.has(u) || seenTitle.has(titleKey)) continue;
 
-    // 统一兜底图片（防止前面解析阶段空图导致被筛掉）
     let img = it.img || "";
-    if (!img) img = ""; // 可以继续增强，但先保证字段存在
+    if (!img) img = "";
 
     items.push({
       sku: it.sku || "",
@@ -363,7 +407,7 @@ export default async function parseUniversal({ url, limit = 60, debug = false } 
     if (items.length >= limit) break;
   }
 
-  // 进入详情页覆写 SKU（强标签），优先修复 Prüfziffer 或短码
+  // 3) 进入详情页覆写 SKU（强标签），优先修复 Prüfziffer 或短码
   await overwriteSkuFromDetailGeneric(items, {
     takeMax: Math.min(30, limit),
     conc: 6,
@@ -372,4 +416,44 @@ export default async function parseUniversal({ url, limit = 60, debug = false } 
   });
 
   return items;
+}
+
+// -------------- 进入详情覆写（并发+缓存） --------------
+async function overwriteSkuFromDetailGeneric(items, { takeMax = 30, conc = 6, fetchHtml, headers = {} } = {}) {
+  if (!items?.length || !fetchHtml) return;
+
+  const picked = new Set(), jobs = [];
+  for (let i = 0; i < items.length && jobs.length < takeMax; i++) {
+    const it = items[i];
+    if ((!it.sku || looksLikePruef(it.sku)) && it.url) { jobs.push({ i, url: it.url }); picked.add(i); }
+  }
+  for (let i = 0; i < items.length && jobs.length < takeMax; i++) {
+    if (picked.has(i)) continue;
+    const it = items[i];
+    if (it?.url) { jobs.push({ i, url: it.url }); picked.add(i); }
+  }
+  if (!jobs.length) return;
+
+  const cache = (overwriteSkuFromDetailGeneric.__cache ||= new Map());
+  const now = Date.now();
+  for (const [k, v] of cache) if (now - v.ts > 15 * 60_000) cache.delete(k);
+
+  let p = 0;
+  async function worker(){
+    while(p < jobs.length){
+      const { i, url } = jobs[p++];
+      try{
+        let html = "";
+        const c = cache.get(url);
+        if (c && (now - c.ts < 15 * 60_000)) html = c.html;
+        else { html = await fetchHtml(url, { headers }); cache.set(url, { html, ts: Date.now() }); }
+        if (!html) continue;
+
+        const $ = cheerio.load(html);
+        const found = extractSkuFromDocument($);
+        if (found) items[i].sku = found;
+      }catch{}
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(conc, jobs.length) }, worker));
 }
