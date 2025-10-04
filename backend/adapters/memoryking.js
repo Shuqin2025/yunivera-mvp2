@@ -1,15 +1,14 @@
 /**
- * Memoryking 适配器（v5.1）
- * 目标：
- *  1) 列表页不误抓 Prüfziffer（如 48680368），只要 Artikel-Nr.
- *  2) 无论列表是否拿到，统一进入详情页，用详情的 Artikel-Nr 覆盖
- *  3) “应急回退”：详情页也拿不到时，才允许用 Prüfziffer 顶上（保证不留空）
+ * Memoryking 适配器（v5.1-compat）
+ * 变更：兼容 lib/http.js 的返回对象 { html, finalUrl, ... }；
+ *       统一使用 getHtml() 获取字符串 HTML，再给 cheerio 使用。
+ *       其余逻辑保持你当前版本不变（列表 → 详情覆写 SKU，排除 Prüfziffer）。
  */
 
 import * as cheerio from "cheerio";
 import { fetchHtml } from "../lib/http.js";
 
-/* ———————— 工具 ———————— */
+/* ---------------- 工具 ---------------- */
 
 const looksLikePruef = (v) => {
   if (!v) return false;
@@ -42,7 +41,7 @@ function bestFromImgNode($, $img, origin) {
   push($img.attr("data-fallbacksrc"));
   splitSrcset($img.attr("srcset")).forEach(push);
   push($img.attr("src"));
-  $img.closest("picture").find("source[srcset]").each((_, el) => {
+  $img.closest("picture").find("source[srcset]").each((_i, el) => {
     splitSrcset(el.attribs?.srcset || "").forEach(push);
   });
 
@@ -69,12 +68,24 @@ function scrapeImgsFromHtml(html, origin) {
   return [...out].map(u => absolutize(u, origin));
 }
 
-/* ———————— 详情页提取：优先 Artikel-Nr，屏蔽 Prüfziffer/Hersteller ———————— */
+// ✅ 兼容 lib/http.js：取字符串 HTML
+async function getHtml(url, opts = {}) {
+  const res = await fetchHtml(url, opts);
+  if (typeof res === "string") return res;
+  if (res && typeof res.html === "string") return res.html;
+  // 兼容 res.buffer（极端情况）
+  if (res && res.buffer && typeof res.buffer.toString === "function") {
+    try { return res.buffer.toString("utf8"); } catch {}
+  }
+  return "";
+}
+
+/* -------- 详情页提取：优先 Artikel-Nr，屏蔽 Prüfziffer/Hersteller -------- */
 
 const LABEL_RE = /(artikel\s*[-–—]?\s*nr|artikelnummer|art\.\s*[-–—]?\s*nr|sku|mpn|modell|model|herstellernummer)/i;
 
 function extractSkuFromDetail($, $root, rawHtml = "") {
-  // 你截图里的 li.base-info--entry.entry--sku
+  // li.base-info--entry.entry--sku
   const liTxt = $root.find("li.base-info--entry.entry--sku").first().text().trim();
   let m = liTxt.match(/Artikel\s*[-–—]?\s*Nr\.?\s*[:#]?\s*([A-Za-z0-9._\-\/]+)/i);
   if (m && m[1] && !looksLikePruef(m[1])) return m[1].trim();
@@ -184,7 +195,7 @@ function skuFromHrefParam(u) {
   return "";
 }
 
-/* ———————— 列表卡片读取（SKU 先占位，最终统一由详情覆盖） ———————— */
+/* --------------- 列表卡片读取（SKU 占位，最终由详情覆盖） --------------- */
 
 function readListBox($, $box, origin) {
   const title =
@@ -255,7 +266,7 @@ function readListBox($, $box, origin) {
   return { sku, title, url, img, price, currency: "", moq: "" };
 }
 
-/* ———————— 并发 + 重试 ———————— */
+/* ---------------- 并发 + 重试 ---------------- */
 
 async function mapWithLimit(list, limit, worker) {
   let i = 0;
@@ -280,7 +291,7 @@ async function withRetry(fn, times = 3, delayMs = 360) {
   if (lastErr) throw lastErr;
 }
 
-/* ———————— 入口 ———————— */
+/* ---------------- 入口 ---------------- */
 
 export default async function parseMemoryking(input, limitDefault = 50, debugDefault = false) {
   // 入参
@@ -380,7 +391,7 @@ export default async function parseMemoryking(input, limitDefault = 50, debugDef
     if (!row || !row.url) return;
 
     const html = await withRetry(
-      () => fetchHtml(row.url, { headers, timeout: 18000 }),
+      () => getHtml(row.url, { headers, timeout: 18000 }),
       3, 360
     ).catch(() => "");
 
@@ -391,7 +402,6 @@ export default async function parseMemoryking(input, limitDefault = 50, debugDef
 
     let sku = extractSkuFromDetail($$, $root, html);
     if (!sku) sku = extractPruefFromDetail($$, $root, html); // 最终兜底（不留空）
-
     if (sku) row.sku = sku.trim();
 
     if (!row.price) {
