@@ -469,6 +469,16 @@ async function parseUniversalCatalog(listUrl, limit = 50, { debug = false } = {}
       return { items, adapter };
     }
 
+    // ✅ akkuman.de → 使用模板适配器（目录→详情覆写 Artikelnummer/SKU）
+    if (/(\.|^)akkuman\.de$/i.test(host)) {
+      adapter = "exampleSite";
+      const html = await fetchHtml(listUrl);
+      const $ = cheerio.load(html, { decodeEntities: false });
+      const parseExample = (await import("./adapters/exampleSite.js")).default;
+      const items = await parseExample({ $, url: listUrl, rawHtml: html, limit, debug });
+      return { items, adapter };
+    }
+
     // ✅ sinotronic-e.com（自动翻页）
     if (host.includes("sinotronic-e.com")) {
       adapter = "sinotronic";
