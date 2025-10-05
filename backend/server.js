@@ -26,9 +26,9 @@ app.get("/v1/api/health", (_req, res) => {
 
 app.get("/v1/api/__version", (_req, res) => {
   res.json({
-    version: "mvp-universal-parse-2025-10-05-memoryking-v5.1-routing+detailSku+beamer-detail",
+    version: "mvp-universal-parse-2025-10-05-memoryking-v5.2-routing+detailSku+beamer-detail",
     note:
-      "Explicit domain routing; beamer-discount detail route; akkuman fast by default; generic detailSku overwrite; s-impuls paging kept; optional translate.",
+      "Explicit domain routing; beamer-discount detail route; beamer list dedupe & 'Zum Produkt' filter; akkuman fast by default; generic detailSku overwrite; s-impuls paging kept.",
   });
 });
 
@@ -447,15 +447,17 @@ async function enrichDetail(item) {
 }
 
 /* ──────────────────────────── 通用详情覆写 SKU（可选） ──────────────────────────── */
+// ★修改点：只认 Artikel-Nr./Artikelnummer/Art.-Nr./Bestellnummer/Item no./Produktnummer/Hersteller-Nr
+//          显式排除 Prüfziffer/Hersteller（纯品牌）/EAN/GTIN
 async function overwriteSkuFromDetailGeneric(items, maxCount = 30) {
-  const LABEL = /^(artikel-?nr\.?|artikelnummer|art\.-?nr\.?|bestellnummer|item\s*(?:no\.?|number))/i;
-  const BAD   = /(prüfziffer|hersteller|manufacturer|brand)/i;
+  const GOOD = /^(artikel-?nr\.?|artikelnummer|art\.-?nr\.?|bestellnummer|item\s*(?:no\.?|number)|produktnummer|hersteller-?nr\.?)$/i;
+  const BAD  = /(prüfziffer|ean|gtin|hersteller(?!-?nr))/i;
 
   const take = Math.min(items.length, maxCount);
   const jobs = [];
   for (let i = 0; i < take; i++) {
     const it = items[i];
-    const hasGoodSku = it.sku && /\b\d{4,}\b/.test(String(it.sku));
+    const hasGoodSku = it.sku && /\b[0-9A-Z][0-9A-Z\-]{2,}\b/.test(String(it.sku));
     if (hasGoodSku || !it.url) continue;
     jobs.push({ i, url: it.url });
   }
@@ -475,7 +477,8 @@ async function overwriteSkuFromDetailGeneric(items, maxCount = 30) {
         const $ = cheerio.load(r.data);
 
         let found = "";
-        // JSON-LD 兜底
+
+        // 1) JSON-LD
         $('script[type="application/ld+json"]').each((_k, el) => {
           try {
             const raw = $(el).contents().text().trim();
@@ -483,25 +486,33 @@ async function overwriteSkuFromDetailGeneric(items, maxCount = 30) {
             const data = JSON.parse(raw);
             const arr  = Array.isArray(data) ? data : [data];
             for (const o of arr) {
-              const kv = Object.entries(o).find(([k]) => LABEL.test(k));
-              if (kv && !BAD.test(kv[0]) && kv[1]) { found = String(kv[1]); break; }
+              for (const [k, v] of Object.entries(o)) {
+                if (GOOD.test(String(k).toLowerCase()) && !BAD.test(String(k).toLowerCase())) {
+                  const val = String(v || "").trim();
+                  if (val) { found = val; break; }
+                }
+              }
+              if (found) break;
             }
           } catch {}
         });
 
+        // 2) label → value
         if (!found) {
-          // label → value
-          $('*:contains("Artikel"), *:contains("Art.-Nr"), *:contains("Bestellnummer"), *:contains("Item")').each((_k, el) => {
-            const txt = ($(el).text() || "").replace(/\s+/g,' ').trim();
-            if (LABEL.test(txt) && !BAD.test(txt)) {
+          $('*:contains("Artikel"), *:contains("Art.-Nr"), *:contains("Artikelnummer"), *:contains("Bestellnummer"), *:contains("Item"), *:contains("Produktnummer"), *:contains("Hersteller-Nr")').each((_k, el) => {
+            const lbl = (($(el).text() || "").replace(/\s+/g,' ').trim()).toLowerCase();
+            if ([ "artikel-nr", "artikelnr", "artikelnummer", "art.-nr", "bestellnummer", "item no", "item number", "produktnummer", "hersteller-nr" ].some(k => lbl.includes(k))) {
+              if (BAD.test(lbl)) return; // 排除 EAN/Prüfziffer/Hersteller
               const val = ($(el).next().text() || $(el).parent().text() || "")
-                           .replace(txt,'').replace(/[:：]/,'').trim();
+                           .replace(/[:：]/,'')
+                           .replace(new RegExp(lbl, "i"), "")
+                           .trim();
               if (val && /\S{3,}/.test(val)) { found = val; return false; }
             }
           });
         }
 
-        if (found) items[i].sku = String(found).trim();
+        if (found) items[i].sku = found;
       } catch {}
     }
   }
@@ -509,11 +520,11 @@ async function overwriteSkuFromDetailGeneric(items, maxCount = 30) {
 }
 
 /* ──────────────────────────── beamer-discount 详情解析 ──────────────────────────── */
+// ★修改点：严格白名单的 SKU 标签 + 排除 EAN/GTIN/Prüfziffer/Hersteller
 async function parseBeamerDetail(detailUrl) {
   const html = await fetchHtml(detailUrl);
   const $ = cheerio.load(html, { decodeEntities: false });
 
-  // 标题
   const title =
     text($("h1, .product-title").first()) ||
     text($('meta[property="og:title"]').first()) ||
@@ -555,9 +566,9 @@ async function parseBeamerDetail(detailUrl) {
   }
   img = abs(detailUrl, (img || "").split("?")[0]);
 
-  // SKU：只认指定标签，显式排除 Prüfziffer / Hersteller / Hersteller-Nr.
-  const GOOD = /^(artikel-?nr\.?|artikelnummer|art\.-?nr\.?|bestellnummer|item\s*(?:no\.?|number))/i;
-  const BAD  = /(prüfziffer|hersteller|hersteller-?nr\.?|manufacturer|brand)/i;
+  // SKU 白名单 / 黑名单
+  const GOOD = /^(artikel-?nr\.?|artikelnummer|art\.-?nr\.?|bestellnummer|item\s*(?:no\.?|number)|produktnummer|hersteller-?nr\.?)$/i;
+  const BAD  = /(prüfziffer|ean|gtin|hersteller(?!-?nr))/i;
 
   let sku = "";
   // 1) JSON-LD
@@ -568,7 +579,8 @@ async function parseBeamerDetail(detailUrl) {
         const arr = Array.isArray(data) ? data : [data];
         for (const o of arr) {
           for (const [k, v] of Object.entries(o)) {
-            if (GOOD.test(k) && !BAD.test(k)) {
+            const key = String(k).toLowerCase();
+            if (GOOD.test(key) && !BAD.test(key)) {
               const s = String(v || "").trim();
               if (s) { sku = s; break; }
             }
@@ -581,8 +593,13 @@ async function parseBeamerDetail(detailUrl) {
   // 2) label → value
   if (!sku) {
     const nodes = $('*, dt, th, .data, .spec, .label').filter((_i, el) => {
-      const t = text($(el));
-      return GOOD.test(t) && !BAD.test(t);
+      const t = text($(el)).toLowerCase();
+      return (
+        (t.includes("artikel-nr") || t.includes("artikelnr") || t.includes("artikelnummer") ||
+         t.includes("art.-nr") || t.includes("bestellnummer") || t.includes("item no") ||
+         t.includes("item number") || t.includes("produktnummer") || t.includes("hersteller-nr"))
+        && !/(prüfziffer|ean|gtin|hersteller(?!-?nr))/.test(t)
+      );
     });
     nodes.each((_i, el) => {
       const t = text($(el));
@@ -594,7 +611,6 @@ async function parseBeamerDetail(detailUrl) {
       if (val && /\S{3,}/.test(val)) { sku = val; return false; }
     });
   }
-  // 3) 兜底：标题中的可疑短码
   if (!sku) sku = guessSkuFromTitle(title);
 
   return [{
@@ -620,7 +636,7 @@ async function parseUniversalCatalog(
     const host = u.hostname;
     const path = u.pathname;
 
-    // ✅ memoryking.de → 强制走专用适配器（支持 debug 透传）
+    // ✅ memoryking.de
     if (host.includes("memoryking.de")) {
       adapter = "memoryking/v5.1";
       const html = await fetchHtml(listUrl);
@@ -629,7 +645,7 @@ async function parseUniversalCatalog(
       return { items, adapter };
     }
 
-    // ✅ example site: newsite.de → 使用模板适配器（仅新增的路由）
+    // （示例）保留你的其它专用适配器
     if (/(\.|^)newsite\.de$/i.test(host)) {
       adapter = "exampleSite";
       const html = await fetchHtml(listUrl);
@@ -639,7 +655,7 @@ async function parseUniversalCatalog(
       return { items, adapter };
     }
 
-    // ✅ beamer-discount.de → 详情页专用解析 + 目录页默认启用 detailSku 覆写
+    // ✅ beamer-discount.de
     if (host.includes("beamer-discount.de")) {
       adapter = "beamer-discount";
       const isDetail = /-\d+(?:\/|$|\?)/.test(path);
@@ -647,25 +663,41 @@ async function parseUniversalCatalog(
         const items = await parseBeamerDetail(listUrl);
         return { items, adapter: "beamer-detail" };
       }
-      // 目录页：先按卡片解析，再默认覆写 SKU（即使没传 detailSku）
+
+      // 目录页：卡片→（默认）详情覆写 SKU，并做去重与“Zum Produkt”过滤
       const html = await fetchHtml(listUrl);
       let $ = cheerio.load(html);
       let items = parseByCardSelectors($, listUrl, limit);
+
       if (!items.length) {
-        // Woo / 通用兜底
         const wc = $("ul.products li.product");
         if (wc.length) items = parseWooFromHtml($, listUrl, limit);
       }
+
       if (items.length) {
+        // ★去掉“Zum Produkt - …”行
+        items = items.filter(it => !/^zum\s+produkt/i.test((it.title || "")));
+
+        // ★URL 去重 & 标题去重
+        const seenUrl = new Set();
+        const seenTitle = new Set();
+        items = items.filter(it => {
+          const keyU = (it.url || "").trim();
+          const keyT = (it.title || "").trim().toLowerCase();
+          if (seenUrl.has(keyU) || (keyT && seenTitle.has(keyT))) return false;
+          if (keyU) seenUrl.add(keyU);
+          if (keyT) seenTitle.add(keyT);
+          return true;
+        });
+
         const n = Math.min(detailSkuMax || 30, limit);
         await overwriteSkuFromDetailGeneric(items, n);
         return { items, adapter: "beamer-list+detailSku" };
       }
-      // 最后退通用流程
+      // 兜底交给通用
     }
 
-    // ✅ akkuman.de → 使用模板适配器（目录→详情覆写 Artikelnummer/SKU），fast 透传
-    // 关键修改：默认使用 fast（不进详情）；只有当 detailSku=1 时才允许进详情覆写
+    // ✅ akkuman.de：默认 fast；只有 detailSku=1 时才进详情覆写（缩短耗时）
     if (/(\.|^)akkuman\.de$/i.test(host)) {
       adapter = "exampleSite";
       const html = await fetchHtml(listUrl);
@@ -673,7 +705,7 @@ async function parseUniversalCatalog(
       const parseExample = (await import("./adapters/exampleSite.js")).default;
 
       const wantsDetail = !!detailSku;
-      const fastEffective = !wantsDetail; // ← **强制**：没开 detailSku 就 fast
+      const fastEffective = !wantsDetail; // ★核心：没开 detailSku 就强制 fast
 
       const items = await parseExample({ $, url: listUrl, rawHtml: html, limit, debug, fast: fastEffective });
       return { items, adapter };
