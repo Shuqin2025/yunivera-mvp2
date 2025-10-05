@@ -1,14 +1,14 @@
-// （完整 server.js，含你现有的所有分支；仅按需补充 detailSku 能力）
+// （完整 server.js，含你现有的所有分支；仅按需补充 beamer-discount 专用解析与 detailSku 能力）
 
 import express from "express";
 import cors from "cors";
 import axios from "axios";
 import * as cheerio from "cheerio";
 
-// ✅ 可选翻译
+// ✅ 可选翻译（保持你原有接口）
 import * as translate from "./lib/translate.js";
 
-// ✅ 站点适配器
+// ✅ 站点适配器（保持你已有）
 import parseMemoryking from "./adapters/memoryking.js";
 import sino from "./adapters/sinotronic.js";
 import parseUniversal from "./adapters/universal.js";
@@ -26,9 +26,9 @@ app.get("/v1/api/health", (_req, res) => {
 
 app.get("/v1/api/__version", (_req, res) => {
   res.json({
-    version: "mvp-universal-parse-2025-10-04-memoryking-v5.1-routing+detailSku",
+    version: "mvp-universal-parse-2025-10-05-memoryking-v5.1-routing+detailSku+beamer-detail",
     note:
-      "Explicit domain routing; akkuman fast passthrough; generic detailSku overwrite (opt-in); aliases kept; optional translate.",
+      "Explicit domain routing; beamer-discount detail route; akkuman fast by default; generic detailSku overwrite; s-impuls paging kept; optional translate.",
   });
 });
 
@@ -475,6 +475,7 @@ async function overwriteSkuFromDetailGeneric(items, maxCount = 30) {
         const $ = cheerio.load(r.data);
 
         let found = "";
+        // JSON-LD 兜底
         $('script[type="application/ld+json"]').each((_k, el) => {
           try {
             const raw = $(el).contents().text().trim();
@@ -507,6 +508,106 @@ async function overwriteSkuFromDetailGeneric(items, maxCount = 30) {
   await Promise.all(Array.from({ length: Math.min(CONC, jobs.length) }, worker));
 }
 
+/* ──────────────────────────── beamer-discount 详情解析 ──────────────────────────── */
+async function parseBeamerDetail(detailUrl) {
+  const html = await fetchHtml(detailUrl);
+  const $ = cheerio.load(html, { decodeEntities: false });
+
+  // 标题
+  const title =
+    text($("h1, .product-title").first()) ||
+    text($('meta[property="og:title"]').first()) ||
+    $("title").text().trim();
+
+  // 价格
+  let price = priceFromJsonLd($);
+  if (!price) {
+    const sel = [
+      ".price, .product-price, .price__value, .price--default",
+      ".amount, .price .amount",
+      "[itemprop='price'], meta[itemprop='price']",
+    ].join(", ");
+    const $p = $(sel).first();
+    const raw = ($p.attr("content") || text($p) || "").trim();
+    if (raw) price = normalizePrice(raw);
+  }
+
+  // 图片：优先 JSON-LD
+  let img = "";
+  $('script[type="application/ld+json"]').each((_i, el) => {
+    try {
+      const data = JSON.parse($(el).contents().text().trim());
+      const arr = Array.isArray(data) ? data : [data];
+      for (const obj of arr) {
+        const t = obj["@type"];
+        const isProduct = t === "Product" || (Array.isArray(t) && t.includes("Product"));
+        if (!isProduct) continue;
+        const im = obj.image;
+        if (typeof im === "string") { img = im; break; }
+        if (Array.isArray(im) && im.length) { img = im[0]; break; }
+      }
+    } catch {}
+  });
+  if (!img) img = $('meta[property="og:image"]').attr("content") || "";
+  if (!img) {
+    const $pic = $(".product-media img, .gallery img, img").first();
+    img = $pic.attr("data-src") || $pic.attr("srcset")?.split(" ").find(s=>/^https?:/i.test(s)) || $pic.attr("src") || "";
+  }
+  img = abs(detailUrl, (img || "").split("?")[0]);
+
+  // SKU：只认指定标签，显式排除 Prüfziffer / Hersteller / Hersteller-Nr.
+  const GOOD = /^(artikel-?nr\.?|artikelnummer|art\.-?nr\.?|bestellnummer|item\s*(?:no\.?|number))/i;
+  const BAD  = /(prüfziffer|hersteller|hersteller-?nr\.?|manufacturer|brand)/i;
+
+  let sku = "";
+  // 1) JSON-LD
+  if (!sku) {
+    $('script[type="application/ld+json"]').each((_i, el) => {
+      try {
+        const data = JSON.parse($(el).contents().text().trim());
+        const arr = Array.isArray(data) ? data : [data];
+        for (const o of arr) {
+          for (const [k, v] of Object.entries(o)) {
+            if (GOOD.test(k) && !BAD.test(k)) {
+              const s = String(v || "").trim();
+              if (s) { sku = s; break; }
+            }
+          }
+          if (sku) break;
+        }
+      } catch {}
+    });
+  }
+  // 2) label → value
+  if (!sku) {
+    const nodes = $('*, dt, th, .data, .spec, .label').filter((_i, el) => {
+      const t = text($(el));
+      return GOOD.test(t) && !BAD.test(t);
+    });
+    nodes.each((_i, el) => {
+      const t = text($(el));
+      const val =
+        ($(el).next().text() || $(el).parent().text() || "")
+          .replace(t, "")
+          .replace(/[:：]/, "")
+          .trim();
+      if (val && /\S{3,}/.test(val)) { sku = val; return false; }
+    });
+  }
+  // 3) 兜底：标题中的可疑短码
+  if (!sku) sku = guessSkuFromTitle(title);
+
+  return [{
+    sku: sku || "",
+    title: title || "",
+    url: detailUrl,
+    img: img || "",
+    price: price || null,
+    currency: "",
+    moq: "",
+  }];
+}
+
 /* ──────────────────────────── 统一入口 ──────────────────────────── */
 async function parseUniversalCatalog(
   listUrl,
@@ -515,7 +616,9 @@ async function parseUniversalCatalog(
 ) {
   let adapter = "generic";
   try {
-    const host = new URL(listUrl).hostname;
+    const u = new URL(listUrl);
+    const host = u.hostname;
+    const path = u.pathname;
 
     // ✅ memoryking.de → 强制走专用适配器（支持 debug 透传）
     if (host.includes("memoryking.de")) {
@@ -534,6 +637,31 @@ async function parseUniversalCatalog(
       const parseExample = (await import("./adapters/exampleSite.js")).default;
       const items = await parseExample({ $, url: listUrl, rawHtml: html, limit, debug });
       return { items, adapter };
+    }
+
+    // ✅ beamer-discount.de → 详情页专用解析 + 目录页默认启用 detailSku 覆写
+    if (host.includes("beamer-discount.de")) {
+      adapter = "beamer-discount";
+      const isDetail = /-\d+(?:\/|$|\?)/.test(path);
+      if (isDetail) {
+        const items = await parseBeamerDetail(listUrl);
+        return { items, adapter: "beamer-detail" };
+      }
+      // 目录页：先按卡片解析，再默认覆写 SKU（即使没传 detailSku）
+      const html = await fetchHtml(listUrl);
+      let $ = cheerio.load(html);
+      let items = parseByCardSelectors($, listUrl, limit);
+      if (!items.length) {
+        // Woo / 通用兜底
+        const wc = $("ul.products li.product");
+        if (wc.length) items = parseWooFromHtml($, listUrl, limit);
+      }
+      if (items.length) {
+        const n = Math.min(detailSkuMax || 30, limit);
+        await overwriteSkuFromDetailGeneric(items, n);
+        return { items, adapter: "beamer-list+detailSku" };
+      }
+      // 最后退通用流程
     }
 
     // ✅ akkuman.de → 使用模板适配器（目录→详情覆写 Artikelnummer/SKU），fast 透传
@@ -732,6 +860,22 @@ async function parseUniversalCatalog(
 
   const wcCards = $("ul.products li.product");
   if (wcCards.length) return { items: parseWooFromHtml($, listUrl, limit), adapter: "woocommerce" };
+
+  // 最后退：简单链接解析（如你的旧版）
+  function parseGenericFromHtml($$, baseUrl, lim) {
+    const out = [];
+    const seen = new Set();
+    $$("a[href]").each((_i, a) => {
+      if (out.length >= lim) return false;
+      const href = abs(baseUrl, $$(a).attr("href") || "");
+      if (!href || seen.has(href)) return;
+      const t = ($$(a).attr("title") || "").trim() || text($$(a));
+      if (!t) return;
+      seen.add(href);
+      out.push({ sku: guessSkuFromTitle(t), title: t, url: href, img: "", price: null, currency: "", moq: "" });
+    });
+    return out;
+  }
 
   return { items: parseGenericFromHtml($, listUrl, limit), adapter: "generic-links" };
 }
