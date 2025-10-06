@@ -453,8 +453,7 @@ async function overwriteSkuFromDetailGeneric(items, maxCount = 30) {
   const GOOD = /^(artikel-?nr\.?|artikelnummer|art\.-?nr\.?|bestellnummer|item\s*(?:no\.?|number)|produktnummer|hersteller-?nr\.?)$/i;
   const BAD  = /(prüfziffer|ean|gtin|hersteller(?!-?nr))/i;
 
-  // 👉 额外判定：纯数字 8/12/13/14 位（EAN/GTIN）都算“不可接受”，必须覆写
-  const looksLikeEan = (s) => /^\d{8}$|^\d{12}$|^\d{13}$|^\d{14}$/.test(String(s||"").trim());
+  // 注意：不按位数排除（避免把 10 位纯数字的 Artikel-Nr 误判为无效）
   const hasEanPrefix = (s) => /^\s*(ean|gtin)\b/i.test(String(s||""));
 
   const take = Math.min(items.length, maxCount);
@@ -462,14 +461,12 @@ async function overwriteSkuFromDetailGeneric(items, maxCount = 30) {
   for (let i = 0; i < take; i++) {
     const it = items[i];
     let raw = String(it.sku || "").trim();
-
-    // 剥掉可能的 "EAN " 前缀后再看
-    raw = raw.replace(/^\s*(ean|gtin)\s*[:：]?\s*/i, "");
+    raw = raw.replace(/^\s*(ean|gtin)\s*[:：]?\s*/i, ""); // 先剥掉 EAN/GTIN 前缀
 
     const looksLikeGenericId = /\b[0-9A-Z][0-9A-Z\-_.\/]{2,}\b/.test(raw);
-    const hasGoodSku = looksLikeGenericId && !looksLikeEan(raw) && !hasEanPrefix(it.sku || "");
+    const hasGoodSku = looksLikeGenericId && !hasEanPrefix(it.sku || "");
 
-    if (hasGoodSku || !it.url) continue;   // 真正“好”的才跳过
+    if (hasGoodSku || !it.url) continue;   // 真“好”就不覆写
     jobs.push({ i, url: it.url });
   }
   if (!jobs.length) return;
@@ -511,26 +508,32 @@ async function overwriteSkuFromDetailGeneric(items, maxCount = 30) {
 
         // 2) label → value
         if (!found) {
-          $('*:contains("Artikel"), *:contains("Art.-Nr"), *:contains("Artikelnummer"), *:contains("Bestellnummer"), *:contains("Item"), *:contains("Produktnummer"), *:contains("Hersteller-Nr")').each((_k, el) => {
-            const lbl = (($(el).text() || "").replace(/\s+/g,' ').trim()).toLowerCase();
-            if ([ "artikel-nr", "artikelnr", "artikelnummer", "art.-nr", "bestellnummer", "item no", "item number", "produktnummer", "hersteller-nr" ].some(k => lbl.includes(k))) {
-              if (BAD.test(lbl)) return; // 排除 EAN/Prüfziffer/Hersteller
-              const val = ($(el).next().text() || $(el).parent().text() || "")
-                           .replace(/[:：]/,'')
-                           .replace(new RegExp(lbl, "i"), "")
-                           .trim();
-              if (val && /\S{3,}/.test(val)) { found = val; return false; }
-            }
+          $('*, dt, th, .data, .spec, .label').each((_k, el) => {
+            const lbl = text($(el)).toLowerCase();
+            const isOk =
+              (lbl.includes("artikel-nr") || lbl.includes("artikelnr") || lbl.includes("artikelnummer") ||
+               lbl.includes("art.-nr") || lbl.includes("bestellnummer") || lbl.includes("item no") ||
+               lbl.includes("item number") || lbl.includes("produktnummer") || lbl.includes("hersteller-nr")) &&
+              !/(prüfziffer|ean|gtin|hersteller(?!-?nr))/.test(lbl);
+            if (!isOk) return;
+
+            const labelText = text($(el));
+            const val =
+              ($(el).next().text() || $(el).parent().text() || "")
+                .replace(labelText, "")
+                .replace(/[:：]/, "")
+                .trim();
+            if (val && /\S{3,}/.test(val)) { found = val; return false; }
           });
         }
 
-        // 3) 兜底：整页文本扫描（白名单标签:值）
+        // 3) 强化兜底：整页文本里优先拿 Artikel-Nr
         if (!found) {
           const page = $("body").text().replace(/\s+/g, " ");
-          const m = page.match(/(Artikel-?Nr\.?|Artikelnummer|Art\.-?Nr\.?|Bestellnummer|Item\s*(?:No\.?|Number)|Produktnummer|Hersteller-?Nr\.?)\s*[:：]?\s*([A-Za-z0-9][A-Za-z0-9\-_.\/]{1,})/i);
-          if (m) {
-            const label = m[1] || "";
-            if (!BAD.test(label)) found = m[2].trim();
+          const mArt = page.match(/(Artikel-?Nr\.?|Artikelnummer|Art\.-?Nr\.?|Bestellnummer|Item\s*(?:No\.?|Number)|Produktnummer|Hersteller-?Nr\.?)\s*[:：]?\s*([A-Za-z0-9][A-Za-z0-9\-_.\/]{1,})/i);
+          if (mArt) {
+            const label = mArt[1] || "";
+            if (!/(prüfziffer|ean|gtin|hersteller(?!-?nr))/i.test(label)) found = mArt[2].trim();
           }
         }
 
@@ -542,7 +545,7 @@ async function overwriteSkuFromDetailGeneric(items, maxCount = 30) {
 }
 
 /* ──────────────────────────── beamer-discount 详情解析 ──────────────────────────── */
-// ★严格白名单的 SKU 标签 + 排除 EAN/GTIN/Prüfziffer/Hersteller，并带整页兜底
+// ★严格白名单的 SKU 标签 + 排除 EAN/GTIN/Prüfziffer/Hersteller，并带“强制改为 Artikel-Nr”兜底
 async function parseBeamerDetail(detailUrl) {
   const html = await fetchHtml(detailUrl);
   const $ = cheerio.load(html, { decodeEntities: false });
@@ -633,13 +636,17 @@ async function parseBeamerDetail(detailUrl) {
       if (val && /\S{3,}/.test(val)) { sku = val; return false; }
     });
   }
-  // 3) 兜底：整页文本扫描（白名单标签:值）
-  if (!sku) {
+  // 3) 兜底：整页文本扫描（优先 Artikel-Nr）——即使先前误拿了 EAN，这里也会被覆盖
+  {
     const page = $("body").text().replace(/\s+/g, " ");
     const m = page.match(/(Artikel-?Nr\.?|Artikelnummer|Art\.-?Nr\.?|Bestellnummer|Item\s*(?:No\.?|Number)|Produktnummer|Hersteller-?Nr\.?)\s*[:：]?\s*([A-Za-z0-9][A-Za-z0-9\-_.\/]{1,})/i);
     if (m) {
       const label = m[1] || "";
-      if (!BAD.test(label)) sku = m[2].trim();
+      const val = (m[2] || "").trim();
+      if (val && !BAD.test(label)) {
+        // 如果当前 sku 看起来像被标成了 EAN/GTIN，或者为空，则用 Artikel-Nr 强制覆盖
+        if (!sku || /^\s*(ean|gtin)\b/i.test(sku)) sku = val;
+      }
     }
   }
   if (!sku) sku = guessSkuFromTitle(title);
