@@ -1,5 +1,3 @@
-// （完整 server.js，含你现有的所有分支；仅按需补充 beamer-discount 专用解析与 detailSku 能力）
-
 import express from "express";
 import cors from "cors";
 import axios from "axios";
@@ -26,9 +24,9 @@ app.get("/v1/api/health", (_req, res) => {
 
 app.get("/v1/api/__version", (_req, res) => {
   res.json({
-    version: "mvp-universal-parse-2025-10-05-memoryking-v5.3-routing+detailSku+beamer-detail",
+    version: "mvp-universal-parse-2025-10-06-beamer-paging-fix-artnr+excel",
     note:
-      "Explicit domain routing; beamer-discount detail route; beamer list dedupe & 'Zum Produkt' filter; akkuman fast by default; generic detailSku overwrite; S-IMPULS paging kept; 强化 beamer/EAN→Artikel-Nr.",
+      "beamer: Artikel-Nr. 详情覆写 + aggressive pagination + dedupe；新增导出 Excel 接口；其余功能不变。",
   });
 });
 
@@ -447,14 +445,11 @@ async function enrichDetail(item) {
 }
 
 /* ──────────────────────────── 通用详情覆写 SKU（可选） ──────────────────────────── */
-// ★只认：Artikel-Nr./Artikelnummer/Art.-Nr./Bestellnummer/Item no./Produktnummer/Hersteller-Nr
-//  明确排除：Prüfziffer / Hersteller（纯品牌）/ EAN / GTIN
+// 只认：Artikel-Nr./Artikelnummer/Art.-Nr./Bestellnummer/Item no./Produktnummer/Hersteller-Nr
+// 排除：Prüfziffer / Hersteller（纯品牌）/ EAN / GTIN
 async function overwriteSkuFromDetailGeneric(items, maxCount = 30) {
   const GOOD = /^(artikel-?nr\.?|artikelnummer|art\.-?nr\.?|bestellnummer|item\s*(?:no\.?|number)|produktnummer|hersteller-?nr\.?)$/i;
   const BAD  = /(prüfziffer|ean|gtin|hersteller(?!-?nr))/i;
-
-  // 👉 额外判定：纯数字 8/12/13/14 位（EAN/GTIN）都算“不可接受”，必须覆写
-  const looksLikeEan = (s) => /^\d{8}$|^\d{12}$|^\d{13}$|^\d{14}$/.test(String(s||"").trim());
   const hasEanPrefix = (s) => /^\s*(ean|gtin)\b/i.test(String(s||""));
 
   const take = Math.min(items.length, maxCount);
@@ -462,14 +457,10 @@ async function overwriteSkuFromDetailGeneric(items, maxCount = 30) {
   for (let i = 0; i < take; i++) {
     const it = items[i];
     let raw = String(it.sku || "").trim();
-
-    // 剥掉可能的 "EAN " 前缀后再看
     raw = raw.replace(/^\s*(ean|gtin)\s*[:：]?\s*/i, "");
-
     const looksLikeGenericId = /\b[0-9A-Z][0-9A-Z\-_.\/]{2,}\b/.test(raw);
-    const hasGoodSku = looksLikeGenericId && !looksLikeEan(raw) && !hasEanPrefix(it.sku || "");
-
-    if (hasGoodSku || !it.url) continue;   // 真正“好”的才跳过
+    const hasGoodSku = looksLikeGenericId && !hasEanPrefix(it.sku || "");
+    if (hasGoodSku || !it.url) continue;
     jobs.push({ i, url: it.url });
   }
   if (!jobs.length) return;
@@ -486,7 +477,6 @@ async function overwriteSkuFromDetailGeneric(items, maxCount = 30) {
           timeout: TIMEOUT, validateStatus: s => s >= 200 && s < 400
         });
         const $ = cheerio.load(r.data);
-
         let found = "";
 
         // 1) JSON-LD
@@ -511,26 +501,32 @@ async function overwriteSkuFromDetailGeneric(items, maxCount = 30) {
 
         // 2) label → value
         if (!found) {
-          $('*:contains("Artikel"), *:contains("Art.-Nr"), *:contains("Artikelnummer"), *:contains("Bestellnummer"), *:contains("Item"), *:contains("Produktnummer"), *:contains("Hersteller-Nr")').each((_k, el) => {
-            const lbl = (($(el).text() || "").replace(/\s+/g,' ').trim()).toLowerCase();
-            if ([ "artikel-nr", "artikelnr", "artikelnummer", "art.-nr", "bestellnummer", "item no", "item number", "produktnummer", "hersteller-nr" ].some(k => lbl.includes(k))) {
-              if (BAD.test(lbl)) return; // 排除 EAN/Prüfziffer/Hersteller
-              const val = ($(el).next().text() || $(el).parent().text() || "")
-                           .replace(/[:：]/,'')
-                           .replace(new RegExp(lbl, "i"), "")
-                           .trim();
-              if (val && /\S{3,}/.test(val)) { found = val; return false; }
-            }
+          $('*, dt, th, .data, .spec, .label').each((_k, el) => {
+            const lbl = text($(el)).toLowerCase();
+            const isOk =
+              (lbl.includes("artikel-nr") || lbl.includes("artikelnr") || lbl.includes("artikelnummer") ||
+               lbl.includes("art.-nr") || lbl.includes("bestellnummer") || lbl.includes("item no") ||
+               lbl.includes("item number") || lbl.includes("produktnummer") || lbl.includes("hersteller-nr")) &&
+              !/(prüfziffer|ean|gtin|hersteller(?!-?nr))/.test(lbl);
+            if (!isOk) return;
+
+            const labelText = text($(el));
+            const val =
+              ($(el).next().text() || $(el).parent().text() || "")
+                .replace(labelText, "")
+                .replace(/[:：]/, "")
+                .trim();
+            if (val && /\S{3,}/.test(val)) { found = val; return false; }
           });
         }
 
-        // 3) 兜底：整页文本扫描（白名单标签:值）
+        // 3) 强化兜底：整页文本里优先拿 Artikel-Nr
         if (!found) {
           const page = $("body").text().replace(/\s+/g, " ");
-          const m = page.match(/(Artikel-?Nr\.?|Artikelnummer|Art\.-?Nr\.?|Bestellnummer|Item\s*(?:No\.?|Number)|Produktnummer|Hersteller-?Nr\.?)\s*[:：]?\s*([A-Za-z0-9][A-Za-z0-9\-_.\/]{1,})/i);
-          if (m) {
-            const label = m[1] || "";
-            if (!BAD.test(label)) found = m[2].trim();
+          const mArt = page.match(/(Artikel-?Nr\.?|Artikelnummer|Art\.-?Nr\.?|Bestellnummer|Item\s*(?:No\.?|Number)|Produktnummer|Hersteller-?Nr\.?)\s*[:：]?\s*([A-Za-z0-9][A-Za-z0-9\-_.\/]{1,})/i);
+          if (mArt) {
+            const label = mArt[1] || "";
+            if (!/(prüfziffer|ean|gtin|hersteller(?!-?nr))/i.test(label)) found = mArt[2].trim();
           }
         }
 
@@ -541,8 +537,94 @@ async function overwriteSkuFromDetailGeneric(items, maxCount = 30) {
   await Promise.all(Array.from({ length: Math.min(CONC, jobs.length) }, worker));
 }
 
-/* ──────────────────────────── beamer-discount 详情解析 ──────────────────────────── */
-// ★严格白名单的 SKU 标签 + 排除 EAN/GTIN/Prüfziffer/Hersteller，并带整页兜底
+/* ──────────────────────────── beamer-discount 专用：详情覆写 SKU ──────────────────────────── */
+async function overwriteSkuFromBeamerDetail(items, maxCount = 30) {
+  const GOODLBL = /(Artikel-?Nr\.?|Artikelnummer|Art\.-?Nr\.?|Bestellnummer|Produktnummer|Item\s*(?:No\.?|Number)|Hersteller-?Nr\.?)/i;
+  const BADLBL  = /(prüfziffer|ean|gtin|hersteller(?!-?nr))/i;
+
+  const take = Math.min(items.length, maxCount);
+  const jobs = [];
+  for (let i = 0; i < take; i++) {
+    const it = items[i];
+    if (!it?.url) continue;
+    jobs.push({ i, url: it.url, initial: String(it.sku || "") });
+  }
+  if (!jobs.length) return;
+
+  const CONC = 8, TIMEOUT = 12000;
+  let p = 0;
+
+  async function worker() {
+    while (p < jobs.length) {
+      const { i, url, initial } = jobs[p++];
+      try {
+        const r = await axios.get(url, {
+          headers: { "User-Agent": UA, "Accept-Language": "de,en;q=0.8" },
+          timeout: TIMEOUT, validateStatus: s => s >= 200 && s < 400
+        });
+        const $ = cheerio.load(r.data, { decodeEntities: false });
+
+        let found = "";
+
+        // A) 常见位置：技术数据/表格（dt/th + dd/td）
+        $("dt,th,.data,.spec,.label,li,div,p").each((_k, el) => {
+          if (found) return false;
+          const t = text($(el));
+          if (!t) return;
+          // 同节点：例如 “Artikel-Nr.: 1090066”
+          const mInline = t.match(/(Artikel-?Nr\.?|Artikelnummer|Art\.-?Nr\.?|Bestellnummer|Produktnummer|Item\s*(?:No\.?|Number)|Hersteller-?Nr\.?)\s*[:：]?\s*([A-Za-z0-9][A-Za-z0-9\-_.\/]{1,})/i);
+          if (mInline && !BADLBL.test(mInline[1] || "")) {
+            found = mInline[2].trim();
+            return false;
+          }
+          // 分离节点：label 在 el，值在 next()
+          if (GOODLBL.test(t) && !BADLBL.test(t)) {
+            const v = text($(el).next());
+            if (v && !/^\s*(ean|gtin)\b/i.test(v)) {
+              found = v;
+              return false;
+            }
+          }
+        });
+
+        // B) JSON-LD 键名兜底（有些站把 Artikel-Nr 放到 mpn/sku）
+        if (!found) {
+          $('script[type="application/ld+json"]').each((_i, el) => {
+            if (found) return false;
+            try {
+              const data = JSON.parse($(el).contents().text().trim());
+              const arr = Array.isArray(data) ? data : [data];
+              for (const obj of arr) {
+                const cand = obj?.mpn || obj?.sku || obj?.productID || "";
+                if (cand && !/^\s*(ean|gtin)\b/i.test(String(cand))) {
+                  found = String(cand).trim();
+                  break;
+                }
+              }
+            } catch {}
+          });
+        }
+
+        // C) 全页文本兜底（优先 Artikel-Nr）
+        if (!found) {
+          const page = $("body").text().replace(/\s+/g, " ");
+          const m = page.match(/(Artikel-?Nr\.?|Artikelnummer|Art\.-?Nr\.?|Bestellnummer|Produktnummer|Item\s*(?:No\.?|Number)|Hersteller-?Nr\.?)\s*[:：]?\s*([A-Za-z0-9][A-Za-z0-9\-_.\/]{1,})/i);
+          if (m && !BADLBL.test(m[1] || "")) found = m[2].trim();
+        }
+
+        // 覆写规则：如果找到 Artikel-Nr，则强制覆盖；否则保持原值
+        if (found) items[i].sku = found;
+        else {
+          // 去掉开头的 "EAN "
+          items[i].sku = String(initial).replace(/^\s*ean\s*[:：]?\s*/i, "").trim() || initial;
+        }
+      } catch {}
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(CONC, jobs.length) }, worker));
+}
+
+/* ──────────────────────────── beamer-discount 详情解析（保持原样供详情页直抓） ──────────────────────────── */
 async function parseBeamerDetail(detailUrl) {
   const html = await fetchHtml(detailUrl);
   const $ = cheerio.load(html, { decodeEntities: false });
@@ -565,7 +647,7 @@ async function parseBeamerDetail(detailUrl) {
     if (raw) price = normalizePrice(raw);
   }
 
-  // 图片：优先 JSON-LD
+  // 图片
   let img = "";
   $('script[type="application/ld+json"]').each((_i, el) => {
     try {
@@ -584,63 +666,50 @@ async function parseBeamerDetail(detailUrl) {
   if (!img) img = $('meta[property="og:image"]').attr("content") || "";
   if (!img) {
     const $pic = $(".product-media img, .gallery img, img").first();
-    img = $pic.attr("data-src") || $pic.attr("srcset")?.split(" ").find(s=>/^https?:/i.test(s)) || $pic.attr("src") || "";
+    img = $pic.attr("data-src") || ($pic.attr("srcset")||"").split(" ").find(s=>/^https?:/i.test(s)) || $pic.attr("src") || "";
   }
   img = abs(detailUrl, (img || "").split("?")[0]);
 
-  // SKU 白名单 / 黑名单
-  const GOOD = /^(artikel-?nr\.?|artikelnummer|art\.-?nr\.?|bestellnummer|item\s*(?:no\.?|number)|produktnummer|hersteller-?nr\.?)$/i;
+  // SKU（尽量拿 Artikel-Nr）
+  const GOOD = /(Artikel-?Nr\.?|Artikelnummer|Art\.-?Nr\.?|Bestellnummer|Produktnummer|Item\s*(?:No\.?|Number)|Hersteller-?Nr\.?)/i;
   const BAD  = /(prüfziffer|ean|gtin|hersteller(?!-?nr))/i;
-
   let sku = "";
-  // 1) JSON-LD
+
+  // A) label 同节点
+  $("dt,th,.data,.spec,.label,li,div,p").each((_k, el) => {
+    if (sku) return false;
+    const t = text($(el));
+    const mInline = t.match(/(Artikel-?Nr\.?|Artikelnummer|Art\.-?Nr\.?|Bestellnummer|Produktnummer|Item\s*(?:No\.?|Number)|Hersteller-?Nr\.?)\s*[:：]?\s*([A-Za-z0-9][A-Za-z0-9\-_.\/]{1,})/i);
+    if (mInline && !BAD.test(mInline[1] || "")) {
+      sku = mInline[2].trim();
+      return false;
+    }
+    if (GOOD.test(t) && !BAD.test(t)) {
+      const v = text($(el).next());
+      if (v && !/^\s*(ean|gtin)\b/i.test(v)) { sku = v; return false; }
+    }
+  });
+
+  // B) JSON-LD 候选
   if (!sku) {
     $('script[type="application/ld+json"]').each((_i, el) => {
+      if (sku) return false;
       try {
         const data = JSON.parse($(el).contents().text().trim());
         const arr = Array.isArray(data) ? data : [data];
         for (const o of arr) {
-          for (const [k, v] of Object.entries(o)) {
-            const key = String(k).toLowerCase();
-            if (GOOD.test(key) && !BAD.test(key)) {
-              const s = String(v || "").trim();
-              if (s) { sku = s; break; }
-            }
-          }
-          if (sku) break;
+          const cand = o?.mpn || o?.sku || o?.productID || "";
+          if (cand && !/^\s*(ean|gtin)\b/i.test(String(cand))) { sku = String(cand).trim(); break; }
         }
       } catch {}
     });
   }
-  // 2) label → value
-  if (!sku) {
-    const nodes = $('*, dt, th, .data, .spec, .label').filter((_i, el) => {
-      const t = text($(el)).toLowerCase();
-      return (
-        (t.includes("artikel-nr") || t.includes("artikelnr") || t.includes("artikelnummer") ||
-         t.includes("art.-nr") || t.includes("bestellnummer") || t.includes("item no") ||
-         t.includes("item number") || t.includes("produktnummer") || t.includes("hersteller-nr"))
-        && !/(prüfziffer|ean|gtin|hersteller(?!-?nr))/.test(t)
-      );
-    });
-    nodes.each((_i, el) => {
-      const labelText = text($(el));
-      const val =
-        ($(el).next().text() || $(el).parent().text() || "")
-          .replace(labelText, "")
-          .replace(/[:：]/, "")
-          .trim();
-      if (val && /\S{3,}/.test(val)) { sku = val; return false; }
-    });
-  }
-  // 3) 兜底：整页文本扫描（白名单标签:值）
+
+  // C) 全页兜底
   if (!sku) {
     const page = $("body").text().replace(/\s+/g, " ");
-    const m = page.match(/(Artikel-?Nr\.?|Artikelnummer|Art\.-?Nr\.?|Bestellnummer|Item\s*(?:No\.?|Number)|Produktnummer|Hersteller-?Nr\.?)\s*[:：]?\s*([A-Za-z0-9][A-Za-z0-9\-_.\/]{1,})/i);
-    if (m) {
-      const label = m[1] || "";
-      if (!BAD.test(label)) sku = m[2].trim();
-    }
+    const m = page.match(/(Artikel-?Nr\.?|Artikelnummer|Art\.-?Nr\.?|Bestellnummer|Produktnummer|Item\s*(?:No\.?|Number)|Hersteller-?Nr\.?)\s*[:：]?\s*([A-Za-z0-9][A-Za-z0-9\-_.\/]{1,})/i);
+    if (m && !BAD.test(m[1] || "")) sku = m[2].trim();
   }
   if (!sku) sku = guessSkuFromTitle(title);
 
@@ -676,7 +745,7 @@ async function parseUniversalCatalog(
       return { items, adapter };
     }
 
-    // （示例）保留你的其它专用适配器
+    // （示例）其它专用适配器保持不动
     if (/(\.|^)newsite\.de$/i.test(host)) {
       adapter = "exampleSite";
       const html = await fetchHtml(listUrl);
@@ -688,47 +757,131 @@ async function parseUniversalCatalog(
 
     // ✅ beamer-discount.de
     if (host.includes("beamer-discount.de")) {
-      adapter = "beamer-discount";
       const isDetail = /-\d+(?:\/|$|\?)/.test(path);
       if (isDetail) {
         const items = await parseBeamerDetail(listUrl);
         return { items, adapter: "beamer-detail" };
       }
 
-      // 目录页：卡片→（默认）详情覆写 SKU，并做去重与“Zum Produkt”过滤
-      const html = await fetchHtml(listUrl);
-      let $ = cheerio.load(html);
-      let items = parseByCardSelectors($, listUrl, limit);
+      // 目录页：抓取 + 分页 + 去重 + 详情覆写 SKU（Artikel-Nr）
+      const out = [];
+      const seenUrl = new Set();
+      const seenTitle = new Set();
 
-      if (!items.length) {
-        const wc = $("ul.products li.product");
-        if (wc.length) items = parseWooFromHtml($, listUrl, limit);
-      }
+      async function harvest(pageUrl) {
+        const html = await fetchHtml(pageUrl);
+        const $ = cheerio.load(html);
+        let part = parseByCardSelectors($, pageUrl, limit - out.length);
+        if (!part.length) {
+          const wc = $("ul.products li.product");
+          if (wc.length) part = parseWooFromHtml($, pageUrl, limit - out.length);
+        }
+        // 过滤“Zum Produkt …”
+        part = (part || []).filter(it => !/^zum\s+produkt/i.test((it.title || "")));
 
-      if (items.length) {
-        // ★去掉“Zum Produkt - …”行
-        items = items.filter(it => !/^zum\s+produkt/i.test((it.title || "")));
-
-        // ★URL 去重 & 标题去重
-        const seenUrl = new Set();
-        const seenTitle = new Set();
-        items = items.filter(it => {
+        // 去重
+        for (const it of part) {
           const keyU = (it.url || "").trim();
           const keyT = (it.title || "").trim().toLowerCase();
-          if (seenUrl.has(keyU) || (keyT && seenTitle.has(keyT))) return false;
-          if (keyU) seenUrl.add(keyU);
+          if (!keyU || seenUrl.has(keyU) || (keyT && seenTitle.has(keyT))) continue;
+          seenUrl.add(keyU);
           if (keyT) seenTitle.add(keyT);
-          return true;
-        });
-
-        const n = Math.min(detailSkuMax || 30, limit);
-        await overwriteSkuFromDetailGeneric(items, n);
-        return { items, adapter: "beamer-list+detailSku" };
+          out.push(it);
+          if (out.length >= limit) break;
+        }
+        return $;
       }
-      // 兜底交给通用
+
+      // 第 1 页
+      let $ = await harvest(listUrl);
+
+      // 找分页
+      const pageSet = new Map(); // n -> url
+      const addPage = (href) => {
+        if (!href) return;
+        const full = abs(listUrl, href);
+        try {
+          const u = new URL(full);
+          let n =
+            parseInt(
+              u.searchParams.get("page") ||
+                u.searchParams.get("p") ||
+                u.searchParams.get("seite") ||
+                "",
+              10
+            ) || 0;
+          if (!n) {
+            const m = u.pathname.match(/\/page\/(\d+)/i);
+            if (m) n = parseInt(m[1], 10) || 0;
+          }
+          if (n && n > 1 && !pageSet.has(n)) pageSet.set(n, u.href);
+        } catch {}
+      };
+      $(".pagination a[href], nav.pagination a[href], .page-numbers a[href], .pager a[href]").each((_i, a) => addPage($(a).attr("href")));
+
+      // 若页面未给出分页链接，主动猜测 ?page=?p=/page/
+      const maxPages = 20;
+      const visited = new Set();
+      const makeCandidates = (base, n) => {
+        const u = new URL(base);
+        const sep = u.search ? "&" : "?";
+        return [
+          `${u.origin}${u.pathname}${u.search}${sep}page=${n}${u.hash}`,
+          `${u.origin}${u.pathname}${u.search}${sep}p=${n}${u.hash}`,
+          `${u.origin}${u.pathname.replace(/\/$/, "")}/page/${n}${u.search}${u.hash}`,
+        ];
+      };
+
+      if (pageSet.size > 0) {
+        const pages = [...pageSet.entries()].sort((a,b)=>a[0]-b[0]).map(([,href])=>href);
+        for (const pageUrl of pages) {
+          if (out.length >= limit) break;
+          if (visited.has(pageUrl)) continue;
+          visited.add(pageUrl);
+          $ = await harvest(pageUrl);
+        }
+      } else {
+        let n = 2;
+        let progressed = true;
+        while (n <= maxPages && out.length < limit && progressed) {
+          progressed = false;
+          for (const tryUrl of makeCandidates(listUrl, n)) {
+            if (visited.has(tryUrl)) continue;
+            visited.add(tryUrl);
+            let html = "";
+            try { html = await fetchHtml(tryUrl); } catch {}
+            if (!html) continue;
+            const $$ = cheerio.load(html);
+            let part = parseByCardSelectors($$, tryUrl, limit - out.length);
+            if (!part.length) {
+              const wc = $$("ul.products li.product");
+              if (wc.length) part = parseWooFromHtml($$, tryUrl, limit - out.length);
+            }
+            part = (part || []).filter(it => !/^zum\s+produkt/i.test((it.title || "")));
+            let add = 0;
+            for (const it of part) {
+              const keyU = (it.url || "").trim();
+              const keyT = (it.title || "").trim().toLowerCase();
+              if (!keyU || seenUrl.has(keyU) || (keyT && seenTitle.has(keyT))) continue;
+              seenUrl.add(keyU);
+              if (keyT) seenTitle.add(keyT);
+              out.push(it); add++;
+              if (out.length >= limit) break;
+            }
+            if (add) { progressed = true; break; }
+          }
+          n += 1;
+        }
+      }
+
+      // 详情覆写 SKU（Artikel-Nr.）
+      const n = Math.min(detailSkuMax || 30, limit);
+      await overwriteSkuFromBeamerDetail(out, n);
+
+      return { items: out, adapter: "beamer-list+paging+detailSku" };
     }
 
-    // ✅ akkuman.de：默认 fast；只有 detailSku=1 时才进详情覆写（缩短耗时）
+    // ✅ akkuman.de（保持你的策略）
     if (/(\.|^)akkuman\.de$/i.test(host)) {
       adapter = "exampleSite";
       const html = await fetchHtml(listUrl);
@@ -736,7 +889,7 @@ async function parseUniversalCatalog(
       const parseExample = (await import("./adapters/exampleSite.js")).default;
 
       const wantsDetail = !!detailSku;
-      const fastEffective = !wantsDetail; // ★核心：没开 detailSku 就强制 fast
+      const fastEffective = !wantsDetail;
 
       const items = await parseExample({ $, url: listUrl, rawHtml: html, limit, debug, fast: fastEffective });
       return { items, adapter };
@@ -787,7 +940,7 @@ async function parseUniversalCatalog(
       return { items: out, adapter };
     }
 
-    // ✅ s-impuls-shop.de（自动翻页，健壮版）
+    // ✅ s-impuls-shop.de（保持原逻辑）
     if (host.includes("s-impuls-shop.de")) {
       adapter = "s-impuls-shop";
       const maxPages = 50;
@@ -851,7 +1004,7 @@ async function parseUniversalCatalog(
       if (pageSet.size === 0) {
         let n = 2;
         let lastFirst = firstKey(out);
-        while (n <= maxPages && out.length < limit) {
+        while (n <= 50 && out.length < limit) {
           let advanced = false;
           for (const tryUrl of makeCandidates(listUrl, n)) {
             if (visited.has(tryUrl)) continue;
@@ -889,7 +1042,7 @@ async function parseUniversalCatalog(
       for (const pageUrl of pages) {
         if (out.length >= limit) break;
         if (visited.has(pageUrl)) continue;
-        $ = await harvest(pageUrl);
+        await harvest(pageUrl);
       }
 
       return { items: out, adapter };
@@ -924,7 +1077,7 @@ async function parseUniversalCatalog(
   const wcCards = $("ul.products li.product");
   if (wcCards.length) return { items: parseWooFromHtml($, listUrl, limit), adapter: "woocommerce" };
 
-  // 最后退：简单链接解析（如你的旧版）
+  // 最后退：简单链接解析
   function parseGenericFromHtml($$, baseUrl, lim) {
     const out = [];
     const seen = new Set();
@@ -1123,6 +1276,95 @@ app.get(["/v1/api/catalog", "/v1/api/catalog.json", "/v1/api/catalog/parse.json"
     res,
     () => {}
   )
+);
+
+/* ──────────────────────────── API: 导出 Excel ──────────────────────────── */
+// 兼容多条导出路径，前端“Excel exportieren (.xlsx)”可直接命中
+app.get(
+  [
+    "/v1/api/catalog/export.xlsx",
+    "/v1/api/export.xlsx",
+    "/v1/api/catalog/xlsx",
+    "/v1/api/xlsx",
+  ],
+  async (req, res) => {
+    const listUrl =
+      String(req.query.url ?? req.query.u ?? req.query.link ?? req.query.l ?? "").trim();
+    const limit = Math.max(1, Math.min(parseInt(String(req.query.limit || "200"), 10) || 200, 1000));
+    // 透传 detailSku 等参数，确保 beamer 的 Artikel-Nr. 也在导出里正确
+    const debug = /^(1|true|yes|on)$/i.test(String(req.query.debug || ""));
+    const fast  = /^(1|true|yes|on)$/i.test(String(req.query.fast || ""));
+    const detailSku = /^(1|true|yes|on)$/i.test(String(req.query.detailSku || "1"));
+    const detailSkuMax = Math.min(
+      parseInt(String(req.query.detailSkuMax || "30"), 10) || 30,
+      limit
+    );
+
+    if (!listUrl) return res.status(400).json({ ok: false, error: "missing url" });
+
+    try {
+      const { items } = await parseUniversalCatalog(listUrl, limit, {
+        debug, fast, detailSku, detailSkuMax
+      });
+
+      const header = ["#", "Artikel-Nr.", "Bild", "Beschreibung", "MOQ", "Einzelpreis", "Link"];
+      const rows = [header];
+      for (let i = 0; i < items.length; i++) {
+        const it = items[i] || {};
+        rows.push([
+          i + 1,
+          it.sku || "",
+          it.img || "",
+          it.title || "",
+          it.moq || "",
+          it.price || "",
+          it.url || "",
+        ]);
+      }
+
+      // 优先尝试 SheetJS 生成 .xlsx；若模块不存在则降级为 CSV（Excel 可直接打开）
+      let XLSX;
+      try {
+        XLSX = await import("xlsx");
+      } catch {}
+
+      if (XLSX && XLSX.utils && XLSX.write) {
+        const wb = XLSX.utils.book_new();
+        const ws = XLSX.utils.aoa_to_sheet(rows);
+        XLSX.utils.book_append_sheet(wb, ws, "Katalog");
+        const buf = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+        res.setHeader(
+          "Content-Type",
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        );
+        res.setHeader("Content-Disposition", 'attachment; filename="catalog.xlsx"');
+        return res.send(buf);
+      }
+
+      // Fallback: CSV（UTF-8 带 BOM，避免德文变成乱码）
+      const toCsv = (arr) =>
+        "\uFEFF" +
+        arr
+          .map((row) =>
+            row
+              .map((v) => {
+                const s = String(v ?? "");
+                const needsQuote = /[",;\n\r]/.test(s);
+                return needsQuote ? `"${s.replace(/"/g, '""')}"` : s;
+              })
+              .join(",")
+          )
+          .join("\r\n");
+
+      const csv = toCsv(rows);
+      res.setHeader("Content-Type", "text/csv; charset=utf-8");
+      res.setHeader("Content-Disposition", 'attachment; filename="catalog.csv"');
+      return res.send(csv);
+    } catch (e) {
+      console.error("[export:xlsx] fail:", e?.message || e);
+      return res.status(500).json({ ok: false, error: String(e?.message || e) });
+    }
+  }
 );
 
 /* ──────────────────────────── listen ──────────────────────────── */
