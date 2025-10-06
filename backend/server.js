@@ -28,7 +28,7 @@ app.get("/v1/api/__version", (_req, res) => {
   res.json({
     version: "mvp-universal-parse-2025-10-05-memoryking-v5.3-routing+detailSku+beamer-detail",
     note:
-      "Explicit domain routing; beamer-discount detail route; beamer list dedupe & 'Zum Produkt' filter; akkuman fast by default; generic detailSku overwrite; s-impuls paging kept; EAN/GTIN no longer blocks detail overwrite.",
+      "Explicit domain routing; beamer-discount detail route; beamer list dedupe & 'Zum Produkt' filter; akkuman fast by default; generic detailSku overwrite; S-IMPULS paging kept; 强化 beamer/EAN→Artikel-Nr.",
   });
 });
 
@@ -461,11 +461,13 @@ async function overwriteSkuFromDetailGeneric(items, maxCount = 30) {
   const jobs = [];
   for (let i = 0; i < take; i++) {
     const it = items[i];
-    const raw = String(it.sku || "").trim();
+    let raw = String(it.sku || "").trim();
 
-    // 之前的“好看”逻辑会把 EAN 当真，这里修正：只要像 EAN/GTIN 就视为“不合格”
-    const looksLikeGenericId = /\b[0-9A-Z][0-9A-Z\-]{2,}\b/.test(raw);
-    const hasGoodSku = looksLikeGenericId && !looksLikeEan(raw) && !hasEanPrefix(raw);
+    // 剥掉可能的 "EAN " 前缀后再看
+    raw = raw.replace(/^\s*(ean|gtin)\s*[:：]?\s*/i, "");
+
+    const looksLikeGenericId = /\b[0-9A-Z][0-9A-Z\-_.\/]{2,}\b/.test(raw);
+    const hasGoodSku = looksLikeGenericId && !looksLikeEan(raw) && !hasEanPrefix(it.sku || "");
 
     if (hasGoodSku || !it.url) continue;   // 真正“好”的才跳过
     jobs.push({ i, url: it.url });
@@ -522,6 +524,16 @@ async function overwriteSkuFromDetailGeneric(items, maxCount = 30) {
           });
         }
 
+        // 3) 兜底：整页文本扫描（白名单标签:值）
+        if (!found) {
+          const page = $("body").text().replace(/\s+/g, " ");
+          const m = page.match(/(Artikel-?Nr\.?|Artikelnummer|Art\.-?Nr\.?|Bestellnummer|Item\s*(?:No\.?|Number)|Produktnummer|Hersteller-?Nr\.?)\s*[:：]?\s*([A-Za-z0-9][A-Za-z0-9\-_.\/]{1,})/i);
+          if (m) {
+            const label = m[1] || "";
+            if (!BAD.test(label)) found = m[2].trim();
+          }
+        }
+
         if (found) items[i].sku = found;
       } catch {}
     }
@@ -530,7 +542,7 @@ async function overwriteSkuFromDetailGeneric(items, maxCount = 30) {
 }
 
 /* ──────────────────────────── beamer-discount 详情解析 ──────────────────────────── */
-// ★严格白名单的 SKU 标签 + 排除 EAN/GTIN/Prüfziffer/Hersteller
+// ★严格白名单的 SKU 标签 + 排除 EAN/GTIN/Prüfziffer/Hersteller，并带整页兜底
 async function parseBeamerDetail(detailUrl) {
   const html = await fetchHtml(detailUrl);
   const $ = cheerio.load(html, { decodeEntities: false });
@@ -612,14 +624,23 @@ async function parseBeamerDetail(detailUrl) {
       );
     });
     nodes.each((_i, el) => {
-      const t = text($(el));
+      const labelText = text($(el));
       const val =
         ($(el).next().text() || $(el).parent().text() || "")
-          .replace(t, "")
+          .replace(labelText, "")
           .replace(/[:：]/, "")
           .trim();
       if (val && /\S{3,}/.test(val)) { sku = val; return false; }
     });
+  }
+  // 3) 兜底：整页文本扫描（白名单标签:值）
+  if (!sku) {
+    const page = $("body").text().replace(/\s+/g, " ");
+    const m = page.match(/(Artikel-?Nr\.?|Artikelnummer|Art\.-?Nr\.?|Bestellnummer|Item\s*(?:No\.?|Number)|Produktnummer|Hersteller-?Nr\.?)\s*[:：]?\s*([A-Za-z0-9][A-Za-z0-9\-_.\/]{1,})/i);
+    if (m) {
+      const label = m[1] || "";
+      if (!BAD.test(label)) sku = m[2].trim();
+    }
   }
   if (!sku) sku = guessSkuFromTitle(title);
 
