@@ -578,7 +578,7 @@ async function overwriteSkuFromBeamerDetail(items, maxCount = 30) {
             return false;
           }
           if (GOODLBL.test(t) && !BADLBL.test(t)) {
-            const v = text($(el).next()));
+            const v = text($(el).next());
             if (v && !/^\s*(ean|gtin)\b/i.test(v)) {
               found = v;
               return false;
