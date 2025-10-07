@@ -24,9 +24,9 @@ app.get("/v1/api/health", (_req, res) => {
 
 app.get("/v1/api/__version", (_req, res) => {
   res.json({
-    version: "mvp-universal-parse-2025-10-06-beamer-paging-fix-artnr+excel-r1",
+    version: "mvp-universal-parse-2025-10-07-bilingual-export-r1",
     note:
-      "修复 /v1/api/image64 递归导致的栈溢出；补充 /v1/api/catalog.xlsx 别名；其余功能不变。",
+      "新增导出Excel双语/多语列：bilingual=de-en/cn-en/zh-en 或 translate=en|zh；其余功能不变。",
   });
 });
 
@@ -578,7 +578,7 @@ async function overwriteSkuFromBeamerDetail(items, maxCount = 30) {
             return false;
           }
           if (GOODLBL.test(t) && !BADLBL.test(t)) {
-            const v = text($(el).next());
+            const v = text($(el).next()));
             if (v && !/^\s*(ean|gtin)\b/i.test(v)) {
               found = v;
               return false;
@@ -1264,6 +1264,111 @@ app.get(["/v1/api/catalog", "/v1/api/catalog.json", "/v1/api/catalog/parse.json"
 );
 
 /* ──────────────────────────── API: 导出 Excel ──────────────────────────── */
+/** 分批翻译，避免触发 DeepL free 的并发/配额限制 */
+async function translateListInBatches(texts = [], target = "EN", batchSize = 40) {
+  const out = new Array(texts.length).fill("");
+  if (!Array.isArray(texts) || !texts.length) return out;
+  const use = (translate && typeof translate.translateBatch === "function");
+
+  for (let i = 0; i < texts.length; i += batchSize) {
+    const slice = texts.slice(i, i + batchSize);
+    try {
+      const arr = use ? await translate.translateBatch(slice, target) : slice;
+      for (let k = 0; k < slice.length; k++) out[i + k] = arr[k] || slice[k] || "";
+    } catch (e) {
+      console.warn("[translate:batch fail]", target, e?.message || e);
+      for (let k = 0; k < slice.length; k++) out[i + k] = slice[k] || "";
+    }
+  }
+  return out;
+}
+
+const langLabel = (code) => {
+  const c = String(code || "").toUpperCase();
+  if (c === "DE") return "Beschreibung (DE)";
+  if (c === "EN") return "Description (EN)";
+  if (c === "ZH" || c === "CN") return "描述 (CN)";
+  return `Text (${c})`;
+};
+const normalizeLang = (s) => {
+  const v = String(s || "").trim().toLowerCase();
+  if (!v) return "";
+  if (v === "cn" || v === "zh-cn" || v === "zh") return "ZH";
+  if (v === "en" || v === "en-us" || v === "en-gb") return "EN";
+  if (v === "de") return "DE";
+  return v.toUpperCase();
+};
+
+/** 根据参数构建 rows（含双语/多语列） */
+async function buildRowsWithTranslations(items, { bilingual, translateOne }) {
+  const rows = [];
+  const desc = items.map((it) => it.title || "");
+
+  const pair = String(bilingual || "").trim().toLowerCase();
+  if (pair && pair.includes("-")) {
+    const [aRaw, bRaw] = pair.split("-").map(normalizeLang);
+    const A = aRaw || "DE";
+    const B = bRaw || "EN";
+
+    let colA = [];
+    if (A === "DE") colA = desc;
+    else colA = await translateListInBatches(desc, A);
+
+    const colB = await translateListInBatches(desc, B);
+
+    rows.push(["#", "Artikel-Nr.", "Bild", langLabel(A), langLabel(B), "MOQ", "Einzelpreis", "Link"]);
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i] || {};
+      rows.push([
+        i + 1,
+        it.sku || "",
+        it.img || "",
+        colA[i] || "",
+        colB[i] || "",
+        it.moq || "",
+        it.price || "",
+        it.url || "",
+      ]);
+    }
+    return rows;
+  }
+
+  const one = normalizeLang(translateOne);
+  if (one === "EN" || one === "ZH" || one === "DE") {
+    const tArr = await translateListInBatches(desc, one);
+    rows.push(["#", "Artikel-Nr.", "Bild", "Beschreibung", langLabel(one), "MOQ", "Einzelpreis", "Link"]);
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i] || {};
+      rows.push([
+        i + 1,
+        it.sku || "",
+        it.img || "",
+        desc[i] || "",
+        tArr[i] || "",
+        it.moq || "",
+        it.price || "",
+        it.url || "",
+      ]);
+    }
+    return rows;
+  }
+
+  rows.push(["#", "Artikel-Nr.", "Bild", "Beschreibung", "MOQ", "Einzelpreis", "Link"]);
+  for (let i = 0; i < items.length; i++) {
+    const it = items[i] || {};
+    rows.push([
+      i + 1,
+      it.sku || "",
+      it.img || "",
+      desc[i] || "",
+      it.moq || "",
+      it.price || "",
+      it.url || "",
+    ]);
+  }
+  return rows;
+}
+
 // 兼容多条导出路径，前端“Excel exportieren (.xlsx)”可直接命中
 app.get(
   [
@@ -1271,13 +1376,12 @@ app.get(
     "/v1/api/export.xlsx",
     "/v1/api/catalog/xlsx",
     "/v1/api/xlsx",
-    "/v1/api/catalog.xlsx", // ← 新增常见别名
+    "/v1/api/catalog.xlsx",
   ],
   async (req, res) => {
     const listUrl =
       String(req.query.url ?? req.query.u ?? req.query.link ?? req.query.l ?? "").trim();
     const limit = Math.max(1, Math.min(parseInt(String(req.query.limit || "200"), 10) || 200, 1000));
-    // 透传 detailSku 等参数，确保 beamer 的 Artikel-Nr. 也在导出里正确
     const debug = /^(1|true|yes|on)$/i.test(String(req.query.debug || ""));
     const fast  = /^(1|true|yes|on)$/i.test(String(req.query.fast || ""));
     const detailSku = /^(1|true|yes|on)$/i.test(String(req.query.detailSku || "1"));
@@ -1286,6 +1390,10 @@ app.get(
       limit
     );
 
+    // 新增：翻译相关参数
+    const bilingual = String(req.query.bilingual || "").trim(); // e.g. "de-en" / "cn-en"
+    const translateOne = String(req.query.translate || req.query.t || "").trim(); // e.g. "en"
+
     if (!listUrl) return res.status(400).json({ ok: false, error: "missing url" });
 
     try {
@@ -1293,20 +1401,7 @@ app.get(
         debug, fast, detailSku, detailSkuMax
       });
 
-      const header = ["#", "Artikel-Nr.", "Bild", "Beschreibung", "MOQ", "Einzelpreis", "Link"];
-      const rows = [header];
-      for (let i = 0; i < items.length; i++) {
-        const it = items[i] || {};
-        rows.push([
-          i + 1,
-          it.sku || "",
-          it.img || "",
-          it.title || "",
-          it.moq || "",
-          it.price || "",
-          it.url || "",
-        ]);
-      }
+      const rows = await buildRowsWithTranslations(items, { bilingual, translateOne });
 
       let XLSX;
       try {
