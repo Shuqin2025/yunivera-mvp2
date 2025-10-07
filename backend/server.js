@@ -11,6 +11,9 @@ import parseMemoryking from "./adapters/memoryking.js";
 import sino from "./adapters/sinotronic.js";
 import parseUniversal from "./adapters/universal.js";
 
+// ✅ 结构类型检测器（新增）
+import { detectStructure } from "./lib/structureDetector.js";
+
 const app = express();
 app.use(cors({ origin: "*", exposedHeaders: ["X-Lang", "X-Adapter"] }));
 
@@ -24,9 +27,9 @@ app.get("/v1/api/health", (_req, res) => {
 
 app.get("/v1/api/__version", (_req, res) => {
   res.json({
-    version: "mvp-universal-parse-2025-10-07-bilingual-export-r1",
+    version: "mvp-universal-parse-2025-10-07-struct-detector-r1",
     note:
-      "新增导出Excel双语/多语列：bilingual=de-en/cn-en/zh-en 或 translate=en|zh；其余功能不变。",
+      "新增 /v1/api/detect 结构类型检测API；其余功能不变。",
   });
 });
 
@@ -112,6 +115,19 @@ function priceFromJsonLd($) {
   }
   return "";
 }
+
+/* ──────────────────────────── 结构类型检测 API（新增） ──────────────────────────── */
+app.get("/v1/api/detect", async (req, res) => {
+  const listUrl = String(req.query.url || req.query.u || "").trim();
+  if (!listUrl) return res.status(400).json({ ok: false, error: "missing url" });
+  try {
+    const html = await fetchHtml(listUrl);
+    const result = detectStructure(html, listUrl);
+    res.json({ ok: true, url: listUrl, ...result });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
 
 /* ──────────────────────────── image proxy ──────────────────────────── */
 // 抽成公共处理，避免路由递归
@@ -1009,7 +1025,6 @@ async function parseUniversalCatalog(
                 visited.add(tryUrl);
                 lastFirst = fk || lastFirst;
                 advanced = true;
-                break;
               }
             }
           }
