@@ -1096,6 +1096,28 @@ async function parseUniversalCatalog(
   return { items: parseGenericFromHtml($, listUrl, limit), adapter: "generic-links" };
 }
 
+
+/* ──────────────────────────── Smart dispatch (auto-detect → delegate) ──────────────────────────── */
+/**
+ * Minimal & safe: detect structure, then delegate to existing parseUniversalCatalog.
+ * We do NOT change output shape. Other features remain intact.
+ */
+async function parseCatalogSmart(listUrl, limit, options = {}) {
+  let detected = null;
+  try {
+    // reuse existing fetchHtml + detectStructure (already imported)
+    const html = await fetchHtml(listUrl);
+    detected = detectStructure(html, listUrl);
+  } catch {}
+  // delegate to your established universal flow
+  const out = await parseUniversalCatalog(listUrl, limit, options);
+  // Optionally attach detected type in adapter tag for observability (no response shape change needed)
+  if (out && out.adapter && detected && detected.type) {
+    out.adapter = `${out.adapter}|det:${detected.type}`;
+  }
+  return out;
+}
+
 /* ──────────────────────────── API: 解析 ──────────────────────────── */
 app.get("/v1/api/catalog/parse", async (req, res) => {
   const listUrl =
@@ -1145,7 +1167,7 @@ app.get("/v1/api/catalog/parse", async (req, res) => {
 
   const t0 = Date.now();
   try {
-    const { items, adapter } = await parseUniversalCatalog(listUrl, limit, {
+    const { items, adapter } = await parseCatalogSmart(listUrl, limit, {
       debug, fast, detailSku, detailSkuMax
     });
 
