@@ -1,74 +1,99 @@
 // backend/lib/structureDetector.js
-// Detect German e‑commerce site structure by lightweight heuristics.
-// Export as a NAMED function to match: `import { detectStructure } from "./lib/structureDetector.js";`
+// 轻量级结构识别（Shopify / WooCommerce / Shopware / Magento / Static / Unknown）
+import * as cheerio from "cheerio";
 
-/**
- * @param {string} html  The raw HTML string of a list (category/collection) page
- * @param {string} [url] Optional URL of the page (used only for hints)
- * @returns {{type: 'Shopify'|'WooCommerce'|'Shopware'|'Magento'|'Unknown', confidence: number, signals: string[]}}
- */
-export function detectStructure(html = '', url = '') {
-  const src = String(html || '');
-  const u = String(url || '');
+// 检测规则：只做必要信号，避免误报；可按需再扩展
+const RULES = [
+  {
+    type: "Shopify",
+    hints: [
+      /cdn\.shopify\.com/i,
+      /shopify-section/i,
+      /window\.Shopify/i,
+      /Shopify\.theme/i,
+      /\/products\.json/i,
+    ],
+  },
+  {
+    type: "WooCommerce",
+    hints: [
+      /woocommerce/i, // body 类名常见
+      /wp-content\/plugins\/woocommerce/i,
+      /woocommerce-loop-product/i,
+      /add_to_cart_button/i,
+    ],
+  },
+  {
+    type: "Shopware",
+    hints: [
+      /product--box/i,          // Shopware 列表项常见类
+      /shopware/i,              // meta / 资源路径等
+      /themes\/Frontend/i,     
+      /data-variant-id/i,
+    ],
+  },
+  {
+    type: "Magento",
+    hints: [
+      /Magento/i,
+      /data-mage-init/i,
+      /product-item/i,
+      /Magento_Catalog/i,
+    ],
+  },
+];
 
-  // Collect signals
-  const sig = [];
+// 输入可以是 HTML 字符串或 cheerio 实例
+export function detectStructure(input) {
+  let $;
 
-  // ---------- Shopify ----------
-  // Typical markers: cdn.shopify.com assets, shopify-section, window.Shopify, /collections/ URLs
-  let scoreShopify = 0;
-  if (/cdn\.shopify\.com\//i.test(src)) { scoreShopify += 2; sig.push('cdn.shopify.com'); }
-  if (/shopify-section|theme--cart|Shopify\.theme|window\.Shopify/i.test(src)) { scoreShopify += 2; sig.push('shopify-section/window.Shopify'); }
-  if (/\/collections\//i.test(u) || /\/collections\//i.test(src)) { scoreShopify += 1; sig.push('collections URL'); }
-  if (/"@type"\s*:\s*"ProductCollection"/i.test(src)) { scoreShopify += 1; sig.push('ProductCollection JSON-LD'); }
+  if (typeof input === "string") {
+    try {
+      $ = cheerio.load(input);
+    } catch (e) {
+      return { type: "Unknown", confidence: 0, signals: ["load_error"] };
+    }
+  } else if (input && typeof input.root === "function") {
+    // 已经是 cheerio 实例
+    $ = input;
+  } else {
+    return { type: "Unknown", confidence: 0, signals: ["invalid_input"] };
+  }
 
-  // ---------- WooCommerce ----------
-  // Typical markers: 'woocommerce' classes, wp-content/plugins/woocommerce, add-to-cart forms
-  let scoreWoo = 0;
-  if (/woocommerce|woo\-commerce/i.test(src)) { scoreWoo += 2; sig.push('class: woocommerce'); }
-  if (/wp\-content\/plugins\/woocommerce/i.test(src)) { scoreWoo += 2; sig.push('wp-content/plugins/woocommerce'); }
-  if (/name=["']add-to-cart["']/i.test(src)) { scoreWoo += 1; sig.push('form add-to-cart'); }
-  if (/\/product-category\//i.test(u) || /woocommerce\.min\.js/i.test(src)) { scoreWoo += 1; sig.push('woocommerce.js/category'); }
+  const html = $.html ? $.html() : String(input);
 
-  // ---------- Shopware (5/6) ----------
-  // Typical markers: meta generator, sw- classes, storefront assets, window.Shopware
-  let scoreShopware = 0;
-  if (/meta[^>]+name=["']generator["'][^>]+content=["']Shopware/i.test(src)) { scoreShopware += 3; sig.push('meta generator=Shopware'); }
-  if (/\bShopware\b/i.test(src)) { scoreShopware += 1; sig.push('string "Shopware"'); }
-  if (/\bsw\-|sw6\-|js\-listing|is--ctl-listing|is--act-listing/i.test(src)) { scoreShopware += 2; sig.push('sw-/listing classes'); }
-  if (/\/bundles\/storefront\/|\/themes\/Frontend\/|window\.Shopware/i.test(src)) { scoreShopware += 1; sig.push('storefront assets'); }
+  // 逐类计算命中数
+  const scores = RULES.map((rule) => {
+    let hit = 0;
+    const matched = [];
+    for (const r of rule.hints) {
+      if (r.test(html)) {
+        hit++;
+        matched.push(r.source || String(r));
+      }
+    }
+    return { type: rule.type, score: hit, signals: matched };
+  }).sort((a, b) => b.score - a.score);
 
-  // ---------- Magento (2.x) ----------
-  // Typical markers: data-mage-init, requirejs/knockout, Magento_Catalog, luma theme assets
-  let scoreMagento = 0;
-  if (/data-mage-init|data-bind="scope:|Magento_Catalog|mage\/validation/i.test(src)) { scoreMagento += 2; sig.push('data-mage-init / Magento_Catalog'); }
-  if (/\/static\/version|requirejs\/require\.js|knockout-?\w*\.js/i.test(src)) { scoreMagento += 2; sig.push('static/version or requirejs/knockout'); }
-  if (/meta[^>]+name=["']generator["'][^>]+content=["']Magento/i.test(src)) { scoreMagento += 2; sig.push('meta generator=Magento'); }
-  if (/\/collections\/|\/category\/|\/catalog\/category\/view/i.test(u + ' ' + src)) { scoreMagento += 1; sig.push('catalog/category'); }
+  let best = scores[0];
 
-  // Normalize & pick best
-  const scores = [
-    ['Shopify', scoreShopify],
-    ['WooCommerce', scoreWoo],
-    ['Shopware', scoreShopware],
-    ['Magento', scoreMagento],
-  ] as const;
+  // 若没命中已知平台，尝试 Static 目录页的粗略特征
+  if (!best || best.score === 0) {
+    const cardCount = $('[class*="product"],[class*="item"]').length;
+    const priceLike = (html.match(/€\s?\d|USD|\$\s?\d|Preis|€\d/gi) || []).length;
 
-  scores.sort((a, b) => b[1] - a[1]);
-  const [bestType, bestScore] = scores[0];
+    if (cardCount > 8 && priceLike > 8) {
+      best = { type: "Static", score: 1, signals: ["basic HTML"] };
+    } else {
+      best = { type: "Unknown", score: 0, signals: [] };
+    }
+  }
 
-  // Confidence: map score to 0..1
-  const max = Math.max(1, scores[0][1] + scores[1][1] / 4);
-  const confidence = Math.max(0, Math.min(1, bestScore / max));
+  const maxHints =
+    (RULES.find((r) => r.type === best.type)?.hints.length) || 1;
+  const confidence = Math.min(1, best.score / maxHints);
 
-  const type = bestScore > 0 ? (bestType as any) : 'Unknown';
-
-  // Keep unique signals (dedupe)
-  const signals = Array.from(new Set(sig));
-
-  return { type, confidence, signals };
+  return { type: best.type, confidence, signals: best.signals };
 }
 
-// Default export (optional) for flexibility when imported as default
-export default { detectStructure };
-
+export default detectStructure;
