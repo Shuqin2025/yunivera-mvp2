@@ -1423,7 +1423,83 @@ app.get(
         XLSX = await import("xlsx");
       } catch {}
 
-      if (XLSX && XLSX.utils && XLSX.write) {
+      // === 优先尝试：使用 exceljs 真实嵌入位图（兼容老版 Excel） ===
+        try {
+          const ExcelJS = await import('exceljs').then(m => m.default || m);
+          const wb2 = new ExcelJS.Workbook();
+          const ws2 = wb2.addWorksheet('Katalog');
+
+          // 写表头
+          const header = rows[0] || [];
+          ws2.addRow(header);
+
+          // 列宽设置
+          const colWidths = [6,16,22,60,18,14,12,24];
+          for (let i = 0; i < colWidths.length; i++) {
+            if (!ws2.getColumn(i+1)) continue;
+            ws2.getColumn(i+1).width = colWidths[i];
+          }
+
+          // 行数据 + 图片嵌入
+          const idxImg = 2; // 第3列：图片
+          const origin = `${req.protocol}://${req.get('host')}`;
+          for (let r = 1; r < rows.length; r++) {
+            const row = rows[r];
+            ws2.addRow(row);
+            const excelRow = ws2.getRow(r+1);
+            // 行高加大，便于显示图
+            excelRow.height = 84;
+
+            const url = (row[idxImg] || '').toString();
+            if (url && /^https?:/i.test(url)) {
+              const proxied = `${origin}/v1/api/image?url=${encodeURIComponent(url)}`;
+              // 下载图片为 Buffer（通过你的代理，避免防盗链）
+              try {
+                const resp = await axios.get(proxied, {
+                  responseType: 'arraybuffer',
+                  timeout: 20000,
+                  validateStatus: s => s >= 200 && s < 400,
+                  headers: { 'User-Agent': "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36", Accept: 'image/avif,image/webp,image/*,*/*;q=0.8' }
+                });
+                const buf = Buffer.from(resp.data);
+                const ct = (resp.headers && resp.headers['content-type']) || 'image/jpeg';
+                const ext = /png/i.test(ct) ? 'png' : 'jpeg';
+                const imageId = wb2.addImage({ buffer: buf, extension: ext });
+                const colIdx = idxImg + 1; // excel 列号从 1 开始（图片列是第3列）
+                ws2.addImage(imageId, {
+                  tl: { col: colIdx-1 + 0.1, row: r + 0.1 },
+                  br: { col: colIdx-1 + 0.9, row: r + 0.9 },
+                  editAs: 'oneCell',
+                });
+                // 清空单元格原文字，避免和图片重叠
+                ws2.getCell(r+1, colIdx).value = '';
+              } catch (e) {
+                // 插图失败就保留原始 URL 文本作为兜底
+              }
+            }
+
+            // 链接列做成超链接（如果存在）
+            const linkIndex = header.findIndex(h => /link|链接/i.test(String(h||'')));
+            if (linkIndex >= 0) {
+              const l = (row[linkIndex] || '').toString();
+              if (/^https?:/i.test(l)) {
+                ws2.getCell(r+1, linkIndex+1).value = { text: '链接', hyperlink: l };
+              }
+            }
+          }
+
+          // 生成 xlsx buffer
+          const outBuf = await wb2.xlsx.writeBuffer();
+          res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+          res.setHeader('Content-Disposition', 'attachment; filename="catalog.xlsx"');
+          res.setHeader('Cache-Control', 'no-store');
+          return res.send(Buffer.from(outBuf));
+        } catch (e) {
+          console.warn('[export:exceljs-embed] not available or failed:', e?.message || e);
+        }
+        // === 继续 fallback：使用 SheetJS + IMAGE() 公式（新 Excel 可见） ===
+
+        if (XLSX && XLSX.utils && XLSX.write) {
         const wb = XLSX.utils.book_new();
         const ws = XLSX.utils.aoa_to_sheet(rows);
         
@@ -1510,4 +1586,4 @@ XLSX.utils.book_append_sheet(wb, ws, "Katalog");
 
 /* ──────────────────────────── listen ──────────────────────────── */
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`[mvp2-backend] listening on :${PORT}`));
+app.listen(PORT, () => console.log(`[mvp2-backend] listening on :${PORT}`))
