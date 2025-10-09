@@ -22,6 +22,9 @@ app.get("/v1/api/health", (_req, res) => {
   res.json({ ok: true, status: "up", ts: Date.now() });
 });
 
+
+/* ──────────────────────────── plain health (compat) ──────────────────────────── */
+app.get("/v1/health", (_req, res) => res.type("text/plain").send("OK"));
 app.get("/v1/api/__version", (_req, res) => {
   res.json({
     version: "mvp-universal-parse-2025-10-06-beamer-paging-fix-artnr",
@@ -179,6 +182,55 @@ function parseMagentoCatalog($, listUrl, limit = 50) {
   }
   return "";
 }
+
+
+/* ──────────────────────────── detect (Shopify/Woo/Shopware/Magento) ──────────────────────────── */
+app.get("/v1/api/detect", async (req, res) => {
+  const listUrl = String(req.query.url || req.query.u || "").trim();
+  if (!listUrl) return res.status(400).json({ ok: false, error: "missing url" });
+  try {
+    const html = await fetchHtml(listUrl);
+    const $ = cheerio.load(html, { decodeEntities: false });
+    const signals = [];
+    const add = (cond, s) => { if (cond) signals.push(s); };
+
+    // Shopify
+    add(/cdn\.shopify\.com/i.test(html), "cdn\.shopify\.com");
+    add(/shopify-section/i.test(html), "shopify-section");
+    add(/window\.Shopify/i.test(html), "window\.Shopify");
+    add(/Shopify\.theme/i.test(html), "Shopify\.theme");
+    const isShopify = signals.some(s => /shopify/i.test(s));
+
+    // WooCommerce
+    const isWoo = /woocommerce/i.test(html)
+      || $('link[href*="woocommerce"], script[src*="woocommerce"], img[src*="woocommerce"]').length > 0
+      || $('ul.products li.product').length > 1
+      || /wp-content\/plugins\/woocommerce/i.test(html);
+
+    // Shopware / Magento via existing helpers
+    const sw = looksLikeShopware($);
+    const mg = looksLikeMagento($);
+    if (sw) signals.push("Shopware meta/generator or product--box");
+    if (mg) signals.push("Magento generator or .product-item");
+
+    let type = "Unknown";
+    let confidence = 0.4;
+    if (isShopify) { type = "Shopify"; confidence = 0.8; }
+    else if (isWoo) { type = "WooCommerce"; confidence = 0.7; }
+    else if (sw) { type = "Shopware"; confidence = 0.7; }
+    else if (mg) { type = "Magento"; confidence = 0.7; }
+
+    // site-specific hints
+    const host = new URL(listUrl).hostname;
+    if (/memoryking\.de$/i.test(host)) { type = "Memoryking"; confidence = Math.max(confidence, 0.9); }
+    if (/sinotronic-e\.com$/i.test(host)) { type = "Sinotronic"; confidence = Math.max(confidence, 0.9); }
+    if (/s-impuls-shop\.de$/i.test(host)) { signals.push("OpenCart-like theme"); }
+
+    res.json({ ok: true, url: listUrl, type, confidence, signals });
+  } catch (e) {
+    res.status(502).json({ ok: false, error: e?.message || String(e) });
+  }
+});
 
 /* ──────────────────────────── image proxy ──────────────────────────── */
 app.get("/v1/api/image", async (req, res) => {
