@@ -1,3 +1,4 @@
+const { detectStructure } = require('./lib/structureDetector');
 import express from "express";
 import cors from "cors";
 import axios from "axios";
@@ -22,9 +23,6 @@ app.get("/v1/api/health", (_req, res) => {
   res.json({ ok: true, status: "up", ts: Date.now() });
 });
 
-
-/* ──────────────────────────── plain health (compat) ──────────────────────────── */
-app.get("/v1/health", (_req, res) => res.type("text/plain").send("OK"));
 app.get("/v1/api/__version", (_req, res) => {
   res.json({
     version: "mvp-universal-parse-2025-10-06-beamer-paging-fix-artnr",
@@ -106,73 +104,6 @@ function priceFromJsonLd($) {
           currency = offers.priceCurrency || currency;
           break;
         }
-
-
-/* ──────────────────────────── Shopware / Magento helpers ──────────────────────────── */
-function looksLikeShopware($) {
-  return $("meta[name='generator'][content*='Shopware']").length > 0 ||
-         $("[class*='product--box'], [class*='product-box']").length > 0 ||
-         $("script[data-shopware]").length > 0 ||
-         /\bShopware\b/i.test($.html().slice(0,1500));
-}
-
-function parseShopwareCatalog($, listUrl, limit = 50) {
-  const out = [];
-  const BAD = /(breadcrumb|navigation|filter|menu|sidebar)/i;
-  const CARD = [".product--box",".product-box",".box--product",".product-teaser",".product-slider--item"].join(", ");
-  $(CARD).each((_i, el) => {
-    if (out.length >= limit) return false;
-    const $c = $(el);
-    if (BAD.test($c.attr("class") || "")) return;
-
-    const $a = $c.find("a[href]").first();
-    const link = abs(listUrl, $a.attr("href") || "");
-    const title = ($a.attr("title") || "").trim() ||
-                  ($c.find(".product--title, .product-title, h3, h2").first().text() || "").trim();
-    const $img = $c.find("img").first();
-    const src = $img.attr("data-src") || $img.attr("data-original") ||
-                ($img.attr("srcset") || "").split(" ").find(s => /^https?:/i.test(s)) ||
-                $img.attr("src") || "";
-    const img = abs(listUrl, (src || "").split("?")[0]);
-    let priceTxt = ($c.find(".price--default, .product--price, .price, .product-price, .price--content").first().text() || "").trim();
-    if (!priceTxt) priceTxt = priceFromJsonLd($);
-
-    if (link && title) out.push({
-      sku: guessSkuFromTitle(title),
-      title, url: link, img,
-      price: priceTxt || null, currency: "", moq: ""
-    });
-  });
-  return out.filter(it => !/^(home|start|kategorie|zur[ -]?ück|weiter|mehr)$/i.test(it.title));
-}
-
-function looksLikeMagento($) {
-  const gen = $("meta[name='generator']").attr("content") || "";
-  return /magento/i.test(gen) || $(".product-item").length > 5;
-}
-
-function parseMagentoCatalog($, listUrl, limit = 50) {
-  const out = [];
-  $(".product-item").each((_i, el) => {
-    if (out.length >= limit) return false;
-    const $it = $(el);
-    const $a = $it.find("a.product-item-link, a[href*='/product/'], a[href*='/products/']").first();
-    const link = abs(listUrl, $a.attr("href") || "");
-    const title = ($a.text() || $a.attr("title") || "").trim();
-    const $img = $it.find("img").first();
-    const src = $img.attr("data-src") || $img.attr("data-original") ||
-                ($img.attr("srcset") || "").split(" ").find(s => /^https?:/i.test(s)) ||
-                $img.attr("src") || "";
-    const img = abs(listUrl, (src || "").split("?")[0]);
-    const priceTxt = ($it.find(".price-final_price .price, .price .price").first().text() || "").trim() || priceFromJsonLd($);
-    if (link && title) out.push({
-      sku: guessSkuFromTitle(title), title, url: link, img,
-      price: priceTxt || null, currency: "", moq: ""
-    });
-  });
-  return out;
-}
-
       }
     } catch {}
   });
@@ -182,55 +113,6 @@ function parseMagentoCatalog($, listUrl, limit = 50) {
   }
   return "";
 }
-
-
-/* ──────────────────────────── detect (Shopify/Woo/Shopware/Magento) ──────────────────────────── */
-app.get("/v1/api/detect", async (req, res) => {
-  const listUrl = String(req.query.url || req.query.u || "").trim();
-  if (!listUrl) return res.status(400).json({ ok: false, error: "missing url" });
-  try {
-    const html = await fetchHtml(listUrl);
-    const $ = cheerio.load(html, { decodeEntities: false });
-    const signals = [];
-    const add = (cond, s) => { if (cond) signals.push(s); };
-
-    // Shopify
-    add(/cdn\.shopify\.com/i.test(html), "cdn\.shopify\.com");
-    add(/shopify-section/i.test(html), "shopify-section");
-    add(/window\.Shopify/i.test(html), "window\.Shopify");
-    add(/Shopify\.theme/i.test(html), "Shopify\.theme");
-    const isShopify = signals.some(s => /shopify/i.test(s));
-
-    // WooCommerce
-    const isWoo = /woocommerce/i.test(html)
-      || $('link[href*="woocommerce"], script[src*="woocommerce"], img[src*="woocommerce"]').length > 0
-      || $('ul.products li.product').length > 1
-      || /wp-content\/plugins\/woocommerce/i.test(html);
-
-    // Shopware / Magento via existing helpers
-    const sw = looksLikeShopware($);
-    const mg = looksLikeMagento($);
-    if (sw) signals.push("Shopware meta/generator or product--box");
-    if (mg) signals.push("Magento generator or .product-item");
-
-    let type = "Unknown";
-    let confidence = 0.4;
-    if (isShopify) { type = "Shopify"; confidence = 0.8; }
-    else if (isWoo) { type = "WooCommerce"; confidence = 0.7; }
-    else if (sw) { type = "Shopware"; confidence = 0.7; }
-    else if (mg) { type = "Magento"; confidence = 0.7; }
-
-    // site-specific hints
-    const host = new URL(listUrl).hostname;
-    if (/memoryking\.de$/i.test(host)) { type = "Memoryking"; confidence = Math.max(confidence, 0.9); }
-    if (/sinotronic-e\.com$/i.test(host)) { type = "Sinotronic"; confidence = Math.max(confidence, 0.9); }
-    if (/s-impuls-shop\.de$/i.test(host)) { signals.push("OpenCart-like theme"); }
-
-    res.json({ ok: true, url: listUrl, type, confidence, signals });
-  } catch (e) {
-    res.status(502).json({ ok: false, error: e?.message || String(e) });
-  }
-});
 
 /* ──────────────────────────── image proxy ──────────────────────────── */
 app.get("/v1/api/image", async (req, res) => {
@@ -1175,29 +1057,6 @@ async function parseUniversalCatalog(
     }
   } catch {}
 
-  
-    // ── Generic platform quick-pass: Woo → Shopware → Magento ──
-    try {
-      const html = await fetchHtml(listUrl);
-      let $ = cheerio.load(html, { decodeEntities: false });
-
-      // WooCommerce cards
-      let items = parseWooFromHtml($, listUrl, limit);
-      if (items && items.length) return { items, adapter: "woocommerce" };
-
-      // Shopware
-      if (looksLikeShopware($)) {
-        items = parseShopwareCatalog($, listUrl, limit);
-        if (items && items.length) return { items, adapter: "shopware" };
-      }
-
-      // Magento
-      if (looksLikeMagento($)) {
-        items = parseMagentoCatalog($, listUrl, limit);
-        if (items && items.length) return { items, adapter: "magento" };
-      }
-    } catch {}
-
   // 外部通用适配器
   try {
     const uni = await parseUniversal({ url: listUrl, limit });
@@ -1423,4 +1282,34 @@ app.get(["/v1/api/catalog", "/v1/api/catalog.json", "/v1/api/catalog/parse.json"
 
 /* ──────────────────────────── listen ──────────────────────────── */
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`[mvp2-backend] listening on :${PORT}`));
+
+app.get('/api/detect', async (req, res) => {
+  try {
+    const url = req.query.url;
+    if (!url) return res.status(400).json({ ok: false, error: 'missing url' });
+
+    // Reuse existing HTML fetch util if present, otherwise use fetch
+    let html = '';
+    if (typeof fetchHTML === 'function') {
+      html = await fetchHTML(url);
+    } else {
+      const fetch = global.fetch || (await import('node-fetch')).default;
+      const resp = await fetch(url, { headers: { 'user-agent': 'Mozilla/5.0 YuniveraBot' } });
+      html = await resp.text();
+    }
+
+    // Use the single detector to avoid referencing undefined helpers
+    const result = detectStructure(html);
+    if (result && typeof result === 'object') {
+      return res.json({ ok: true, url, type: result.type, confidence: result.confidence ?? 0.6, signals: result.signals || [] });
+    }
+    // Backward compatible: if detectStructure returns a string
+    if (typeof result === 'string') {
+      return res.json({ ok: true, url, type: result, confidence: 0.6, signals: [] });
+    }
+    return res.json({ ok: true, url, type: 'Unknown', confidence: 0.2, signals: [] });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message || String(err) });
+  }
+});
+app.listen(PORT, () => console.log(`[mvp2-backend] listening on :${PORT}`)
