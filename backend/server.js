@@ -1,4 +1,4 @@
-const { detectStructure } = require('./lib/structureDetector');
+import { detectStructure } from './lib/structureDetector.js';
 import express from "express";
 import cors from "cors";
 import axios from "axios";
