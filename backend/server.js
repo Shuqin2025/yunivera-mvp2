@@ -141,7 +141,7 @@ async function handleImage(req, res) {
       timeout: 20000,
       headers: {
         "User-Agent": UA,
-        Accept: "image/avif,image/webp,image/*,*/*;q=0.8",
+        Accept: "image/png,image/jpeg,image/jpg,*/*;q=0.8",
         Referer: new URL(url).origin + "/",
       },
       validateStatus: (s) => s >= 200 && s < 400,
@@ -1163,7 +1163,7 @@ app.get("/v1/api/catalog/parse", async (req, res) => {
               timeout: 15000,
               headers: {
                 "User-Agent": UA,
-                Accept: "image/avif,image/webp,image/*,*/*;q=0.8",
+                Accept: "image/png,image/jpeg,image/jpg,*/*;q=0.8",
                 Referer: new URL(it.img).origin + "/",
               },
               validateStatus: (s) => s >= 200 && s < 400,
@@ -1459,7 +1459,7 @@ app.get(
                   responseType: 'arraybuffer',
                   timeout: 20000,
                   validateStatus: s => s >= 200 && s < 400,
-                  headers: { 'User-Agent': "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36", Accept: 'image/avif,image/webp,image/*,*/*;q=0.8' }
+                  headers: { 'User-Agent': "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36", Accept: 'image/png,image/jpeg,image/jpg,*/*;q=0.8' }
                 });
                 const buf = Buffer.from(resp.data);
                 const ct = (resp.headers && resp.headers['content-type']) || 'image/jpeg';
@@ -1502,7 +1502,7 @@ app.get(
         if (XLSX && XLSX.utils && XLSX.write) {
         const wb = XLSX.utils.book_new();
         const ws = XLSX.utils.aoa_to_sheet(rows);
-        
+
 // —— 设置列宽与行高，保证图片可见 ——
 ws["!cols"] = ws["!cols"] || [];
 ws["!cols"][0] = ws["!cols"][0] || { wch: 6 };   // #
