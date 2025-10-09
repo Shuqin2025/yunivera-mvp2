@@ -12,23 +12,6 @@ import sino from "./adapters/sinotronic.js";
 import parseUniversal from "./adapters/universal.js";
 
 const app = express();
-
-// ─── Excel 图像单元格助手（将图片通过网关代理，避免直链防盗链） ───
-const __GATEWAY_BASE__ = (process.env.GATEWAY_URL || process.env.GATEWAY || "").replace(/\/$/, "");
-function xlsxImageCell(rawUrl) {
-  try {
-    const url = Array.isArray(rawUrl) ? (rawUrl[0] || "") : (rawUrl || "");
-    if (!url) return "";
-    if (__GATEWAY_BASE__) {
-      const proxied = `${__GATEWAY_BASE__}/v1/api/image?url=${encodeURIComponent(url)}`;
-      // 使用 Excel 365 的 IMAGE() 公式内联显示缩略图；如果是老版本，会把公式当文本，可忽略
-      return { f: `IMAGE("${proxied}")` };
-    }
-    return url;
-  } catch (e) {
-    return rawUrl || "";
-  }
-}
 app.use(cors({ origin: "*", exposedHeaders: ["X-Lang", "X-Adapter"] }));
 
 /* ──────────────────────────── health ──────────────────────────── */
@@ -41,9 +24,9 @@ app.get("/v1/api/health", (_req, res) => {
 
 app.get("/v1/api/__version", (_req, res) => {
   res.json({
-    version: "mvp-universal-parse-2025-10-06-beamer-paging-fix-artnr+excel",
+    version: "mvp-universal-parse-2025-10-06-beamer-paging-fix-artnr",
     note:
-      "beamer: Artikel-Nr. 详情覆写 + aggressive pagination + dedupe；新增导出 Excel 接口；其余功能不变。",
+      "beamer-discount: stronger detail SKU overwrite (Artikel-Nr), aggressive pagination + dedupe; keep other sites untouched.",
   });
 });
 
@@ -613,6 +596,7 @@ async function overwriteSkuFromBeamerDetail(items, maxCount = 30) {
               const arr = Array.isArray(data) ? data : [data];
               for (const obj of arr) {
                 const cand = obj?.mpn || obj?.sku || obj?.productID || "";
+                const label = "Artikel-Nr.";
                 if (cand && !/^\s*(ean|gtin)\b/i.test(String(cand))) {
                   found = String(cand).trim();
                   break;
@@ -632,7 +616,7 @@ async function overwriteSkuFromBeamerDetail(items, maxCount = 30) {
         // 覆写规则：如果找到 Artikel-Nr，则强制覆盖；否则保持原值
         if (found) items[i].sku = found;
         else {
-          // 去掉开头的 "EAN "
+          // 把开头的 "EAN " 去掉，避免“EAN 426…”显示在 Artikel-Nr 列
           items[i].sku = String(initial).replace(/^\s*ean\s*[:：]?\s*/i, "").trim() || initial;
         }
       } catch {}
@@ -1293,95 +1277,6 @@ app.get(["/v1/api/catalog", "/v1/api/catalog.json", "/v1/api/catalog/parse.json"
     res,
     () => {}
   )
-);
-
-/* ──────────────────────────── API: 导出 Excel ──────────────────────────── */
-// 兼容多条导出路径，前端“Excel exportieren (.xlsx)”可直接命中
-app.get(
-  [
-    "/v1/api/catalog/export.xlsx",
-    "/v1/api/export.xlsx",
-    "/v1/api/catalog/xlsx",
-    "/v1/api/xlsx",
-  ],
-  async (req, res) => {
-    const listUrl =
-      String(req.query.url ?? req.query.u ?? req.query.link ?? req.query.l ?? "").trim();
-    const limit = Math.max(1, Math.min(parseInt(String(req.query.limit || "200"), 10) || 200, 1000));
-    // 透传 detailSku 等参数，确保 beamer 的 Artikel-Nr. 也在导出里正确
-    const debug = /^(1|true|yes|on)$/i.test(String(req.query.debug || ""));
-    const fast  = /^(1|true|yes|on)$/i.test(String(req.query.fast || ""));
-    const detailSku = /^(1|true|yes|on)$/i.test(String(req.query.detailSku || "1"));
-    const detailSkuMax = Math.min(
-      parseInt(String(req.query.detailSkuMax || "30"), 10) || 30,
-      limit
-    );
-
-    if (!listUrl) return res.status(400).json({ ok: false, error: "missing url" });
-
-    try {
-      const { items } = await parseUniversalCatalog(listUrl, limit, {
-        debug, fast, detailSku, detailSkuMax
-      });
-
-      const header = ["#", "Artikel-Nr.", "Bild", "Beschreibung", "MOQ", "Einzelpreis", "Link"];
-      const rows = [header];
-      for (let i = 0; i < items.length; i++) {
-        const it = items[i] || {};
-        rows.push([
-          i + 1,
-          it.sku || "",
-          it.img || "",
-          it.title || "",
-          it.moq || "",
-          it.price || "",
-          it.url || "",
-        ]);
-      }
-
-      // 优先尝试 SheetJS 生成 .xlsx；若模块不存在则降级为 CSV（Excel 可直接打开）
-      let XLSX;
-      try {
-        XLSX = await import("xlsx");
-      } catch {}
-
-      if (XLSX && XLSX.utils && XLSX.write) {
-        const wb = XLSX.utils.book_new();
-        const ws = XLSX.utils.aoa_to_sheet(rows);
-        XLSX.utils.book_append_sheet(wb, ws, "Katalog");
-        const buf = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
-        res.setHeader(
-          "Content-Type",
-          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        );
-        res.setHeader("Content-Disposition", 'attachment; filename="catalog.xlsx"');
-        return res.send(buf);
-      }
-
-      // Fallback: CSV（UTF-8 带 BOM，避免德文变成乱码）
-      const toCsv = (arr) =>
-        "\uFEFF" +
-        arr
-          .map((row) =>
-            row
-              .map((v) => {
-                const s = String(v ?? "");
-                const needsQuote = /[",;\n\r]/.test(s);
-                return needsQuote ? `"${s.replace(/"/g, '""')}"` : s;
-              })
-              .join(",")
-          )
-          .join("\r\n");
-
-      const csv = toCsv(rows);
-      res.setHeader("Content-Type", "text/csv; charset=utf-8");
-      res.setHeader("Content-Disposition", 'attachment; filename="catalog.csv"');
-      return res.send(csv);
-    } catch (e) {
-      console.error("[export:xlsx] fail:", e?.message || e);
-      return res.status(500).json({ ok: false, error: String(e?.message || e) });
-    }
-  }
 );
 
 /* ──────────────────────────── listen ──────────────────────────── */
