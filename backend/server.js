@@ -1388,4 +1388,5 @@ app.get('/api/detect', async (req, res) => {
     res.status(500).json({ ok: false, error: err.message || String(err) });
   }
 });
-app.listen(PORT, () => console.log(`[mvp2-backend] listening on :${PORT}`)
+app.listen(PORT, () => console.log(`[mvp2-backend] listening on :${PORT}`));
+
