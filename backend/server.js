@@ -405,7 +405,71 @@ function parseWooFromHtml($, listUrl, limit = 50) {
       price: priceTxt || null,
       currency: "",
       moq: "",
-    });
+    }
+
+// === Shopware detection + list parser ===
+function looksLikeShopware($) {
+  return $("meta[name='generator'][content*='Shopware']").length > 0 ||
+         $("[class*='product--box'], [class*='product-box']").length > 0 ||
+         $("script[data-shopware]").length > 0 ||
+         /\bShopware\b/i.test($.html().slice(0,1500));
+}
+
+function parseShopwareCatalog($, listUrl, limit = 50) {
+  const out = [];
+  const BAD = /(breadcrumb|navigation|filter|menu|sidebar)/i;
+  const CARD = [".product--box",".product-box",".box--product",".product-teaser",".product-slider--item"].join(", ");
+  $(CARD).each((_i, el) => {
+    if (out.length >= limit) return false;
+    const $c = $(el);
+    if (BAD.test($c.attr("class") || "")) return;
+
+    const $a = $c.find("a[href]").first();
+    const link = abs(listUrl, $a.attr("href") || "");
+    const title = ($a.attr("title") || "").trim() ||
+                  ($c.find(".product--title, .product-title, h3, h2").first().text() || "").trim();
+    const $img = $c.find("img").first();
+    const src = $img.attr("data-src") || $img.attr("data-original") ||
+                ($img.attr("srcset") || "").split(" ").find(s => /^https?:/i.test(s)) ||
+                $img.attr("src") || "";
+    const img = abs(listUrl, (src || "").split("?")[0]);
+    let priceTxt = ($c.find(".price--default, .product--price, .price, .product-price, .price--content").first().text() || "").trim();
+    if (!priceTxt) priceTxt = priceFromJsonLd($);
+
+    if (link && title) out.push({ sku: guessSkuFromTitle(title), title, url: link, img, price: priceTxt || null, currency: "", moq: "" }
+
+// === Magento detection + list parser ===
+function looksLikeMagento($) {
+  const gen = $("meta[name='generator']").attr("content") || "";
+  return /magento/i.test(gen) || $(".product-item").length > 5;
+}
+
+function parseMagentoCatalog($, listUrl, limit = 50) {
+  const out = [];
+  $(".product-item").each((_i, el) => {
+    if (out.length >= limit) return false;
+    const $it = $(el);
+    const $a = $it.find("a.product-item-link, a[href*='/product/'], a[href*='/products/']").first();
+    const link = abs(listUrl, $a.attr("href") || "");
+    const title = ($a.text() || $a.attr("title") || "").trim();
+    const $img = $it.find("img").first();
+    const src = $img.attr("data-src") || $img.attr("data-original") ||
+                ($img.attr("srcset") || "").split(" ").find(s => /^https?:/i.test(s)) ||
+                $img.attr("src") || "";
+    const img = abs(listUrl, (src || "").split("?")[0]);
+    const priceTxt = ($it.find(".price-final_price .price, .price .price").first().text() || "").trim() || priceFromJsonLd($);
+    if (link && title) out.push({ sku: guessSkuFromTitle(title), title, url: link, img, price: priceTxt || null, currency: "", moq: "" });
+  });
+  return out;
+}
+
+);
+  });
+
+  return out.filter(it => !/^(home|start|kategorie|zur[ -]?ück|weiter|mehr)$/i.test(it.title));
+}
+
+);
   });
 
   return items;
@@ -1056,6 +1120,29 @@ async function parseUniversalCatalog(
     }
   } catch {}
 
+    // —— Generic platform quick dispatch (Woo → Shopware → Magento) ——
+    try {
+      const html0 = await fetchHtml(listUrl);
+      let $0 = cheerio.load(html0, { decodeEntities: false });
+
+      // WooCommerce
+      let wooItems = parseWooFromHtml($0, listUrl, limit);
+      if (wooItems && wooItems.length) return { items: wooItems, adapter: "woocommerce" };
+
+      // Shopware
+      if (looksLikeShopware($0)) {
+        const swItems = parseShopwareCatalog($0, listUrl, limit);
+        if (swItems && swItems.length) return { items: swItems, adapter: "shopware" };
+      }
+
+      // Magento
+      if (looksLikeMagento($0)) {
+        const mgItems = parseMagentoCatalog($0, listUrl, limit);
+        if (mgItems && mgItems.length) return { items: mgItems, adapter: "magento" };
+      }
+    } catch {}
+
+
   // 外部通用适配器
   try {
     const uni = await parseUniversal({ url: listUrl, limit });
@@ -1282,5 +1369,3 @@ app.get(["/v1/api/catalog", "/v1/api/catalog.json", "/v1/api/catalog/parse.json"
 /* ──────────────────────────── listen ──────────────────────────── */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`[mvp2-backend] listening on :${PORT}`));
-
-
