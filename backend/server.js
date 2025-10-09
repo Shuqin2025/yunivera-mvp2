@@ -83,6 +83,7 @@ function normalizePrice(str) {
   return v;
 }
 
+// 86 行开始 —— 用这段覆盖到 117 行
 function priceFromJsonLd($) {
   let price = "", currency = "€";
   $('script[type="application/ld+json"]').each((_i, el) => {
@@ -96,25 +97,100 @@ function priceFromJsonLd($) {
         const t = obj["@type"];
         const isProduct = t === "Product" || (Array.isArray(t) && t.includes("Product"));
         if (!isProduct) continue;
+
         let offers = obj.offers;
         offers = Array.isArray(offers) ? offers[0] : offers;
+
         const p = offers?.price ?? offers?.lowPrice ?? offers?.highPrice;
         if (p != null && p !== "") {
           price = String(p);
-          currency = offers.priceCurrency || currency;
+          currency = offers?.priceCurrency || currency;
           break;
         }
       }
-    } catch {}
+    } catch (_) {}
   });
+
   if (price) {
-    if (/eur|€/i.test(currency)) currency = "€";
+    if (/eur/i.test(currency)) currency = "€";
     return normalizePrice(`${currency} ${price}`);
   }
   return "";
 }
 
 /* ──────────────────────────── image proxy ──────────────────────────── */
+// === structure detect helpers (BEGIN) ===================================
+function looksLikeShopify($, html) {
+  return /\bcdn\.shopify\.com\b/i.test(html)
+      || /\bshopify-section\b/i.test(html)
+      || /\bwindow\.Shopify\b/i.test(html)
+      || /\bShopify\.theme\b/i.test(html);
+}
+
+function looksLikeShopware($, html) {
+  return /\bshopware\b/i.test(html)
+      || /\bdata-controller="product-listing"/i.test(html)
+      || /\bproduct--box\b/i.test(html)
+      || $('meta[name="generator"][content*="Shopware"]').length > 0;
+}
+
+function looksLikeWoo($, html) {
+  return /\bwoocommerce\b/i.test(html)
+      || /\bwp-content\b/i.test(html)
+      || $('body[class*="woocommerce"]').length > 0
+      || $('ul.products li.product').length > 0;
+}
+
+function looksLikeMagento($, html) {
+  return /\bMagento\b/i.test(html)
+      || /\bpagebuilder\b/i.test(html)
+      || /\bdata-mage-init\b/i.test(html)
+      || $('script[type="text/x-magento-init"]').length > 0;
+}
+// === structure detect helpers (END) =====================================
+
+// === /v1/api/detect =====================================================
+app.get("/v1/api/detect", async (req, res) => {
+  try {
+    const url = String(req.query.url || "").trim();
+    if (!url) return res.status(400).json({ ok:false, error:"missing url" });
+
+    const r = await axios.get(url, {
+      timeout: 20000,
+      headers: {
+        "User-Agent": UA,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      },
+      validateStatus: s => s >= 200 && s < 400,
+    });
+
+    const html = String(r.data || "");
+    const $ = cheerio.load(html);
+
+    let type = "Unknown";
+    let confidence = 0.5;
+    let signals = [];
+
+    if (looksLikeShopify($, html)) {
+      type = "Shopify"; confidence = 0.8;
+      signals = ["cdn\\.shopify\\.com","shopify-section","window\\.Shopify","Shopify\\.theme"];
+    } else if (looksLikeShopware($, html)) {
+      type = "Shopware"; confidence = 0.8;
+      signals = ["shopware","product--box","data-controller=product-listing","meta generator Shopware"];
+    } else if (looksLikeWoo($, html)) {
+      type = "WooCommerce"; confidence = 0.75;
+      signals = ["woocommerce","wp-content","ul.products li.product","body.woocommerce"];
+    } else if (looksLikeMagento($, html)) {
+      type = "Magento"; confidence = 0.75;
+      signals = ["Magento","data-mage-init","script text/x-magento-init","pagebuilder"];
+    }
+
+    return res.json({ ok:true, url, type, confidence, signals });
+  } catch (e) {
+    return res.json({ ok:false, error: e.message || String(e) });
+  }
+});
+
 app.get("/v1/api/image", async (req, res) => {
   const url = String(req.query.url || "").trim();
   const format = String(req.query.format || "").toLowerCase();
