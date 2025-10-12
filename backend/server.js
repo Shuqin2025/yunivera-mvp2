@@ -83,41 +83,42 @@ function normalizePrice(str) {
   return v;
 }
 
-// 86 行开始 —— 用这段覆盖到 117 行
-function priceFromJsonLd($) {
-  let price = "", currency = "€";
-  $('script[type="application/ld+json"]').each((_i, el) => {
-    try {
-      const raw = $(el).contents().text().trim();
-      if (!raw) return;
-      const data = JSON.parse(raw);
-      const arr = Array.isArray(data) ? data : [data];
-      for (const obj of arr) {
-        if (!obj) continue;
-        const t = obj["@type"];
-        const isProduct = t === "Product" || (Array.isArray(t) && t.includes("Product"));
-        if (!isProduct) continue;
+function priceFromJsonLd(json) {
+  try {
+    const offer =
+      json?.offers ||
+      (Array.isArray(json) ? json.find((x) => x && x.offers) : null);
 
-        let offers = obj.offers;
-        offers = Array.isArray(offers) ? offers[0] : offers;
+    const take = (v) => {
+      if (v == null) return null;
+      // 允许 "149,00 €"、"€149.00"、"1.299,95" 等格式，统一提取数字与小数点/逗号
+      const m = String(v).match(/-?\d[\d.,]*/);
+      if (!m) return null;
+      let num = m[0].replace(/\./g, "").replace(",", "."); // 千分位点 -> 空；逗号 -> .
+      const n = parseFloat(num);
+      return Number.isFinite(n) ? n : null;
+    };
 
-        const p = offers?.price ?? offers?.lowPrice ?? offers?.highPrice;
-        if (p != null && p !== "") {
-          price = String(p);
-          currency = offers?.priceCurrency || currency;
-          break;
-        }
+    if (Array.isArray(offer)) {
+      for (const it of offer) {
+        const p = take(it?.price ?? it?.lowPrice ?? it?.highPrice ?? it?.priceSpecification?.price);
+        if (p != null) return p;
       }
-    } catch (_) {}
-  });
-
-  if (price) {
-    if (/eur/i.test(currency)) currency = "€";
-    return normalizePrice(`${currency} ${price}`);
+      return null;
+    } else if (offer && typeof offer === "object") {
+      return (
+        take(offer.price) ??
+        take(offer.lowPrice) ??
+        take(offer.highPrice) ??
+        take(offer.priceSpecification?.price) ??
+        null
+      );
+    }
+    return null;
+  } catch {
+    return null;
   }
-  return "";
 }
-
 /* ──────────────────────────── image proxy ──────────────────────────── */
 // === structure detect helpers (BEGIN) ===================================
 function looksLikeShopify($, html) {
@@ -227,9 +228,11 @@ app.get("/v1/api/image", async (req, res) => {
     res.status(502).send("image fetch failed");
   }
 });
-app.get("/v1/api/image64", async (req, res) => {
-  req.query.format = "base64";
-  return app._router.handle(req, res, () => {});
+app.get("/v1/api/image64", (req, res) => {
+  // 把原 query 合并上 format=base64，然后改写成 /v1/api/image 的路径再交给路由器
+  const params = new URLSearchParams({ ...req.query, format: "base64" });
+  req.url = `/v1/api/image?${params.toString()}`;
+  app._router.handle(req, res, () => {});
 });
 
 /* ──────────────────────────── site: auto-schmuck.com ──────────────────────────── */
@@ -1364,15 +1367,15 @@ app.get('/api/detect', async (req, res) => {
     const url = req.query.url;
     if (!url) return res.status(400).json({ ok: false, error: 'missing url' });
 
-    // Reuse existing HTML fetch util if present, otherwise use fetch
-    let html = '';
-    if (typeof fetchHTML === 'function') {
-      html = await fetchHTML(url);
-    } else {
-      const fetch = global.fetch || (await import('node-fetch')).default;
-      const resp = await fetch(url, { headers: { 'user-agent': 'Mozilla/5.0 YuniveraBot' } });
-      html = await resp.text();
-    }
+   // Reuse existing HTML fetch util if present, otherwise use fetch
+let html = '';
+if (typeof fetchHtml === 'function') {
+  html = await fetchHtml(url);
+} else {
+  const fetch = global.fetch || (await import('node-fetch')).default;
+  const resp = await fetch(url, { headers: { 'user-agent': 'Mozilla/5.0 YuniveraBot' } });
+  html = await resp.text();
+}
 
     // Use the single detector to avoid referencing undefined helpers
     const result = detectStructure(html);
@@ -1389,4 +1392,3 @@ app.get('/api/detect', async (req, res) => {
   }
 });
 app.listen(PORT, () => console.log(`[mvp2-backend] listening on :${PORT}`));
-
