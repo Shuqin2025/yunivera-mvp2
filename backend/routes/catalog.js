@@ -1,7 +1,7 @@
 // backend/routes/catalog.js
 // 统一目录解析：GET/POST /v1/api/catalog/parse
 // - axios(arraybuffer) + jschardet + iconv-lite 自动探测与解码（gb* → gb18030）
-// - 命中站点适配器（sinotronic）否则走通用兜底
+// - 命中站点适配器（sinotronic / memoryking / universal）否则走通用兜底
 // - debug=1 时回传完整调试信息
 
 import { Router } from "express";
@@ -12,6 +12,11 @@ import iconv from "iconv-lite";
 
 // 站点适配器
 import sinotronic from "../adapters/sinotronic.js";
+
+// ★ 新增：结构识别 + 通用/专用适配器
+import detectStructure from "../lib/structureDetector.js";
+import universal from "../adapters/universal.js";      // 默认导出：async function ({url,limit,debug})
+import memoryking from "../adapters/memoryking.js";    // 对象导出：.test / .parse($,url,...)
 
 const router = Router();
 
@@ -121,12 +126,38 @@ function genericExtract($, baseUrl, { limit = 50, debug = false } = {}) {
   return { items, debugPart };
 }
 
-// ---------------- 跑适配器/兜底 ----------------
-function runExtract(url, html, { limit = 50, debug = false } = {}) {
+// ---------------- 适配器选择（前端 hint → 域名直连 → 结构识别） ----------------
+function chooseAdapter({ url, $, html, hintType, host }) {
+  // 先看前端 hint
+  if (hintType) {
+    const t = String(hintType).toLowerCase();
+    if (t === "shopware" || t === "woocommerce" || t === "shopify" || t === "magento") {
+      return "universal";
+    }
+    if (t === "memoryking") return "memoryking";
+  }
+
+  // 域名专用（最稳）
+  if (/(^|\.)memoryking\.de$/i.test(host)) return "memoryking";
+
+  // 结构识别
+  const det = detectStructure(html || $);
+  if (det && det.type) {
+    if (det.type === "Shopware" || det.type === "WooCommerce" || det.type === "Shopify" || det.type === "Magento") {
+      return "universal";
+    }
+  }
+
+  return "generic";
+}
+
+// ---------------- 统一跑适配器/兜底 ----------------
+async function runExtract(url, html, { limit = 50, debug = false, hintType = "" } = {}) {
   const $ = cheerio.load(html, { decodeEntities: false });
 
   let used = "generic", items = [], debugPart;
 
+  // 1) 保留你的 sinotronic 专用逻辑
   if (sinotronic.test(url)) {
     const out = sinotronic.parse($, url, { limit, debug });
     items = out.items || [];
@@ -134,6 +165,25 @@ function runExtract(url, html, { limit = 50, debug = false } = {}) {
     used = "sinotronic-e";
   }
 
+  // 2) 根据 hint/域名/结构识别选择适配器
+  if (!items.length) {
+    const host = (() => { try { return new URL(url).host; } catch { return ""; } })();
+    const which = chooseAdapter({ url, $, html, hintType, host });
+
+    if (which === "memoryking") {
+      const out = memoryking.parse($, url, { limit, debug });
+      items = out.items || out.products || [];
+      if (debug && !debugPart) debugPart = out.debugPart;
+      used = "memoryking";
+    } else if (which === "universal") {
+      // universal 是“默认导出函数”，它自己抓 HTML
+      const outArr = await universal({ url, limit, debug });
+      items = Array.isArray(outArr) ? outArr : (outArr?.items || outArr?.products || []);
+      used = "universal";
+    }
+  }
+
+  // 3) 仍不命中则 generic 兜底
   if (!items.length) {
     const out = genericExtract($, url, { limit, debug });
     items = out.items || [];
@@ -161,7 +211,11 @@ router.all("/parse", async (req, res) => {
     const rawDebug = qp.debug ?? qp.debug1 ?? qp.debug_1;
     const wantDebug = ["1","true","yes","on"].includes(String(rawDebug ?? "").toLowerCase());
 
-    // 1) 抓取 + 解码
+    // ★ 解析前端 hint & host
+    const hintType = (qp.t || qp.type || "").toString();
+    let host = ""; try { host = new URL(url).host; } catch {}
+
+    // 1) 抓取 + 解码（为专用/兜底、结构识别服务；universal 会自行再抓）
     const { html, status, detected_encoding, debugFetch } = await fetchHtml(url, wantDebug);
     if (!html || status >= 400) {
       const payload = { ok: false, url, status, error: "fetch failed" };
@@ -170,7 +224,7 @@ router.all("/parse", async (req, res) => {
     }
 
     // 2) 解析
-    const { items, adapter_used, debugPart } = runExtract(url, html, { limit, debug: wantDebug });
+    const { items, adapter_used, debugPart } = await runExtract(url, html, { limit, debug: wantDebug, hintType });
 
     // 3) 可选：前 N 张图转 base64（不影响主逻辑）
     if (imgMode === "base64" && items.length && imgCount > 0) {
@@ -185,8 +239,29 @@ router.all("/parse", async (req, res) => {
       }));
     }
 
-    const resp = { ok: true, url, count: items.length, products: [], items };
-    if (wantDebug) resp.debug = { ...(debugFetch || {}), ...(debugPart || {}), adapter_used };
+    // 4) 统一 products 结构（兼容不同适配器返回）
+    const products = (items || []).map(it => ({
+      sku: it.sku || it.code || "",
+      title: it.title || it.desc || "",
+      url: it.url || it.link || "",
+      link: it.link || it.url || "",
+      img: it.img || (Array.isArray(it.imgs) ? it.imgs[0] : null),
+      price: it.price || "",
+      currency: it.currency || "",
+      moq: it.moq || it.minQty || "",
+    }));
+
+    const resp = {
+      ok: true,
+      url,
+      count: products.length,
+      products,          // ← 前端直接使用 products
+      items,             // ← 兼容旧字段
+      adapter: adapter_used,  // ← 供前端 toast 显示“来源：xxx”
+    };
+
+    if (wantDebug) resp.debug = { ...(debugFetch || {}), ...(debugPart || {}), adapter_used, host, hintType };
+
     return res.json(resp);
   } catch (err) {
     return res.status(200).json({ ok: false, error: String(err?.message || err) });
