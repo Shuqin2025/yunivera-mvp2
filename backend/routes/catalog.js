@@ -173,9 +173,19 @@ async function runExtract(url, html, { limit = 50, debug = false, hintType = "" 
     if (which === "memoryking") {
       const out = memoryking.parse($, url, { limit, debug });
       // 兼容数组/对象两种返回
-      items = Array.isArray(out) ? out : (out.items || out.products || []);
-      if (debug && !debugPart) debugPart = out.debugPart;
-      used = "memoryking";
+      let mmItems = Array.isArray(out) ? out : (out.items || out.products || []);
+      if (debug && !debugPart) debugPart = out?.debugPart;
+
+      if (!mmItems || mmItems.length === 0) {
+        // ✨ memoryking 专用解析未命中 → 退回到 universal（Shopware 通用）
+        const u = await universal({ url, limit, debug });
+        mmItems = Array.isArray(u) ? u : (u?.items || u?.products || []);
+        items = mmItems || [];
+        used  = "universal-fallback";
+      } else {
+        items = mmItems;
+        used  = "memoryking";
+      }
     } else if (which === "universal") {
       // universal 是“默认导出函数”，它自己抓 HTML
       const outArr = await universal({ url, limit, debug });
