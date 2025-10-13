@@ -1,8 +1,9 @@
 // backend/lib/structureDetector.js
-// 轻量级结构识别（Shopify / WooCommerce / Shopware / Magento / Static / Unknown）
+// 结构识别（Shopify / WooCommerce / Shopware / Magento / Static / Unknown）
+
 import * as cheerio from "cheerio";
 
-// 检测规则：只做必要信号，避免误报；可按需再扩展
+// —— 轻量正则线索（HTML 级别）——
 const RULES = [
   {
     type: "Shopify",
@@ -13,23 +14,38 @@ const RULES = [
       /Shopify\.theme/i,
       /\/products\.json/i,
     ],
+    dom: [
+      'script[src*="cdn.shopify.com"]',
+      '[data-section-id]',
+      'form[action*="/cart"]',
+    ],
   },
   {
     type: "WooCommerce",
     hints: [
-      /woocommerce/i, // body 类名常见
+      /woocommerce/i, // wp-content/plugins/woocommerce 或 body 类名
       /wp-content\/plugins\/woocommerce/i,
       /woocommerce-loop-product/i,
       /add_to_cart_button/i,
+    ],
+    dom: [
+      "ul.products li.product",
+      ".woocommerce",
+      'a.button.add_to_cart_button, a.add_to_cart_button',
     ],
   },
   {
     type: "Shopware",
     hints: [
-      /product--box/i,          // Shopware 列表项常见类
+      /product--box/i,          // 列表项常见类
       /shopware/i,              // meta / 资源路径等
-      /themes\/Frontend/i,     
+      /themes\/Frontend/i,
       /data-variant-id/i,
+    ],
+    dom: [
+      ".product--box, .entry--sku, .product--ordernumber, .is--ordernumber",
+      'script[src*="engine/Shopware"]',
+      'link[href*="themes/Frontend"]',
     ],
   },
   {
@@ -40,10 +56,39 @@ const RULES = [
       /product-item/i,
       /Magento_Catalog/i,
     ],
+    dom: [
+      ".product-item, .price-box",
+      'script[type="text/x-magento-init"]',
+    ],
   },
 ];
 
-// 输入可以是 HTML 字符串或 cheerio 实例
+// —— 计算某一类的命中分 ——
+function scoreType($, html, rule) {
+  let hit = 0;
+  const signals = [];
+
+  // 正则命中
+  for (const r of rule.hints || []) {
+    if (r.test(html)) {
+      hit++;
+      signals.push(r.source || String(r));
+    }
+  }
+
+  // DOM 命中（存在即加分）
+  for (const sel of rule.dom || []) {
+    if ($(sel).length) {
+      hit++;
+      signals.push(`dom:${sel}`);
+    }
+  }
+
+  return { type: rule.type, score: hit, signals };
+}
+
+// —— 主函数 ——
+// input: HTML 字符串 或 cheerio 实例
 export function detectStructure(input) {
   let $;
 
@@ -54,7 +99,6 @@ export function detectStructure(input) {
       return { type: "Unknown", confidence: 0, signals: ["load_error"] };
     }
   } else if (input && typeof input.root === "function") {
-    // 已经是 cheerio 实例
     $ = input;
   } else {
     return { type: "Unknown", confidence: 0, signals: ["invalid_input"] };
@@ -62,25 +106,17 @@ export function detectStructure(input) {
 
   const html = $.html ? $.html() : String(input);
 
-  // 逐类计算命中数
-  const scores = RULES.map((rule) => {
-    let hit = 0;
-    const matched = [];
-    for (const r of rule.hints) {
-      if (r.test(html)) {
-        hit++;
-        matched.push(r.source || String(r));
-      }
-    }
-    return { type: rule.type, score: hit, signals: matched };
-  }).sort((a, b) => b.score - a.score);
+  // 逐类打分
+  const scores = RULES
+    .map((rule) => scoreType($, html, rule))
+    .sort((a, b) => b.score - a.score);
 
   let best = scores[0];
 
-  // 若没命中已知平台，尝试 Static 目录页的粗略特征
+  // 若没命中已知平台，尝试 Static 的粗特征
   if (!best || best.score === 0) {
     const cardCount = $('[class*="product"],[class*="item"]').length;
-    const priceLike = (html.match(/€\s?\d|USD|\$\s?\d|Preis|€\d/gi) || []).length;
+    const priceLike = (html.match(/€\s?\d|EUR|\$\s?\d|Preis|€\d/gi) || []).length;
 
     if (cardCount > 8 && priceLike > 8) {
       best = { type: "Static", score: 1, signals: ["basic HTML"] };
@@ -90,8 +126,10 @@ export function detectStructure(input) {
   }
 
   const maxHints =
-    (RULES.find((r) => r.type === best.type)?.hints.length) || 1;
-  const confidence = Math.min(1, best.score / maxHints);
+    (RULES.find((r) => r.type === best.type)?.hints.length || 1) +
+    (RULES.find((r) => r.type === best.type)?.dom?.length || 0);
+
+  const confidence = Math.min(1, maxHints ? best.score / maxHints : 0.0);
 
   return { type: best.type, confidence, signals: best.signals };
 }
