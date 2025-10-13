@@ -170,12 +170,18 @@ async function runExtract(url, html, { limit = 50, debug = false, hintType = "" 
     const host = (() => { try { return new URL(url).host; } catch { return ""; } })();
     const which = chooseAdapter({ url, $, html, hintType, host });
 
-    if (which === "memoryking") {
-      const out = memoryking.parse($, url, { limit, debug });
-      items = out.items || out.products || [];
-      if (debug && !debugPart) debugPart = out.debugPart;
-      used = "memoryking";
-    } else if (which === "universal") {
+     if (which === "memoryking") {
+const out = memoryking.parse($, url, { limit, debug });
+// 兼容数组/对象两种返回
+items = Array.isArray(out) ? out : (out.items || out.products || []);
+if (debug && !debugPart) debugPart = out.debugPart;
+used = "memoryking";
+} else if (which === "universal") {
+       // universal 是“默认导出函数”，它自己抓 HTML
+       const outArr = await universal({ url, limit, debug });
+       items = Array.isArray(outArr) ? outArr : (outArr?.items || outArr?.products || []);
+       used = "universal";
+     }
       // universal 是“默认导出函数”，它自己抓 HTML
       const outArr = await universal({ url, limit, debug });
       items = Array.isArray(outArr) ? outArr : (outArr?.items || outArr?.products || []);
