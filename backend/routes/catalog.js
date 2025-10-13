@@ -13,7 +13,7 @@ import iconv from "iconv-lite";
 // 站点适配器
 import sinotronic from "../adapters/sinotronic.js";
 
-// ★ 新增：结构识别 + 通用/专用适配器
+// 结构识别 + 通用/专用适配器
 import detectStructure from "../lib/structureDetector.js";
 import universal from "../adapters/universal.js";      // 默认导出：async function ({url,limit,debug})
 import memoryking from "../adapters/memoryking.js";    // 对象导出：.test / .parse($,url,...)
@@ -170,18 +170,13 @@ async function runExtract(url, html, { limit = 50, debug = false, hintType = "" 
     const host = (() => { try { return new URL(url).host; } catch { return ""; } })();
     const which = chooseAdapter({ url, $, html, hintType, host });
 
-     if (which === "memoryking") {
-const out = memoryking.parse($, url, { limit, debug });
-// 兼容数组/对象两种返回
-items = Array.isArray(out) ? out : (out.items || out.products || []);
-if (debug && !debugPart) debugPart = out.debugPart;
-used = "memoryking";
-} else if (which === "universal") {
-       // universal 是“默认导出函数”，它自己抓 HTML
-       const outArr = await universal({ url, limit, debug });
-       items = Array.isArray(outArr) ? outArr : (outArr?.items || outArr?.products || []);
-       used = "universal";
-     }
+    if (which === "memoryking") {
+      const out = memoryking.parse($, url, { limit, debug });
+      // 兼容数组/对象两种返回
+      items = Array.isArray(out) ? out : (out.items || out.products || []);
+      if (debug && !debugPart) debugPart = out.debugPart;
+      used = "memoryking";
+    } else if (which === "universal") {
       // universal 是“默认导出函数”，它自己抓 HTML
       const outArr = await universal({ url, limit, debug });
       items = Array.isArray(outArr) ? outArr : (outArr?.items || outArr?.products || []);
@@ -261,9 +256,9 @@ router.all("/parse", async (req, res) => {
       ok: true,
       url,
       count: products.length,
-      products,          // ← 前端直接使用 products
-      items,             // ← 兼容旧字段
-      adapter: adapter_used,  // ← 供前端 toast 显示“来源：xxx”
+      products,          // 前端直接使用 products
+      items,             // 兼容旧字段
+      adapter: adapter_used,  // 给前端 toast 显示“来源：xxx”
     };
 
     if (wantDebug) resp.debug = { ...(debugFetch || {}), ...(debugPart || {}), adapter_used, host, hintType };
