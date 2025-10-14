@@ -1,7 +1,7 @@
 // backend/routes/catalog.js
 // 统一目录解析：GET/POST /v1/api/catalog/parse
 // - axios(arraybuffer) + jschardet + iconv-lite 自动探测与解码（gb* → gb18030）
-// - 命中站点适配器（sinotronic / memoryking / universal）否则走通用兜底
+// - 命中站点适配器（sinotronic / memoryking / templateParser / universal），否则走通用兜底
 // - debug=1 时回传完整调试信息
 
 import { Router } from "express";
@@ -10,13 +10,14 @@ import * as cheerio from "cheerio";
 import jschardet from "jschardet";
 import iconv from "iconv-lite";
 
-// 站点适配器
+// 站点适配器（专用）
 import sinotronic from "../adapters/sinotronic.js";
+import memoryking from "../adapters/memoryking.js"; // 对象导出：.test / .parse($,url,...)
 
-// 结构识别 + 通用/专用适配器
+// 模板解析中枢 + 通用适配器
 import detectStructure from "../lib/structureDetector.js";
+import templateParser from "../lib/templateParser.js"; // 新增：四大系统模板入口（带 detailFetcher）
 import universal from "../adapters/universal.js";      // 默认导出：async function ({url,limit,debug})
-import memoryking from "../adapters/memoryking.js";    // 对象导出：.test / .parse($,url,...)
 
 const router = Router();
 
@@ -157,11 +158,11 @@ function genericExtract($, baseUrl, { limit = 50, debug = false } = {}) {
 
 // ---------------- 适配器选择（前端 hint → 域名直连 → 结构识别） ----------------
 function chooseAdapter({ url, $, html, hintType, host }) {
-  // 先看前端 hint（两处改动之一：支持 &t= 强制）
+  // 先看前端 hint（支持 &t= 强制）
   if (hintType) {
     const t = String(hintType).toLowerCase();
     if (t === "shopware" || t === "woocommerce" || t === "shopify" || t === "magento") {
-      return "universal";
+      return "template";
     }
     if (t === "memoryking") return "memoryking";
   }
@@ -169,11 +170,11 @@ function chooseAdapter({ url, $, html, hintType, host }) {
   // 域名专用（最稳）
   if (/(^|\.)memoryking\.de$/i.test(host)) return "memoryking";
 
-  // 结构识别
+  // 结构识别 → 命中四大系统走模板解析
   const det = detectStructure(html || $);
   if (det && det.type) {
     if (det.type === "Shopware" || det.type === "WooCommerce" || det.type === "Shopify" || det.type === "Magento") {
-      return "universal";
+      return "template";
     }
   }
 
@@ -186,7 +187,7 @@ async function runExtract(url, html, { limit = 50, debug = false, hintType = "" 
 
   let used = "generic", items = [], debugPart;
 
-  // 1) 保留你的 sinotronic 专用逻辑
+  // 0) 保留：sinotronic 专用逻辑（你已有）
   if (sinotronic.test(url)) {
     const out = sinotronic.parse($, url, { limit, debug });
     items = out.items || [];
@@ -194,36 +195,67 @@ async function runExtract(url, html, { limit = 50, debug = false, hintType = "" 
     used = "sinotronic-e";
   }
 
-  // 2) 根据 hint/域名/结构识别选择适配器
+  // 1) 根据 hint/域名/结构识别选择适配器
   if (!items.length) {
     const host = (() => { try { return new URL(url).host; } catch { return ""; } })();
     const which = chooseAdapter({ url, $, html, hintType, host });
 
     if (which === "memoryking") {
+      // Memoryking 专用（已验证懒加载图片）
       const out = memoryking.parse($, url, { limit, debug });
-      // 兼容数组/对象两种返回
       let mmItems = Array.isArray(out) ? out : (out.items || out.products || []);
       if (debug && !debugPart) debugPart = out?.debugPart;
 
-      // 两处改动之二：memoryking 解析为空 → 回退 universal（Shopware 通用）
+      // 若为空 → 先回到模板解析（Shopware系更稳），再不行再 universal
       if (!mmItems || mmItems.length === 0) {
-        const u = await universal({ url, limit, debug });
-        mmItems = Array.isArray(u) ? u : (u?.items || u?.products || []);
-        items = mmItems || [];
-        used  = "universal-fallback";
+        const tOut = await templateParser({ html, url, limit, debug });
+        mmItems = Array.isArray(tOut) ? tOut : (tOut?.items || tOut?.products || []);
+        if (!mmItems || mmItems.length === 0) {
+          const u = await universal({ url, limit, debug });
+          mmItems = Array.isArray(u) ? u : (u?.items || u?.products || []);
+          used  = "universal-fallback";
+        } else {
+          used = "template-fallback";
+        }
       } else {
-        items = mmItems;
         used  = "memoryking";
       }
-    } else if (which === "universal") {
-      // universal 是“默认导出函数”，它自己抓 HTML
-      const outArr = await universal({ url, limit, debug });
-      items = Array.isArray(outArr) ? outArr : (outArr?.items || outArr?.products || []);
-      used = "universal";
+      items = mmItems || [];
+    }
+
+    else if (which === "template") {
+      // 新增：模板解析优先（内部会根据 detectStructure 选择对应 parser，并可触发 detailFetcher）
+      const tOut = await templateParser({ html, url, limit, debug });
+      items = Array.isArray(tOut) ? tOut : (tOut?.items || tOut?.products || []);
+      used  = "template";
+
+      // 若模板没取到，则回退到 universal（它会自抓）
+      if (!items || items.length === 0) {
+        const u = await universal({ url, limit, debug });
+        items = Array.isArray(u) ? u : (u?.items || u?.products || []);
+        used  = "universal-fallback";
+      }
+    }
+
+    else if (which === "generic") {
+      // 先尝试模板（万一识别不准但模板能吃到），再 generic
+      const tOut = await templateParser({ html, url, limit, debug });
+      let tmp = Array.isArray(tOut) ? tOut : (tOut?.items || tOut?.products || []);
+      if (tmp && tmp.length) {
+        items = tmp;
+        used  = "template-try";
+      }
+    }
+
+    // 若上面都没命中，再让 universal 试一遍（例如特殊结构）
+    if (!items.length) {
+      const u = await universal({ url, limit, debug });
+      items = Array.isArray(u) ? u : (u?.items || u?.products || []);
+      if (items && items.length) used = used === "generic" ? "universal" : used || "universal";
     }
   }
 
-  // 3) 仍不命中则 generic 兜底
+  // 2) 仍不命中则 generic 兜底（最后一道保险）
   if (!items.length) {
     const out = genericExtract($, url, { limit, debug });
     items = out.items || [];
@@ -245,17 +277,16 @@ router.all("/parse", async (req, res) => {
 
     const limit = Math.max(1, parseInt(qp.limit ?? 50, 10) || 50);
 
-    const imgMode = String(qp.img || "").toLowerCase();     // "base64" | ""
+    const imgMode  = String(qp.img || "").toLowerCase();     // "base64" | ""
     const imgCount = Math.max(0, parseInt(qp.imgCount ?? 0, 10) || 0);
 
-    const rawDebug = qp.debug ?? qp.debug1 ?? qp.debug_1;
-    const wantDebug = ["1","true","yes","on"].includes(String(rawDebug ?? "").toLowerCase());
+    const rawDebug   = qp.debug ?? qp.debug1 ?? qp.debug_1;
+    const wantDebug  = ["1","true","yes","on"].includes(String(rawDebug ?? "").toLowerCase());
 
-    // ★ 解析前端 hint（t/type） & host
+    // ★ 解析前端 hint（t/type）
     const hintType = (qp.t || qp.type || "").toString();
-    let host = ""; try { host = new URL(url).host; } catch {}
 
-    // 1) 抓取 + 解码（为专用/兜底、结构识别服务；universal 会自行再抓）
+    // 1) 抓取 + 解码（为专用/模板/兜底服务；universal 会自行再抓）
     const { html, status, detected_encoding, debugFetch } = await fetchHtml(url, wantDebug);
     if (!html || status >= 400) {
       const payload = { ok: false, url, status, error: "fetch failed" };
@@ -263,8 +294,12 @@ router.all("/parse", async (req, res) => {
       return res.status(200).json(payload);
     }
 
-    // 2) 解析
-    const { items, adapter_used, debugPart } = await runExtract(url, html, { limit, debug: wantDebug, hintType });
+    // 2) 解析（会根据 hint/域名/结构识别选择 memoryking / templateParser / universal / generic）
+    const { items, adapter_used, debugPart } = await runExtract(url, html, {
+      limit,
+      debug: wantDebug,
+      hintType,
+    });
 
     // 3) 可选：前 N 张图转 base64（不影响主逻辑）
     if (imgMode === "base64" && items.length && imgCount > 0) {
@@ -300,7 +335,12 @@ router.all("/parse", async (req, res) => {
       adapter: adapter_used,  // 给前端 toast 显示“来源：xxx”
     };
 
-    if (wantDebug) resp.debug = { ...(debugFetch || {}), ...(debugPart || {}), adapter_used, host, hintType };
+    if (wantDebug) resp.debug = {
+      ...(debugFetch || {}),
+      ...(debugPart || {}),
+      adapter_used,
+      hintType,
+    };
 
     return res.json(resp);
   } catch (err) {
