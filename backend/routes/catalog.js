@@ -31,6 +31,32 @@ const ITEM_FALLBACK = [
   ".product", ".product-item", ".productItem", ".product-box", "li",
 ];
 
+// ---------------- 过滤“站点通用链接”（generic 兜底时使用） ----------------
+const PATH_SKIP_PATTERNS = [
+  // 常见德语/英语/泛用站点页面
+  /(^|\/)(hilfe|support|kontakt|impressum|agb|datenschutz|widerruf|versand|zahlung|news|blog)(\/|$)/i,
+  /(^|\/)(login|logout|register|anmelden|abmelden|konto|account|mein-konto|profile)(\/|$)/i,
+  /(^|\/)(warenkorb|cart|checkout|order|bestellung|newsletter|sitemap|search|suche|note)(\/|$)/i,
+  /(^|\/)(faq|privacy|terms|shipping|payment|returns|refund|about|ueber-uns)(\/|$)/i,
+];
+
+const TITLE_SKIP_PATTERNS = [
+  /\b(impressum|agb|kontakt|datenschutz|hilfe|support|widerruf|versand|zahlung)\b/i,
+  /\b(login|logout|register|anmelden|abmelden|account|konto|newsletter|sitemap|search|suche)\b/i,
+  /\b(cart|checkout|warenkorb|order|bestellung|faq|privacy|terms|about)\b/i,
+];
+
+function isSiteLink(link = "", title = "") {
+  try {
+    const u = new URL(link, "http://_/");
+    const p = (u.pathname || "").toLowerCase();
+    if (PATH_SKIP_PATTERNS.some(re => re.test(p))) return true;
+  } catch {}
+  const t = (title || "").toLowerCase();
+  if (TITLE_SKIP_PATTERNS.some(re => re.test(t))) return true;
+  return false;
+}
+
 // ---------------- 抓取并解码 HTML ----------------
 async function fetchHtml(url, wantDebug) {
   const res = await axios.get(url, {
@@ -111,6 +137,9 @@ function genericExtract($, baseUrl, { limit = 50, debug = false } = {}) {
 
     title = title.replace(/\s+/g, " ").trim();
     if (!title && !img && !link) return;
+
+    // 🔥 小热修：过滤“站点通用链接”（避免 generic 出导航）
+    if (isSiteLink(link, title)) return;
 
     items.push({ sku: title, desc: title, minQty: "", price: "", img, link });
   });
