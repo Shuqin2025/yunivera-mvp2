@@ -157,7 +157,7 @@ function genericExtract($, baseUrl, { limit = 50, debug = false } = {}) {
 
 // ---------------- 适配器选择（前端 hint → 域名直连 → 结构识别） ----------------
 function chooseAdapter({ url, $, html, hintType, host }) {
-  // 先看前端 hint
+  // 先看前端 hint（两处改动之一：支持 &t= 强制）
   if (hintType) {
     const t = String(hintType).toLowerCase();
     if (t === "shopware" || t === "woocommerce" || t === "shopify" || t === "magento") {
@@ -205,8 +205,8 @@ async function runExtract(url, html, { limit = 50, debug = false, hintType = "" 
       let mmItems = Array.isArray(out) ? out : (out.items || out.products || []);
       if (debug && !debugPart) debugPart = out?.debugPart;
 
+      // 两处改动之二：memoryking 解析为空 → 回退 universal（Shopware 通用）
       if (!mmItems || mmItems.length === 0) {
-        // ✨ memoryking 专用解析未命中 → 退回到 universal（Shopware 通用）
         const u = await universal({ url, limit, debug });
         mmItems = Array.isArray(u) ? u : (u?.items || u?.products || []);
         items = mmItems || [];
@@ -251,7 +251,7 @@ router.all("/parse", async (req, res) => {
     const rawDebug = qp.debug ?? qp.debug1 ?? qp.debug_1;
     const wantDebug = ["1","true","yes","on"].includes(String(rawDebug ?? "").toLowerCase());
 
-    // ★ 解析前端 hint & host
+    // ★ 解析前端 hint（t/type） & host
     const hintType = (qp.t || qp.type || "").toString();
     let host = ""; try { host = new URL(url).host; } catch {}
 
