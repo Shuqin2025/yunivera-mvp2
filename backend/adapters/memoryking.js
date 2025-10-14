@@ -1,17 +1,24 @@
-/** 
- * memoryking.js — Stable Adapter
- * Tag: v5.1-memoryking
- * 注：仅在顶部添加了版本标记，其它代码保持与你当前仓库中已运行成功的版本完全一致。
- */
-/** 
- * Memoryking 适配器（v5.1-compat）
- * 变更：兼容 lib/http.js 的返回对象 { html, finalUrl, ... }；
- *       统一使用 getHtml() 获取字符串 HTML，再给 cheerio 使用。
- *       其余逻辑保持你当前版本不变（列表 → 详情覆写 SKU，排除 Prüfziffer）。
+/**
+ * memoryking.js — Stable Adapter with Shopware-delegate (v6.0)
+ * 说明：
+ *  - 优先尝试使用通用 Shopware 解析器（lib/parsers/shopwareParser.js）
+ *  - 如不可用或返回空，则回落到本站点专用的稳定实现（你原来的版本）
  */
 
 import * as cheerio from "cheerio";
 import { fetchHtml } from "../lib/http.js";
+
+/* -------------------------------------------
+ * 可选：供自动选择适配器时使用（不需要也不影响）
+ * -----------------------------------------*/
+export const test = (url) => {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return /(^|\.)memoryking\.de$/.test(host);
+  } catch {
+    return false;
+  }
+};
 
 /* ---------------- 工具 ---------------- */
 
@@ -41,6 +48,7 @@ function bestFromImgNode($, $img, origin) {
   const bag = new Set();
   const push = (v) => { if (v) bag.add(absolutize(v, origin)); };
 
+  // ✅ 懒加载字段全覆盖
   push($img.attr("data-src"));
   splitSrcset($img.attr("data-srcset")).forEach(push);
   push($img.attr("data-fallbacksrc"));
@@ -296,9 +304,49 @@ async function withRetry(fn, times = 3, delayMs = 360) {
   if (lastErr) throw lastErr;
 }
 
-/* ---------------- 入口 ---------------- */
+/* -------------------------------------------
+ * A) 首选：调用通用 Shopware 解析器
+ * -----------------------------------------*/
+async function tryParseViaShopware(input, limitDefault, debugDefault) {
+  try {
+    const mod = await import("../lib/parsers/shopwareParser.js");
+    // 兼容 default 或具名导出
+    const parseShopware =
+      (mod && (mod.default || mod.parse || mod.parseShopware)) || null;
 
-export default async function parseMemoryking(input, limitDefault = 50, debugDefault = false) {
+    if (!parseShopware) return null;
+
+    // 标注 memoryking 的站点特性，便于模板做细节处理
+    const opts = {
+      site: "memoryking",
+      limit: limitDefault,
+      debug: debugDefault,
+      imageHints: ["data-src", "data-srcset", "data-fallbacksrc", "srcset", "src"],
+      preferPruefAsFallback: true, // 若无 Artikel-Nr 时，允许 Prüfziffer 兜底
+      detailSelectors: [".product--details", ".product--detail", "#content", "body"],
+      listSelectors: [
+        ".listing--container .product--box",
+        ".js--isotope .product--box",
+        "#listing .product--box",
+        ".product--listing .product--box",
+        ".is--ctl-listing .product--box",
+      ],
+    };
+
+    const data = await parseShopware(input, opts);
+    if (Array.isArray(data) && data.length) return data;
+
+    return null;
+  } catch {
+    // 没有模板文件或导入失败时静默回落
+    return null;
+  }
+}
+
+/* -------------------------------------------
+ * B) 回落：本站点专用稳定实现（原版本）
+ * -----------------------------------------*/
+async function parseMemorykingFallback(input, limitDefault = 50, debugDefault = false) {
   // 入参
   let $, pageUrl = "", rawHtml = "", limit = limitDefault, debug = debugDefault;
   if (input && typeof input === "object" && (input.$ || input.rawHtml || input.url || input.limit !== undefined || input.debug !== undefined)) {
@@ -422,6 +470,15 @@ export default async function parseMemoryking(input, limitDefault = 50, debugDef
   });
 
   const out = items.slice(0, limit);
-  if (debug) console.log("[memoryking/v5.1] items=%d sample=%o", out.length, out[0]);
+  if (debug) console.log("[memoryking/fallback] items=%d sample=%o", out.length, out[0]);
   return out;
+}
+
+/* -------------------------------------------
+ * 入口：先走 Shopware 模板 → 再回落
+ * -----------------------------------------*/
+export default async function parse(input, limit = 50, debug = false) {
+  const viaShopware = await tryParseViaShopware(input, limit, debug);
+  if (Array.isArray(viaShopware) && viaShopware.length) return viaShopware;
+  return await parseMemorykingFallback(input, limit, debug);
 }
