@@ -21,6 +21,12 @@ app.get(["/", "/healthz", "/health", "/api/health"], (_req, res) =>
 );
 app.get("/v1/api/health", (_req, res) => {
   res.json({ ok: true, status: "up", ts: Date.now() });
+
+/* --- health check (added) --- */
+app.get('/v1/health', (_req, res) => {
+  res.json({ ok: true, service: 'mvp2-backend', version: process.env.npm_package_version || 'dev' });
+});
+
 });
 
 app.get("/v1/api/__version", (_req, res) => {
