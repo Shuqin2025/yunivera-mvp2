@@ -9,7 +9,7 @@ function abs(base, href) {
   try { return new URL(href, base).toString(); } catch { return href || ''; }
 }
 function readPrice($, node) {
-  const txt = pick($, $(node).find('.price, .amount, [itemprop="price"]'));
+  const txt = pick($, $(node).find('.price, .amount, [itemprop="price"], .wc-block-grid__product-price'));
   const m = txt.match(/(\d+[.,]\d{2})/);
   return m ? m[1].replace(',', '.') : '';
 }
@@ -18,17 +18,20 @@ function parse($, url, { limit = 50 } = {}) {
   const out = [];
   // 兼容多种常见 WooCommerce 列表结构
   const cards = $(
-    '.products .product, ' +
-    '.woocommerce ul.products li.product, ' +
-    '[class*="product-card"]'
-  );
+  '.products .product, ' +
+  '.woocommerce ul.products li.product, ' +
+  '.wc-block-grid__product, ' +
+  '[class*="product-card"]'
+);
 
   cards.each((_, el) => {
     const $el = $(el);
-    const a = $el.find('a.woocommerce-LoopProduct-link, a.woocommerce-LoopProduct__link, a').first();
+    const a = ($el.find('a.woocommerce-LoopProduct-link[href], a.woocommerce-LoopProduct__link[href], a[href]')[0]
+  ? $el.find('a.woocommerce-LoopProduct-link[href], a.woocommerce-LoopProduct__link[href], a[href]').first()
+  : $el.closest('a[href]').first());
 
     const title =
-      pick($, $el.find('.woocommerce-loop-product__title, .product-title')) ||
+      pick($, $el.find('.woocommerce-loop-product__title, .product-title, .wc-block-grid__product-title')) ||
       pick($, a);
 
     const link = abs(url, a.attr('href') || '');
@@ -65,3 +68,5 @@ const api = {
 
 module.exports = api;
 module.exports.default = api;
+
+  
