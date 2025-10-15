@@ -8,11 +8,12 @@ const woo      = require('./parsers/woocommerceParser');
 const magento  = require('./parsers/magentoParser');
 const shopify  = require('./parsers/shopifyParser');
 
-// 详情页补抓（并发进入详情，抽强标签 SKU / 主图 / 价格 / 描述）
-const detailFetcher = require('./modules/detailFetcher');
+// 智能编号提取 & 详情页补抓
+const artikel = require('./modules/artikelExtractor');
+const details = require('./modules/detailFetcher');
 
 // —— 通用垃圾/站点链接过滤 ——
-// 说明：尽量宽松，但卡住典型“站点级”链接，避免把目录页页眉/页脚链接当作产品。
+// 尽量宽松，但卡住典型“站点级”链接，避免把目录页页眉/页脚链接当作产品。
 const GENERIC_LINK_BAD = new RegExp(
   [
     'hilfe','support','kundendienst','faq','service',
@@ -34,21 +35,22 @@ function fallbackParse($, url, limit = 50) {
   const items = [];
   const seen = new Set();
 
-  // 一些常见“卡片/栅格”容器的选择器
   const CARD_SEL = [
-    'a[href]',
+    // 先抓明显的卡片，然后退回到所有 a[href]
     '.product, .product-card, .product-item, [class*="product"] a[href]',
-    'article a[href]', 'li a[href]'
+    'article a[href]',
+    'li a[href]',
+    'a[href]'
   ].join(', ');
 
   $(CARD_SEL).each((_, el) => {
     if (items.length >= limit) return false;
 
-    const $a = $(el).is('a') ? $(el) : $(el).find('a[href]').first();
+    const $el = $(el);
+    const $a = $el.is('a') ? $el : $el.find('a[href]').first();
     const rawHref = ($a.attr('href') || '').trim();
     if (!rawHref) return;
 
-    // 过滤明显的站点链接/动作链接
     if (GENERIC_LINK_BAD.test(rawHref)) return;
     if (/add-to-cart|wishlist|compare|mailto:/i.test(rawHref)) return;
 
@@ -56,19 +58,17 @@ function fallbackParse($, url, limit = 50) {
     try { abs = new URL(rawHref, url).toString(); } catch {}
     if (!abs || seen.has(abs)) return;
 
-    // 尽量取一个合理标题
     const title =
       ($a.attr('title') || '').trim() ||
-      ($(el).is('a') ? $a.text() : $(el).text() || '')
+      ($el.is('a') ? $a.text() : $el.text() || '')
         .replace(/\s+/g, ' ')
         .trim();
-
     if (!title) return;
 
     items.push({
       title,
       url: abs,
-      img: '',      // 兜底不强求图片
+      img: '',
       imgs: [],
       price: '',
       sku: '',
@@ -101,13 +101,12 @@ function toUnified(items = []) {
   }));
 }
 
-// 判断 SKU 是否“缺失或可疑”（过短/疑似 Prüfziffer）
+// 判断 SKU 是否“缺失或可疑”
 function skuMissingOrSuspicious(s) {
-  if (!s) return true;
-  const x = String(s).trim();
+  const x = (s || '').trim();
+  if (!x) return true;
   if (x.length < 4) return true;
-  // “Prüfziffer”之类误识别：只含连续 7~12 位数字，且以 48 开头的票据号等
-  if (/^48\d{6,10}$/.test(x)) return true;
+  if (/^\d{1,3}$/.test(x)) return true;
   return false;
 }
 
@@ -115,10 +114,11 @@ function skuMissingOrSuspicious(s) {
  * 解析统一入口
  * @param {string} html
  * @param {string} url
- * @param {{limit?:number, typeHint?:string, detail?: { enable?: boolean, takeMax?: number, concurrency?: number }}} opts
- *  - detail.enable: 是否自动触发详情页补抓（默认 true）
- *  - detail.takeMax: 最多进入详情补抓的条数（默认 20）
- *  - detail.concurrency: 并发（默认 6）
+ * @param {{
+ *   limit?: number,
+ *   typeHint?: string,
+ *   detail?: { enable?: boolean, takeMax?: number, concurrency?: number }
+ * }} opts
  */
 async function parse(html, url, opts = {}) {
   const {
@@ -139,7 +139,7 @@ async function parse(html, url, opts = {}) {
     type = typeHint;
   } else {
     try {
-      const d = await detect.detectStructure(url, html); // 你已有的方法
+      const d = await detect.detectStructure(url, html);
       type = d && (d.type || d.name || '');
     } catch {}
   }
@@ -154,7 +154,7 @@ async function parse(html, url, opts = {}) {
 
   let items = [];
   try {
-    if (key && map[key]) {
+    if (key && map[key] && typeof map[key].parse === 'function') {
       items = await map[key].parse($, url, { limit });
     } else {
       items = fallbackParse($, url, limit);
@@ -173,6 +173,13 @@ async function parse(html, url, opts = {}) {
   // 4) 统一结构
   let unified = toUnified(items);
 
+  // 4.1) 先用「Artikel-Nr 智能提取」在列表级进行一次补齐（从标题/描述中扒）
+  for (const it of unified) {
+    if (!skuMissingOrSuspicious(it.sku)) continue;
+    const guess = artikel.extract([it.name, it.description].filter(Boolean).join(' '));
+    if (guess) it.sku = guess;
+  }
+
   // 5) 自动触发：详情页补抓（仅对缺失/可疑 SKU 的条目，限制条数与并发）
   if (enableDetail && unified.length) {
     const need = unified
@@ -181,18 +188,16 @@ async function parse(html, url, opts = {}) {
 
     if (need.length) {
       try {
-        const enriched = await detailFetcher.fetchDetails(
+        const enriched = await details.fetchDetails(
           need.map(x => x.link),
-          { concurrency, takeMax: need.length }
+          { concurrency, timeout: 15000 }
         );
         // 合并：以详情页返回为主，仅填补空白，不覆盖已存在的更完整信息
         const byUrl = new Map(unified.map(x => [x.link, x]));
         for (const r of enriched) {
           const t = byUrl.get(r.url);
           if (!t) continue;
-          // SKU 优先补齐/替换（如果原值缺失或可疑）
           if (skuMissingOrSuspicious(t.sku) && r.sku) t.sku = r.sku;
-          // 其他字段：只在原字段为空时补
           if (!t.name && r.title) t.name = r.title;
           if (!t.price && r.price) t.price = r.price;
           if (!t.image && r.image) t.image = r.image;
