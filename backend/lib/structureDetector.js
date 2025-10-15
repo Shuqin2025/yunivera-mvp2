@@ -3,6 +3,15 @@
 
 import * as cheerio from "cheerio";
 
+
+// —— 便捷判定工具（新增）——
+function has($, sel) { return $(sel).length > 0; }
+function meta($, name) {
+  return $(`meta[name="${name}"]`).attr('content')
+      || $(`meta[property="${name}"]`).attr('content')
+      || '';
+}
+
 // —— 轻量正则线索（HTML 级别）——
 const RULES = [
   {
@@ -104,7 +113,47 @@ export function detectStructure(input) {
     return { type: "Unknown", confidence: 0, signals: ["invalid_input"] };
   }
 
-  const html = $.html ? $.html() : String(input);
+  
+// —— 快速指纹命中（新增，优先于打分）——
+  try {
+    // Shopware：meta generator、offcanvas 数据属性、典型容器
+    if (
+      /shopware/i.test(meta($, 'generator')) ||
+      has($, '[data-plugin="offcanvas-menu"], [data-offcanvas]') ||
+      has($, '.cms-block-product-listing, .product-box, [data-product-id]')
+    ) {
+      return { type: 'Shopware', confidence: 0.99, signals: ['fast:meta|attr|container'] };
+    }
+
+    // WooCommerce：body 类名与常见容器
+    if (
+      /woocommerce/.test(($('body').attr('class') || '')) ||
+      has($, '.woocommerce ul.products li.product, .products .product, .wc-block-grid__product')
+    ) {
+      return { type: 'WooCommerce', confidence: 0.99, signals: ['fast:body|container'] };
+    }
+
+    // Magento：meta generator、x-magento-init、常见栅格
+    if (
+      /magento/i.test(meta($, 'generator')) ||
+      has($, 'script[type="text/x-magento-init"]') ||
+      has($, '.products-grid .product-item, .product-items .product-item, [data-product-id]')
+    ) {
+      return { type: 'Magento', confidence: 0.99, signals: ['fast:meta|script|grid'] };
+    }
+
+    // Shopify：全局变量、模板标记、典型卡片
+    if (
+      /Shopify/.test($('script').text()) ||
+      has($, 'script[data-section-type], script[data-shopify]') ||
+      has($, '.product-grid, .collection, .grid--view-items, [data-product-id]')
+    ) {
+      return { type: 'Shopify', confidence: 0.99, signals: ['fast:globals|template|cards'] };
+    }
+  } catch (e) {
+    // 忽略快速指纹异常，继续走后续策略
+  }
+const html = $.html ? $.html() : String(input);
 
   // 逐类打分
   const scores = RULES
@@ -124,8 +173,11 @@ export function detectStructure(input) {
       best = { type: "Unknown", score: 0, signals: [] };
     }
   }
-
-  const maxHints =
+// —— 兜底：仍无法识别时，返回 generic-links ——
+  if (!best || best.type === "Unknown" || best.score === 0) {
+    return { type: "generic-links", confidence: 0, signals: ["fallback_generic"] };
+  }
+const maxHints =
     (RULES.find((r) => r.type === best.type)?.hints.length || 1) +
     (RULES.find((r) => r.type === best.type)?.dom?.length || 0);
 
