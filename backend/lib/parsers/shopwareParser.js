@@ -1,55 +1,49 @@
 // backend/lib/parsers/shopwareParser.js
-// 通用 Shopware 列表解析（轻量骨架版）
-// - ESM 导出：default / parse / parseShopware
-// - 入参既可为 $（cheerio 实例），也可为 html 字符串或 { html, url }
+// 宽选择器覆盖常见主题（尽量不依赖具体主题类名）
+// 保留与其它解析器一致的导出结构：module.exports = { id, test, parse }
 
-import { load } from "cheerio";
-
-/* ---------------- utils ---------------- */
-const pickText = ($, el) => ($(el).text() || "").replace(/\s+/g, " ").trim();
-
-const abs = (base, href) => {
-  const s = (href || "").trim();
-  if (!s) return "";
+// —— 工具 ——
+function pickText($, el) { return ($(el).text() || '').replace(/\s+/g, ' ').trim(); }
+function abs(base, href) {
+  const s = String(href || '').trim();
+  if (!s) return '';
   if (/^https?:\/\//i.test(s)) return s;
-  if (s.startsWith("//")) return "https:" + s;
+  if (s.startsWith('//')) return 'https:' + s;
   try {
-    const b = new URL(base || "https://localhost");
-    if (s.startsWith("/")) return b.origin + s;
-    return b.origin + "/" + s.replace(/^\.?\//, "");
-  } catch {
-    return s;
-  }
-};
-
-const splitSrcset = (s) =>
-  (s || "").split(",").map(x => x.trim().split(/\s+/)[0]).filter(Boolean);
-
+    const b = new URL(base || 'https://localhost');
+    if (s.startsWith('/')) return b.origin + s;
+    return b.origin + '/' + s.replace(/^\.?\//, '');
+  } catch { return s; }
+}
+function splitSrcset(s) {
+  return String(s || '')
+    .split(',')
+    .map(x => x.trim().split(/\s+/)[0])
+    .filter(Boolean);
+}
 function bestImgFrom($, $root, base) {
   const seen = new Set();
   const push = (u) => { if (u) seen.add(abs(base, u)); };
 
-  const $img = $root.find("img").first();
+  const $img = $root.find('img').first();
   if ($img.length) {
-    push($img.attr("data-src"));
-    splitSrcset($img.attr("data-srcset")).forEach(push);
-    push($img.attr("data-fallbacksrc"));
-    splitSrcset($img.attr("srcset")).forEach(push);
-    push($img.attr("src"));
+    push($img.attr('data-src'));
+    splitSrcset($img.attr('data-srcset')).forEach(push);
+    push($img.attr('data-fallbacksrc'));
+    splitSrcset($img.attr('srcset')).forEach(push);
+    push($img.attr('src'));
   }
-  $root.closest("picture").find("source[srcset]").each((_i, el) => {
-    splitSrcset(el.attribs?.srcset || "").forEach(push);
+  $root.closest('picture').find('source[srcset]').each((_i, el) => {
+    splitSrcset(el.attribs?.srcset || '').forEach(push);
   });
 
-  // 兜底：从节点 HTML 里扒图
-  const html = $root.html() || "";
+  // 兜底：从节点 HTML 里扒出图片 URL
+  const html = $root.html() || '';
   const re = /https?:\/\/[^"'()\s<>]+?\.(?:jpe?g|png|webp)(?:\?[^"'()\s<>]*)?/ig;
   let m; while ((m = re.exec(html))) push(m[0]);
 
-  const list = [...seen].filter(u =>
-    /\.(?:jpe?g|png|webp)(?:$|\?)/i.test(u) && !/loader\.svg/i.test(u)
-  );
-  if (!list.length) return "";
+  const list = [...seen].filter(u => /\.(?:jpe?g|png|webp)(?:$|\?)/i.test(u) && !/loader\.svg/i.test(u));
+  if (!list.length) return '';
   const score = (u) => {
     let s = 0;
     const mm = u.match(/(\d{2,4})x(\d{2,4})/);
@@ -58,105 +52,68 @@ function bestImgFrom($, $root, base) {
     if (/\.webp(?:$|\?)/i.test(u)) s += 5;
     return s;
   };
-  return list.sort((a,b)=>score(b)-score(a))[0];
+  return list.sort((a,b) => score(b) - score(a))[0];
 }
-
 function readPrice($, node) {
   const txt =
     pickText($, $(node).find('.price--default, .product--price, .product-price, .product-price-info, [itemprop="price"]')) ||
-    pickText($, $(node).find('.product--info .price, .price')) ||
-    "";
-  // try finding "12,34" or "12.34"
+    pickText($, $(node).find('.product--info .price, .price')) || '';
   const m = txt.match(/(\d{1,3}(?:[.,]\d{2}))/);
-  return m ? m[1].replace(",", ".") : "";
+  return m ? m[1].replace(',', '.') : '';
 }
 
-/* ------------ main parse ------------ */
-/**
- * parseShopware(input, opts)
- * - input: $
- *       | html string
- *       | { html, url }
- * - opts: { url?, limit?, site?, imageHints?, listSelectors? ... }
- */
-async function parseShopware(input, opts = {}) {
-  const limit = Number(opts.limit || 50);
-  let $, pageUrl = "";
-
-  if (input && typeof input === "object" && input.root && input.find) {
-    // 已经是 cheerio $
-    $ = input;
-    pageUrl = opts.url || opts.pageUrl || "";
-  } else if (typeof input === "string") {
-    $ = load(input, { decodeEntities: false });
-    pageUrl = opts.url || opts.pageUrl || "";
-  } else if (input && typeof input === "object") {
-    const html = input.html || "";
-    pageUrl = input.url || opts.url || "";
-    $ = load(html, { decodeEntities: false });
-  } else {
-    return [];
-  }
-
-  const base = (() => {
-    try { return pageUrl ? new URL(pageUrl).origin : (new URL($('base[href]').attr('href')||"https://localhost")).origin; }
-    catch { return "https://localhost"; }
-  })();
-
-  const SELECTORS = opts.listSelectors || [
-    ".listing--container .product--box",
-    ".product--listing .product--box",
-    ".js--isotope .product--box",
-    "#listing .product--box",
-    ".is--ctl-listing .product--box",
-    ".product--box", // 最后兜底,
-    ".cms-block-product-listing .product-box",
-    ".cms-element-product-listing .product-box",
-    ".product-box",
-    ".product-card",
-    "[data-product-id]",
-    "[data-product=\"true\"]",
-  ];
-
-  // 黑名单（避免把详情页“相关推荐”等滑块误判为卡片）
-  const BLACK = [
-    ".product--detail", ".product--details", "#detail",
-    ".cross-selling", ".crossselling", ".related", ".related--products",
-    ".similar--products", ".upselling", ".accessories", ".accessory--slider",
-    ".product-slider--container", ".product--slider", ".is--ctl-detail",
-  ].join(", ");
-
-  // 找到列表卡片
-  let cards = [];
-  for (const sel of SELECTORS) {
-    const arr = $(sel).toArray().filter(el => $(el).closest(BLACK).length === 0);
-    if (arr.length) { cards = arr; break; }
-  }
-  if (!cards.length) return [];
-
+function parse($, url, { limit = 50 } = {}) {
   const out = [];
-  for (const el of cards) {
+
+  // —— 更“宽”的卡片选择器（Shopware 5/6 兼容）——
+  const baseCards = $(
+    '[data-product-id], .product--box, .product-box, .product-card, ' +
+    '.cms-block-product-listing .product-box, .cms-element-product-listing .product-box'
+  );
+
+  // 由常见详情链接反推商品容器
+  const linkAnchors = $(
+    'a[href*="/detail"], a[href*="/produkt"], a[href*="/product"], ' +
+    'a.product--image, a.product-image, a.product-title'
+  );
+  const fromLinks = linkAnchors.closest('[data-product-id], .product--box, .product-box, .product-card');
+
+  const cards = baseCards.add(fromLinks);
+
+  // 黑名单：避免详情页的 cross-selling/related 等滑块误判为列表
+  const BLACK = [
+    '.product--detail', '.product--details', '#detail',
+    '.cross-selling', '.crossselling', '.related', '.related--products',
+    '.similar--products', '.upselling', '.accessories', '.accessory--slider',
+    '.product-slider--container', '.product--slider', '.is--ctl-detail',
+  ].join(', ');
+
+  cards.each((_i, el) => {
     const $el = $(el);
+    if ($el.closest(BLACK).length) return; // 跳过黑名单区域
+
+    // —— 选择有效链接 ——
     const $a = $el.find('a[href]').first();
-
     const title =
-      pickText($, $el.find(".product--title, .product--info a, .product--name, [itemprop='name'], .product-box__title, .product-title, .product-name")).trim() ||
-      ($a.attr("title") || "").trim();
-
+      pickText($, $el.find('.product--title, .product--info a, .product--name, [itemprop="name"], .product-box__title, .product-title, .product-name').first()) ||
+      ($a.attr('title') || '').trim() ||
+      pickText($, $a);
     const href =
-      $el.attr("data-url") || $el.attr("data-link") || $el.attr("data-href") ||
-      $a.attr("href") || "";
-    const link = abs(base, href);
+      $el.attr('data-url') || $el.attr('data-link') || $el.attr('data-href') ||
+      $a.attr('href') || '';
+    const link = abs(url, href);
 
-    const img = bestImgFrom($, $el, base);
+    // —— 图片 ——
+    const img = bestImgFrom($, $el, url);
+
+    // —— 价格 ——
     const price = readPrice($, $el);
 
-    // SKU 占位（Shopware 常有 data-ordernumber）
+    // —— SKU（Shopware 常有 data-ordernumber/data-sku） ——
     const sku =
-      ($el.attr("data-ordernumber") || "").trim() ||
-      ($el.find("[data-ordernumber]").attr("data-ordernumber") || "").trim() ||
-      ($el.find("[data-sku]").attr("data-sku") || "").trim() ||
-      "";
+      ($el.attr('data-ordernumber') || '').trim() ||
+      ($el.find('[data-ordernumber]').attr('data-ordernumber') || '').trim() ||
+      ($el.find('[data-sku]').attr('data-sku') || '').trim() || '';
 
     if (title && link) {
       out.push({
@@ -165,19 +122,28 @@ async function parseShopware(input, opts = {}) {
         link,
         img,
         imgs: img ? [img] : [],
-        sku,
         price,
-        currency: "",
-        moq: "",
-        desc: ""
+        sku,
+        desc: ''
       });
     }
-    if (out.length >= limit) break;
-  }
+  });
 
   return out.slice(0, limit);
 }
 
-/* —— 导出名兼容 —— */
-export default parseShopware;
-export { parseShopware, parseShopware as parse };
+const api = {
+  id: 'shopware',
+  test: ($, url) => {
+    try {
+      const metaApp = ($('meta[name="application-name"]').attr('content') || '').toLowerCase();
+      if (metaApp.includes('shopware')) return true;
+    } catch {}
+    if ($('[data-product-id], .product--box, .product-box').length > 0) return true;
+    return /shopware/i.test(url);
+  },
+  parse
+};
+
+module.exports = api;
+module.exports.default = api;
