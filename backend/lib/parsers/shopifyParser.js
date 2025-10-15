@@ -10,14 +10,14 @@ function readPrice($, node) {
 
 function parse($, url, { limit = 50 } = {}) {
   const out = [];
-  // 尽量覆盖常见 Shopify 主题
+  // ?????? Shopify ??
   const cards = $(
-    '[class*="product-card"], [class*="ProductItem"], .grid-product, .product-item'
+    '.collection .product-grid [data-product-id], .collection .product-card, .grid--view-items .grid__item, product-grid-item, [data-section-type*="collection"] .product-card, [data-product-handle], [class*="product-card"], [class*="ProductItem"], .grid-product'
   );
 
   cards.each((_, el) => {
     const $el = $(el);
-    const a = $el.find('a').first();
+    const a = $el.find('a[href]')[0] ? $el.find('a[href]').first() : $el.closest('a[href]').first();
 
     const title =
       pick($, $el.find('[class*="product-title"], [class*="ProductItem__Title"]')) ||
