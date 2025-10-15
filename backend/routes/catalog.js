@@ -47,12 +47,33 @@ const TITLE_SKIP_PATTERNS = [
   /\b(cart|checkout|warenkorb|order|bestellung|faq|privacy|terms|about)\b/i,
 ];
 
+// 关键词黑名单（标题/链接中任意命中即视为站点链接，过滤掉）
+const SKIP_WORDS = [
+  'login','anmelden','register','konto','account','mein konto','my account',
+  'logout','cart','warenkorb','basket','wishlist','wunschliste',
+  'agb','impressum','datenschutz','privacy','policy','hilfe','support','kontakt',
+  'newsletter','blog','news','service','faq','payment','shipping','versand',
+  'returns','widerruf','revocation','cookie','sitemap'
+];
+
+
+
 function isSiteLink(link = "", title = "") {
   try {
     const u = new URL(link, "http://_/");
     const p = (u.pathname || "").toLowerCase();
+    // 路径基于正则的快速判断
     if (PATH_SKIP_PATTERNS.some(re => re.test(p))) return true;
+    // 关键词黑名单：路径中直接包含
+    if (SKIP_WORDS.some(w => p.includes(w))) return true;
   } catch {}
+  const t = (title || "").toLowerCase();
+  if (TITLE_SKIP_PATTERNS.some(re => re.test(t))) return true;
+  // 关键词黑名单：标题中直接包含
+  if (SKIP_WORDS.some(w => t.includes(w))) return true;
+  return false;
+}
+ catch {}
   const t = (title || "").toLowerCase();
   if (TITLE_SKIP_PATTERNS.some(re => re.test(t))) return true;
   return false;
