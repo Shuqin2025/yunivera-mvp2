@@ -109,7 +109,13 @@ async function parseShopware(input, opts = {}) {
     ".js--isotope .product--box",
     "#listing .product--box",
     ".is--ctl-listing .product--box",
-    ".product--box", // 最后兜底
+    ".product--box", // 最后兜底,
+    ".cms-block-product-listing .product-box",
+    ".cms-element-product-listing .product-box",
+    ".product-box",
+    ".product-card",
+    "[data-product-id]",
+    "[data-product=\"true\"]",
   ];
 
   // 黑名单（避免把详情页“相关推荐”等滑块误判为卡片）
@@ -131,10 +137,10 @@ async function parseShopware(input, opts = {}) {
   const out = [];
   for (const el of cards) {
     const $el = $(el);
-    const $a = $el.find("a").first();
+    const $a = $el.find('a[href]').first();
 
     const title =
-      pickText($, $el.find(".product--title, .product--info a, .product--name, [itemprop='name']")).trim() ||
+      pickText($, $el.find(".product--title, .product--info a, .product--name, [itemprop='name'], .product-box__title, .product-title, .product-name")).trim() ||
       ($a.attr("title") || "").trim();
 
     const href =
@@ -175,4 +181,3 @@ async function parseShopware(input, opts = {}) {
 /* —— 导出名兼容 —— */
 export default parseShopware;
 export { parseShopware, parseShopware as parse };
-
