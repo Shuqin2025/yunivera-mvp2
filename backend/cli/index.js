@@ -1,79 +1,118 @@
 #!/usr/bin/env node
-/**
- * CLI: 输入 URL → 检测结构 → 解析目录 → 详情补抓 → 智能提取 SKU → 导出 Excel
- * 用法：
- *   npm run cli -- "https://example.com/category" --limit=50 --outfile=/tmp/out.xlsx
- */
+import fs from 'node:fs';
+import path from 'node:path';
+import urlMod from 'node:url';
+import { logger } from '../lib/logger.js';
+import config from '../lib/config.js';
+import { withRetry } from '../lib/retryHandler.js';
+import { ProgressBar } from '../lib/progressBar.js';
 
-const path = require('path');
-const fs = require('fs');
-const { URL } = require('url');
+import { detectStructure } from '../lib/structureDetector.js';
+import { parseWithTemplate } from '../lib/templateParser.js';
+import { fetchDetailsAndMerge } from '../lib/modules/detailFetcher.js';
+import { extractArtikelNr } from '../lib/modules/artikelExtractor.js';
+import { exportToExcel } from '../lib/modules/excelExporter.js';
 
-const templateParser = require('../lib/templateParser');
-const detailFetcher = require('../lib/modules/detailFetcher');
-const artikelExtractor = require('../lib/modules/artikelExtractor');
-const excelExporter = require('../lib/modules/excelExporter');
+// 简易参数解析：--url 可多次，--limit，--xlsx
+const argv = process.argv.slice(2);
+const urls = [];
+let limit = 50;
+let outName = config.export.defaultXlsxName;
 
-function parseArgs(argv) {
-  const args = { limit: 50, detailSkuMax: 0, outfile: path.resolve(process.cwd(), 'catalog.xlsx') };
-  for (const a of argv.slice(2)) {
-    if (!a) continue;
-    if (!a.startsWith('--')) { args.url = a; continue; }
-    const [k, v = ''] = a.replace(/^--/, '').split('=');
-    if (k === 'limit') args.limit = Number(v || 50);
-    if (k === 'detailSkuMax') args.detailSkuMax = Number(v || 0);
-    if (k === 'outfile') args.outfile = path.resolve(process.cwd(), v || 'catalog.xlsx');
+for (let i = 0; i < argv.length; i++) {
+  const a = argv[i];
+  if (a === '--url' || a === '-u') { urls.push(argv[++i]); continue; }
+  if (a === '--limit' || a === '-l') { limit = parseInt(argv[++i] || '50', 10); continue; }
+  if (a === '--xlsx' || a === '-o') { outName = argv[++i] || outName; continue; }
+}
+
+if (urls.length === 0) {
+  logger.info('用法: npm run cli -- --url <catalogURL> [--url <...>] [--limit 50] [--xlsx out.xlsx]');
+  process.exit(0);
+}
+
+if (!fs.existsSync(config.export.outDir)) fs.mkdirSync(config.export.outDir, { recursive: true });
+
+async function runOne(url) {
+  logger.info(`开始处理: ${url}`);
+
+  const { type } = await withRetry(
+    () => detectStructure(url),
+    {
+      tries: config.request.retry,
+      delayMs: config.request.retryDelayMs,
+      jitterMs: config.request.retryJitterMs,
+      onRetry: ({ attempt, backoff, err }) =>
+        logger.warn(`detect 重试#${attempt} in ${backoff}ms: ${err?.message || err}`),
+    }
+  );
+
+  logger.info(`识别类型: ${type}`);
+
+  let rows = await withRetry(
+    () => parseWithTemplate(url, { limit }),
+    {
+      tries: config.request.retry,
+      delayMs: config.request.retryDelayMs,
+      jitterMs: config.request.retryJitterMs,
+      onRetry: ({ attempt, backoff }) =>
+        logger.warn(`parse 重试#${attempt} in ${backoff}ms`),
+    }
+  );
+
+  // 详情页补抓（只有当缺少关键信息时触发）
+  const needDetail = rows.some(r => (!r.sku && !r.ean) || (!r.price && !r.img));
+  if (needDetail) {
+    logger.info(`触发详情页补抓… (${rows.length} 记录)`);
+    const bar = new ProgressBar(rows.length, 'details');
+    rows = await fetchDetailsAndMerge(rows, { onProgress: () => bar.tick() });
   }
-  return args;
+
+  // 统一做 Artikel-Nr/EAN/SKU 智能提取（无损覆盖：只填空位）
+  rows = rows.map(r => {
+    const id = extractArtikelNr({
+      title: r.title || '',
+      desc: r.desc || '',
+      rawText: '',
+      sku: r.sku || '',
+      ean: r.ean || '',
+    });
+    return {
+      ...r,
+      sku: r.sku || id.sku || '',
+      ean: r.ean || id.ean || '',
+      model: r.model || id.model || '',
+    };
+  });
+
+  // 导出
+  const safeName = (new urlMod.URL(url)).hostname.replace(/[^\w.-]/g, '_');
+  const outPath = path.join(config.export.outDir, `${safeName}__${outName}`);
+  await exportToExcel(rows, { file: outPath });
+  logger.info(`✅ 完成: ${url} → ${outPath} （共 ${rows.length} 条）`);
+
+  return { url, count: rows.length, out: outPath };
 }
 
 (async () => {
-  const args = parseArgs(process.argv);
-  if (!args.url) {
-    console.error('用法: npm run cli -- "https://example.com/category" --limit=50 --detailSkuMax=12 --outfile=./out.xlsx');
-    process.exit(2);
+  const bar = new ProgressBar(urls.length, 'batch');
+  const results = [];
+  for (const u of urls) {
+    try {
+      const r = await runOne(u);
+      results.push({ ...r, ok: true });
+    } catch (err) {
+      logger.error(`❌ 失败: ${u} → ${err?.message || err}`);
+      results.push({ url: u, ok: false, error: err?.message || String(err) });
+    } finally {
+      bar.tick();
+    }
   }
 
-  // 粗校验URL
-  try { new URL(args.url); } catch {
-    console.error('无效 URL:', args.url);
-    process.exit(2);
-  }
-
-  console.log('▶ 解析目录:', args.url);
-  const base = await templateParser.parseUrl(args.url, { limit: args.limit });
-
-  console.log(`  - 初始抓到 ${base.products?.length || 0} 条`);
-
-  // 详情页补抓（如需）
-  let enriched = base.products || [];
-  if (args.detailSkuMax > 0) {
-    console.log(`▶ 详情页补抓 SKU（最多 ${args.detailSkuMax} 条）…`);
-    enriched = await detailFetcher.enrich(enriched, {
-      max: args.detailSkuMax,
-      // 传入基础URL，便于相对链接处理
-      baseUrl: base.url || args.url,
-    });
-    console.log(`  - 补抓后仍有 ${enriched.length} 条`);
-  }
-
-  // 智能提取 SKU / EAN / P/N
-  console.log('▶ 智能提取 SKU / EAN / P/N …');
-  enriched = enriched.map(p => {
-    const sku = p.sku && String(p.sku).trim() ? p.sku : artikelExtractor.extractFromText([
-      p.title, p.desc, p.url
-    ].filter(Boolean).join(' \n ')).sku;
-    return { ...p, sku: sku || '' };
-  });
-
-  // 导出 Excel
-  console.log('▶ 导出 Excel =>', args.outfile);
-  await excelExporter.toXLSX(enriched, args.outfile);
-
-  // 成功提示
-  const size = fs.existsSync(args.outfile) ? fs.statSync(args.outfile).size : 0;
-  console.log(`✓ 完成。共 ${enriched.length} 条，文件大小 ${(size/1024).toFixed(1)} KB`);
-})().catch(err => {
-  console.error('✗ 运行失败：', err?.stack || err);
-  process.exit(1);
-});
+  // 汇总
+  const ok = results.filter(r => r.ok).length;
+  const fail = results.length - ok;
+  logger.info(`批次完成：成功 ${ok}，失败 ${fail}`);
+  if (fail) logger.warn('失败条目：' + results.filter(r => !r.ok).map(r => r.url).join(', '));
+  process.exit(0);
+})();
