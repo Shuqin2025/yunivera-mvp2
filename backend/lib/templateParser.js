@@ -12,6 +12,17 @@ const shopify  = require('./parsers/shopifyParser');
 const artikel = require('./modules/artikelExtractor');
 const details = require('./modules/detailFetcher');
 
+// 解析后结果过少的回退策略（命中模板但抓不到 >=3 个有效产品时返回空）
+function withFallback(parseFn, $, url, limit) {
+  try {
+    const data = parseFn($, url, { limit }) || [];
+    const valid = Array.isArray(data) ? data.filter(x => x && x.title && x.url) : [];
+    if (valid.length >= 3) return data;
+  } catch {}
+  // 回退：避免误把导航当商品
+  return [];
+}
+
 // —— 通用垃圾/站点链接过滤 ——
 // 尽量宽松，但卡住典型“站点级”链接，避免把目录页页眉/页脚链接当作产品。
 const GENERIC_LINK_BAD = new RegExp(
@@ -155,7 +166,7 @@ async function parse(html, url, opts = {}) {
   let items = [];
   try {
     if (key && map[key] && typeof map[key].parse === 'function') {
-      items = await map[key].parse($, url, { limit });
+      items = withFallback(map[key].parse, $, url, limit);
     } else {
       items = fallbackParse($, url, limit);
     }
