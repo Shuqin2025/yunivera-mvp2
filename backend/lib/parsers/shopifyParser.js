@@ -1,92 +1,248 @@
 // backend/lib/parsers/shopifyParser.js
-const { load } = require('cheerio');
-
-function pick($el) {
-  return ($el.text() || '').replace(/\s+/g, ' ').trim();
-}
-function abs(base, href) {
-  try { return new URL(href, base).toString(); } catch { return href || ''; }
-}
-function firstAttr(el, keys) {
-  for (const k of keys) {
-    const v = el.attr(k);
-    if (v) return v;
+/* eslint-disable no-useless-escape */
+const SELECTORSETS = [
+  // Dawn / Sense 等常见卡片
+  {
+    card: [
+      "[class*=product-card]",
+      "[class*=ProductItem]",
+      ".grid-product",
+      ".product-item",
+      ".product-grid-item",
+      "li[class*=product]",
+      "article[class*=product]"
+    ].join(","),
+    link: "a[href*='/products/']",
+    title: [
+      "[class*=product-title]",
+      "[class*=ProductItem__Title]",
+      "[class*=card__heading]",
+      "[itemprop='name']",
+      "a[title]"
+    ].join(","),
+    price: [
+      "[class*=price]",
+      "[class*=Price]",
+      "price",
+      "[itemprop='price']",
+      "meta[itemprop='price']"
+    ].join(","),
+    img: "img"
   }
-  return '';
+];
+
+// 价格清洗：去掉符号/空白，只保留原文本（前端展示即可）
+function cleanPrice(txt) {
+  if (!txt) return "";
+  return String(txt).replace(/\s+/g, " ").trim();
 }
-function readPrice(raw) {
-  if (!raw) return '';
-  const m = String(raw).match(/([\d.,]+)\s*(€|eur|€)/i);
-  return m ? m[1].replace('.', '').replace(',', '.') : '';
+
+function normalizeUrl(base, href) {
+  try {
+    if (!href) return "";
+    // 处理 data-src 等无协议的 CDN 链接
+    if (/^\/\//.test(href)) return "https:" + href;
+    // 已是绝对地址
+    if (/^https?:\/\//i.test(href)) return href;
+    // 相对路径
+    return new URL(href, base).toString();
+  } catch (_) {
+    return href || "";
+  }
 }
 
-module.exports = {
-  /**
-   * @param {CheerioAPI} $
-   * @param {string} url
-   * @param {{limit?:number}} opts
-   */
-  parse($, url, { limit = 50 } = {}) {
-    const out = [];
-
-    // 常见集合容器（不同主题）
-    const containers = [
-      '.collection, .collection__products, .collection-grid, .grid--collection',
-      '.product-grid, .grid, [data-products], [data-section-type*="collection"]',
-      '.template-collection, #Collection, main [role="main"]'
-    ];
-
-    let cards = $();
-    for (const sel of containers) {
-      const found = $(sel);
-      if (found.length) { cards = found; break; }
+function pickFirst($el, sel) {
+  try {
+    const node = $el.find(sel).first();
+    if (!node || node.length === 0) return "";
+    // meta[itemprop=price] 场景
+    const isMeta = node[0] && node[0].name === "meta";
+    if (isMeta) {
+      const v = node.attr("content") || node.attr("value") || "";
+      return (v || "").trim();
     }
-    if (!cards.length) cards = $('*'); // 容错：在全局里找卡片
+    // 常规标签：取 text
+    const txt = node.text() || node.attr("title") || "";
+    return (txt || "").replace(/\s+/g, " ").trim();
+  } catch {
+    return "";
+  }
+}
 
-    // 每张商品卡（购物主题差异极大，做多套选择器）
-    const productEls = cards.find([
-      '.product-card, .product-grid__item, .grid__item',
-      'li.grid__item, li.product, article, .card--product',
-      '[data-product-id], [data-product-handle]'
-    ].join(','));
+function pickImage($el, base, sel = "img") {
+  const n = $el.find(sel).first();
+  if (!n || n.length === 0) return "";
+  const src = n.attr("data-src") || n.attr("data-original") || n.attr("src") || "";
+  return normalizeUrl(base, src);
+}
 
-    productEls.each((_, node) => {
-      const el = $(node);
-      const a = el.find('a[href*="/products/"]').first();
-      const link = abs(url, a.attr('href') || '');
+function fromDom($, url, limit = 50) {
+  const out = [];
+  for (const set of SELECTORSETS) {
+    const $cards = $(set.card);
+    if (!$cards || $cards.length === 0) continue;
 
-      const title =
-        pick(el.find('.product-card__title').first()) ||
-        pick(el.find('.card__heading, .product-title, .full-unstyled-link').first()) ||
-        pick(a) ||
-        '';
+    $cards.each((_, el) => {
+      const $el = $(el);
+      const a = $el.find(set.link).first();
+      const href = a.attr("href") || "";
+      const link = normalizeUrl(url, href);
 
-      // 懒加载图片兜底
-      const imgEl = el.find('img').first();
-      const img =
-        firstAttr(imgEl, ['data-src', 'data-original', 'data-lazy-src', 'data-srcset', 'srcset', 'src'])
-          .split(' ')
-          .shift() || '';
+      // 有些主题卡片没有直接放标题在卡片内部，回退试多个层级
+      let title =
+        pickFirst($el, set.title) ||
+        (a.attr("title") || "").trim() ||
+        $el.attr("aria-label") ||
+        "";
 
-      const priceRaw =
-        pick(el.find('.price-item--regular, .price__regular .price-item').first()) ||
-        pick(el.find('.price, .product-card__price, [class*="price"]').first()) ||
-        '';
-      const price = readPrice(priceRaw);
+      // 价格有两层：显示价 + data/meta 价
+      let price =
+        pickFirst($el, set.price) ||
+        ($el.find("meta[itemprop='price']").attr("content") || "").trim();
 
-      if (title && link) {
+      const img = pickImage($el, url, set.img);
+
+      // 如果至少拿到了链接，就先收一个骨架，后续 compare=1 时会详情补齐
+      if (link) {
         out.push({
-          title,
+          title: title || "",
           url: link,
-          img: img ? abs(url, img) : '',
-          imgs: img ? [abs(url, img)] : [],
-          price,
-          sku: '',
-          desc: ''
+          link,
+          img,
+          imgs: img ? [img] : [],
+          price: cleanPrice(price),
+          sku: "",
+          desc: ""
         });
       }
     });
 
-    return out.slice(0, limit);
+    if (out.length) break; // 第一套命中就结束
   }
+
+  // 去重（按 URL）
+  const seen = new Set();
+  const uniq = out.filter(x => {
+    if (!x.url) return false;
+    if (seen.has(x.url)) return false;
+    seen.add(x.url);
+    return true;
+  });
+
+  return uniq.slice(0, limit);
+}
+
+/**
+ * JSON-LD 回退：抓取 <script type="application/ld+json"> 里的 ItemList
+ * 兼容形如：
+ * {
+ *   "@type": "ItemList",
+ *   "itemListElement": [
+ *     {"@type":"ListItem","position":1,"url":"/products/xxx","name":"标题","image":"...","offers":{"price":"34.99","priceCurrency":"EUR"}}
+ *   ]
+ * }
+ */
+function fromJsonLd($, url, limit = 50) {
+  const out = [];
+  const scripts = $("script[type='application/ld+json']");
+  scripts.each((_, el) => {
+    const raw = $(el).contents().text();
+    if (!raw) return;
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      return;
+    }
+
+    const listCandidates = Array.isArray(data) ? data : [data];
+    listCandidates.forEach(node => {
+      // ItemList 结构
+      if (node && node["@type"] && String(node["@type"]).toLowerCase() === "itemlist" && Array.isArray(node.itemListElement)) {
+        node.itemListElement.forEach(item => {
+          // 兼容两种：item 直接是对象，或者 {item:{...}}
+          const cell = item.item || item;
+          if (!cell) return;
+          const href = cell.url || (cell["@id"] || "");
+          const link = normalizeUrl(url, href);
+          const title = (cell.name || "").trim();
+          // 优先 offers.price，其次 price，其次 meta
+          const price =
+            (cell.offers && (cell.offers.price || cell.offers.lowPrice)) ||
+            cell.price ||
+            "";
+          // 图片：可能是字符串或数组
+          let img = "";
+          if (Array.isArray(cell.image)) img = cell.image[0] || "";
+          else if (typeof cell.image === "string") img = cell.image;
+          img = normalizeUrl(url, img);
+
+          if (link) {
+            out.push({
+              title: title || "",
+              url: link,
+              link,
+              img,
+              imgs: img ? [img] : [],
+              price: cleanPrice(price),
+              sku: "",
+              desc: ""
+            });
+          }
+        });
+      }
+    });
+  });
+
+  // 去重 + 截断
+  const seen = new Set();
+  const uniq = out.filter(x => {
+    if (!x.url) return false;
+    if (seen.has(x.url)) return false;
+    seen.add(x.url);
+    return true;
+  });
+
+  return uniq.slice(0, limit);
+}
+
+function mergePreferDom(domList, jsonldList) {
+  if (!domList || domList.length === 0) return jsonldList || [];
+  if (!jsonldList || jsonldList.length === 0) return domList;
+
+  const map = new Map(domList.map(p => [p.url, p]));
+  for (const j of jsonldList) {
+    if (!map.has(j.url)) {
+      map.set(j.url, j);
+    } else {
+      const d = map.get(j.url);
+      // 用 JSON-LD 填补空缺字段
+      if (!d.title && j.title) d.title = j.title;
+      if (!d.price && j.price) d.price = j.price;
+      if ((!d.img || d.img === "") && j.img) {
+        d.img = j.img;
+        d.imgs = j.img ? [j.img] : d.imgs || [];
+      }
+    }
+  }
+  return Array.from(map.values());
+}
+
+function parse($, url, { limit = 50 } = {}) {
+  const dom = fromDom($, url, limit);
+  // 如果 DOM 解析出的标题为空或数量很少，尝试 JSON-LD 回退补齐
+  const needJsonLd = dom.length === 0 || dom.filter(x => x.title).length < Math.min(5, dom.length);
+  const viaJson = needJsonLd ? fromJsonLd($, url, limit) : [];
+  const merged = mergePreferDom(dom, viaJson);
+  return merged.slice(0, limit);
+}
+
+function parseShopify($, url, opts = {}) {
+  return parse($, url, opts);
+}
+
+module.exports = {
+  default: parse,
+  parse,
+  parseShopify,
 };
