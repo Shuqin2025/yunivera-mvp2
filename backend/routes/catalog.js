@@ -9,6 +9,8 @@ import axios from "axios";
 import * as cheerio from "cheerio";
 import jschardet from "jschardet";
 import iconv from "iconv-lite";
+import fs from 'node:fs';
+import path from 'node:path';
 
 // 站点适配器（专用）
 import sinotronic from "../adapters/sinotronic.js";
@@ -20,6 +22,19 @@ import templateParser from "../lib/templateParser.js"; // 新增：四大系统�
 import universal from "../adapters/universal.js";      // 默认导出：async function ({url,limit,debug})
 
 const router = Router();
+
+// ---- metrics helper ----
+function computeFieldsRate(list) {
+  const keys = ['title','url','img','price','sku','desc'];
+  const n = Array.isArray(list) ? list.length : 0;
+  const out = {};
+  for (const k of keys) {
+    out[k] = n ? list.filter(x => x && String(x[k] || '').trim()).length / n : 0;
+  }
+  return out;
+}
+
+
 
 // ---------------- 通用兜底选择器 ----------------
 const CONTAINER_FALLBACK = [
@@ -347,10 +362,16 @@ router.all("/parse", async (req, res) => {
       moq: it.moq || it.minQty || "",
     }));
 
-    const resp = {
+    
+/*__INJECT_METRICS__*/
+const count = (products || []).length;
+const fieldsRate = computeFieldsRate(products || []);
+const wantMetrics = ['1','true','yes','on'].includes(String(qp.metrics || '').toLowerCase());
+const wantSnapshot = ['1','true','yes','on'].includes(String(qp.snapshot || qp.debug || '').toLowerCase());
+const resp = {
       ok: true,
       url,
-      count: products.length,
+      count: count,
       products,          // 前端直接使用 products
       items,             // 兼容旧字段
       adapter: adapter_used,  // 给前端 toast 显示“来源：xxx”
@@ -363,7 +384,21 @@ router.all("/parse", async (req, res) => {
       hintType,
     };
 
-    return res.json(resp);
+    
+if (wantMetrics) { resp.fieldsRate = fieldsRate; }
+try {
+  if (wantSnapshot) {
+    const SNAPSHOT_DIR = process.env.SNAPSHOT_DIR || path.resolve('./snapshots');
+    const ts = new Date();
+    const pad = (n)=>String(n).padStart(2,'0');
+    const stamp = `${ts.getFullYear()}${pad(ts.getMonth()+1)}${pad(ts.getDate())}-${pad(ts.getHours())}${pad(ts.getMinutes())}${pad(ts.getSeconds())}`;
+    const dir = path.join(SNAPSHOT_DIR, stamp);
+    fs.mkdirSync(dir, { recursive: true });
+    const payload = { stage:'PARSE', url, adapter: adapter_used, count, fieldsRate, products };
+    fs.writeFileSync(path.join(dir, 'parse.json'), JSON.stringify(payload, null, 2));
+  }
+} catch {}
+return res.json(resp);
   } catch (err) {
     return res.status(200).json({ ok: false, error: String(err?.message || err) });
   }
