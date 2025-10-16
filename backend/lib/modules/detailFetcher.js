@@ -5,6 +5,7 @@
 //   - fetch(items, opts)         // 传入 [{link|url, sku?...}]，返回补齐后的 items（原地合并）。
 //   - fetchDetails(links, opts)  // 传入 [url...]，返回 [{ url, sku, title, price, image, description }]
 //   - shouldFetch(items, ...)    // 判断是否值得触发补抓
+//   - normalizeUrl(base, href)   // 统一 URL 规范化（绝对化）
 //
 // 依赖：backend/lib/http.js；modules/artikelExtractor.js
 
@@ -13,9 +14,28 @@ const pLimit = require('p-limit');
 const http = require('../http');
 const artikel = require('./artikelExtractor');
 
-// 小工具
+// ---------- 小工具 ----------
 const txt = (s) => (s || '').replace(/\s+/g, ' ').trim();
 const first = (...vals) => vals.find(v => !!txt(v));
+
+/** 将相对/脏 URL 统一绝对化、清洗 query/空格等 */
+function normalizeUrl(base, href) {
+  const raw = txt(href);
+  if (!raw) return '';
+
+  // mailto/tel 等直接丢弃
+  if (/^(mailto:|tel:|javascript:)/i.test(raw)) return '';
+
+  try {
+    // 已是绝对路径
+    if (/^https?:\/\//i.test(raw)) return new URL(raw).toString();
+    // 相对路径需要 base
+    if (base) return new URL(raw, base).toString();
+  } catch {
+    // 忽略解析失败
+  }
+  return raw; // 实在不行原样返回，后续 fetchOne 会兜底
+}
 
 function pickTitle($) {
   return first(
@@ -28,7 +48,7 @@ function pickTitle($) {
 
 function pickImage($, baseUrl) {
   const og = $('meta[property="og:image"]').attr('content');
-  if (og) return og;
+  if (og) return normalizeUrl(baseUrl, og);
 
   const imgEl =
     $('img[itemprop="image"]').first()[0] ||
@@ -45,7 +65,7 @@ function pickImage($, baseUrl) {
     $img.attr('src') ||
     '';
 
-  try { return new URL(raw, baseUrl).toString(); } catch { return raw || ''; }
+  return normalizeUrl(baseUrl, raw);
 }
 
 function pickPrice($) {
@@ -108,20 +128,18 @@ function heuristicsSku($) {
   return '';
 }
 
-// 是否值得补抓
+// ---------- 策略：是否值得触发补抓 ----------
 function shouldFetch(items, { key = 'sku', threshold = 0.5 } = {}) {
   if (!Array.isArray(items) || !items.length) return false;
   const missing = items.filter(x => !x || !txt(x[key])).length;
   return missing / items.length >= threshold;
 }
 
-// 核心：抓取单个详情页并解析
-async function fetchOne(link, { timeout = 15000 } = {}) {
-  const url = link;
+// ---------- 核心：抓取单个详情页并解析 ----------
+async function fetchOne(url, { timeout = 15000 } = {}) {
   const html = await http.get(url, { timeout });
   const $ = load(html);
 
-  // 字段
   const title = txt(pickTitle($));
   const price = txt(pickPrice($));
   const image = txt(pickImage($, url));
@@ -133,21 +151,37 @@ async function fetchOne(link, { timeout = 15000 } = {}) {
   return { url, sku, title, price, image, description };
 }
 
-// 批量：只返回详情字段，不合并
-async function fetchDetails(links = [], { concurrency = 6, timeout = 15000 } = {}) {
+// ---------- 批量：只返回详情字段，不合并 ----------
+async function fetchDetails(links = [], {
+  base,            // 可传入目录页 URL，便于把相对链接变绝对
+  concurrency = 6,
+  timeout = 15000
+} = {}) {
   if (!Array.isArray(links) || !links.length) return [];
-  const limit = pLimit(concurrency);
 
-  const jobs = links.map(link => limit(async () => {
-    try { return await fetchOne(link, { timeout }); }
-    catch { return { url: link, sku: '', title: '', price: '', image: '', description: '' }; }
+  // 先统一规范化 URL；若第一条是绝对链接，则优先用它的 origin 当 base
+  let inferredBase = base;
+  const firstAbs = links.find(href => /^https?:\/\//i.test(String(href || '')));
+  if (!inferredBase && firstAbs) {
+    try { inferredBase = new URL(firstAbs).origin; } catch {}
+  }
+
+  const normalized = links
+    .map(href => normalizeUrl(inferredBase, href))
+    .filter(Boolean);
+
+  const limit = pLimit(concurrency);
+  const jobs = normalized.map(url => limit(async () => {
+    try { return await fetchOne(url, { timeout }); }
+    catch { return { url, sku: '', title: '', price: '', image: '', description: '' }; }
   }));
 
   return Promise.all(jobs);
 }
 
-// 兼容：传 items 进来，原地合并（用于老调用方）
+// ---------- 兼容：传 items 进来，原地合并（用于老调用方） ----------
 async function fetch(items = [], {
+  base,                // 传目录页 URL
   concurrency = 6,
   timeout = 15000,
   merge = (item, extra) => Object.assign(item, extra),
@@ -155,14 +189,14 @@ async function fetch(items = [], {
   if (!Array.isArray(items) || !items.length) return items;
 
   const links = items.map(x => x.link || x.url).filter(Boolean);
-  const res = await fetchDetails(links, { concurrency, timeout });
+  const res = await fetchDetails(links, { base, concurrency, timeout });
   const byUrl = new Map(res.map(r => [r.url, r]));
 
+  // 合并：仅补空白；SKU 如果原值缺失/可疑则覆盖
   for (const it of items) {
-    const u = it.link || it.url;
+    const u = normalizeUrl(base, it.link || it.url);
     const r = byUrl.get(u);
     if (!r) continue;
-    // 仅补空白；SKU 如果原值缺失/可疑则覆盖
     const badSku = !txt(it.sku) || /^\d{1,3}$/.test(it.sku);
     merge(it, {
       sku: (badSku && txt(r.sku)) ? r.sku : it.sku,
@@ -170,9 +204,11 @@ async function fetch(items = [], {
       price: it.price || r.price,
       image: it.image || r.image,
       description: it.description || r.description,
+      url: u, // 顺便把规范化后的 URL 写回
+      link: undefined
     });
   }
   return items;
 }
 
-module.exports = { fetch, fetchDetails, shouldFetch };
+module.exports = { fetch, fetchDetails, shouldFetch, normalizeUrl };
