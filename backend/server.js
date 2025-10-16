@@ -3,6 +3,8 @@ import express from "express";
 import cors from "cors";
 import axios from "axios";
 import * as cheerio from "cheerio";
+import fs from 'node:fs';
+import path from 'node:path';
 
 // health info
 import pkg from './package.json' assert { type: 'json' };
@@ -17,6 +19,28 @@ import parseUniversal from "./adapters/universal.js";
 
 const app = express();
 app.use(cors({ origin: "*", exposedHeaders: ["X-Lang", "X-Adapter"] }));
+
+/* ──────────────────────────── snapshots static ──────────────────────────── */
+const SNAPSHOT_DIR = process.env.SNAPSHOT_DIR || path.resolve('./snapshots');
+try { if (!fs.existsSync(SNAPSHOT_DIR)) fs.mkdirSync(SNAPSHOT_DIR, { recursive: true }); } catch {}
+
+app.use('/snapshots', (req, res, next) => {
+  const p = path.join(SNAPSHOT_DIR, req.path);
+  try {
+    if (fs.existsSync(p) && fs.statSync(p).isDirectory()) {
+      const list = fs.readdirSync(p).sort().reverse();
+      res.type('html').send(
+        `<h3>/snapshots${req.path}</h3><ul>` +
+        list.map(n => `<li><a href="${encodeURIComponent(n)}/">${n}/</a></li>`).join('') +
+        `</ul>`
+      );
+      return;
+    }
+  } catch {}
+  next();
+}, (req, res, next) => express.static(SNAPSHOT_DIR)(req, res, next));
+
+
 
 /* ──────────────────────────── health ──────────────────────────── */
 app.get(["/", "/healthz", "/health", "/api/health"], (_req, res) =>
