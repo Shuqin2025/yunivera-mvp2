@@ -1,6 +1,6 @@
 // backend/lib/templateParser.js
 const { load } = require('cheerio');
-const detect = require('./structureDetector');
+const { detectStructure } = require('./structureDetector');
 
 // 模板解析器
 const shopware = require('./parsers/shopwareParser');
@@ -13,12 +13,15 @@ const artikel = require('./modules/artikelExtractor');
 const details = require('./modules/detailFetcher');
 
 // 解析后结果过少的回退策略（命中模板但抓不到 >=3 个有效产品时返回空）
-function withFallback(parseFn, $, url, limit) {
+function withFallback(parseFn, $, url, limit, adapterName) {
   try {
     const data = parseFn($, url, { limit }) || [];
     const valid = Array.isArray(data) ? data.filter(x => x && x.title && x.url) : [];
     if (valid.length >= 3) return data;
-  } catch {}
+    if (process.env.DEBUG) console.log('[parser.fallback]', { adapter: adapterName, got: valid.length });
+  } catch (e) {
+    if (process.env.DEBUG) console.log('[parser.fallback.error]', { adapter: adapterName, err: String(e && e.message || e) });
+  }
   // 回退：避免误把导航当商品
   return [];
 }
@@ -133,39 +136,32 @@ async function parse(html, url, opts = {}) {
 
   const $ = load(html);
 
-  // 1) 检测结构类型
-  let type = '';
-  let debug = null;
-  if (typeHint) {
-    type = typeHint;
-  } else {
-    try {
-      const d = await detect.detectStructure(url, html);
-      type  = d && (d.type || d.name || '');
-      debug = d && d.debug;
-    } catch {}
-  }
-  if (process.env.DEBUG) {
-    console.log('[parser.detect]', JSON.stringify({ url, type, debug }));
-  }
-
-  // 2) 选择模板并解析；失败走兜底
-  const norm = (type || '').toLowerCase();
-  let key = '';
-  if (norm.includes('shopware')) key = 'Shopware';
-  else if (norm.includes('woo')) key = 'WooCommerce';
-  else if (norm.includes('magento')) key = 'Magento';
-  else if (norm.includes('shopify')) key = 'Shopify';
-
-  let items = [];
+  // 1) 检测结构 & 平台
+  let structure = { type: '', platform: '' };
   try {
-    if (key && map[key] && typeof map[key].parse === 'function') {
-      items = withFallback(map[key].parse, $, url, limit);
-    } else {
-      items = fallbackParse($, url, limit);
-    }
-  } catch {
+    structure = await detectStructure(url, html);
+  } catch {}
+
+  const platformFromDetect = structure.platform || '';
+  const typeFromDetect     = structure.type || '';
+  const type = typeHint || typeFromDetect;
+
+  if (process.env.DEBUG) {
+    console.log('[parser.detect]', JSON.stringify({ url, type, platform: platformFromDetect, debug: structure.debug }));
+  }
+
+  // 2) 选择模板并解析；优先按“平台”，否则走兜底
+  let adapterName = platformFromDetect;
+  let items = [];
+
+  if (platformFromDetect && map[platformFromDetect] && typeof map[platformFromDetect].parse === 'function') {
+    items = withFallback(map[platformFromDetect].parse, $, url, limit, platformFromDetect);
+  }
+
+  // 若平台不明或平台解析结果太少，则兜底
+  if (!items.length) {
     items = fallbackParse($, url, limit);
+    adapterName = adapterName || 'generic-links';
   }
 
   // 3) 二次过滤“站点链接”
@@ -214,7 +210,7 @@ async function parse(html, url, opts = {}) {
 
   if (process.env.DEBUG) {
     console.log('[parser.result]', JSON.stringify({
-      url, adapter: key || 'fallback', count: unified.length
+      url, adapter: adapterName || 'fallback', count: unified.length
     }));
   }
 
