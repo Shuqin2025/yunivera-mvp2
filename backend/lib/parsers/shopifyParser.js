@@ -20,17 +20,15 @@ function normalizeUrl(base, href) {
   }
 }
 
-// 认为是“可能的产品链接”
 function isProbablyProductLink(link) {
   if (!link) return false;
   const u = link.toLowerCase();
-  // 仅接受 /products/，并排除评论锚点/评论页
+  // 需要 /products/，且排除评论锚点等
   if (!u.includes("/products/")) return false;
   if (u.includes("#reviews") || u.includes("reviewssection") || u.includes("/reviews")) return false;
   return true;
 }
 
-// 过滤明显是“去看评价/评论”的标题
 function isJunkTitle(title = "") {
   const t = title.toLowerCase();
   return (
@@ -38,7 +36,7 @@ function isJunkTitle(title = "") {
     t.includes("reviews") ||
     t.includes("bewertung") ||
     t.includes("zu den bewertungen") ||
-    /\{\{\s*title\s*\}\}/i.test(t) // 还没渲染的模板占位
+    /\{\{\s*title\s*\}\}/i.test(t) // 模板占位符
   );
 }
 
@@ -55,7 +53,7 @@ function stripFragment(url) {
 // ===== CSS Selector sets for Shopify themes =====
 const SELECTORSETS = [
   {
-    // 常见卡片容器
+    // 常见卡片
     card: [
       "[class*=product-card]",
       "[class*=ProductItem]",
@@ -84,7 +82,7 @@ const SELECTORSETS = [
   }
 ];
 
-// ===== DOM parsing =====
+// ===== DOM helpers =====
 function pickFirst($el, sel) {
   try {
     const node = $el.find(sel).first();
@@ -105,6 +103,7 @@ function pickImage($el, base, sel = "img") {
   return normalizeUrl(base, src);
 }
 
+// ===== DOM parsing (card-first) =====
 function fromDom($, url, limit = 50) {
   const out = [];
 
@@ -148,7 +147,94 @@ function fromDom($, url, limit = 50) {
     if (out.length) break;
   }
 
-  // 去重（按去掉 #fragment 后的 URL）
+  // 去重（以移除 fragment 的 URL 为键）
+  const seen = new Set();
+  const uniq = out.filter(x => {
+    const key = stripFragment(x.url || "");
+    if (!key) return false;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
+  return uniq.slice(0, limit);
+}
+
+// ===== 深度兜底：扫描整页 a[href*="/products/"] =====
+function deepAnchorFallback($, url, limit = 50) {
+  const out = [];
+  const $as = $("a[href*='/products/']");
+  if (!$as || $as.length === 0) return out;
+
+  $as.each((_, aEl) => {
+    try {
+      const $a = $(aEl);
+      const href = $a.attr("href") || "";
+      const link = normalizeUrl(url, href);
+      if (!isProbablyProductLink(link)) return;
+
+      // 标题：优先 a 文本，其次 title/aria-label，再其次邻近标题节点
+      let title =
+        cleanText($a.text()) ||
+        cleanText($a.attr("title") || $a.attr("aria-label") || "");
+
+      if (!title) {
+        const $wrap = $a.closest("article,li,div,section");
+        if ($wrap && $wrap.length) {
+          title =
+            cleanText(
+              $wrap
+                .find("[class*=title], [class*=heading], h1, h2, h3, [itemprop='name']")
+                .first()
+                .text()
+            ) || "";
+        }
+      }
+      if (isJunkTitle(title)) title = "";
+
+      // 价格：在最近容器内找 price 相关节点
+      let price = "";
+      const $scope = $a.closest("article,li,div,section");
+      if ($scope && $scope.length) {
+        price =
+          cleanText(
+            $scope
+              .find(
+                "[class*=price], [class*=Price], price, [itemprop='price'], meta[itemprop='price']"
+              )
+              .first()
+              .text()
+          ) ||
+          cleanText($scope.find("meta[itemprop='price']").attr("content") || "");
+      }
+      // 图片：就近找 img
+      let img = "";
+      if ($scope && $scope.length) {
+        const n =
+          $scope.find("img").first() ||
+          $a.find("img").first();
+        if (n && n.length) {
+          const src = n.attr("data-src") || n.attr("data-original") || n.attr("src") || "";
+          img = normalizeUrl(url, src);
+        }
+      }
+
+      out.push({
+        title: title || "",
+        url: link,
+        link,
+        img,
+        imgs: img ? [img] : [],
+        price: cleanText(price),
+        sku: "",
+        desc: ""
+      });
+    } catch {
+      /* ignore single node errors */
+    }
+  });
+
+  // 去重
   const seen = new Set();
   const uniq = out.filter(x => {
     const key = stripFragment(x.url || "");
@@ -178,7 +264,7 @@ function fromJsonLd($, url, limit = 50) {
 
     const nodes = Array.isArray(data) ? data : [data];
     nodes.forEach(node => {
-      const type = (node && node["@type"] || "").toString().toLowerCase();
+      const type = ((node && node["@type"]) || "").toString().toLowerCase();
       if (type !== "itemlist" || !Array.isArray(node.itemListElement)) return;
 
       node.itemListElement.forEach(item => {
@@ -216,7 +302,6 @@ function fromJsonLd($, url, limit = 50) {
     });
   });
 
-  // 去重（按去掉 #fragment 后的 URL）
   const seen = new Set();
   const uniq = out.filter(x => {
     const key = stripFragment(x.url || "");
@@ -255,11 +340,47 @@ function mergePreferDom(domList, jsonldList) {
 
 // ===== Public API =====
 function parse($, url, { limit = 50 } = {}) {
-  const dom = fromDom($, url, limit);
+  // 1) 先尝试卡片 DOM
+  let dom = fromDom($, url, limit);
+
+  // 2) 视情况触发 JSON-LD
   const needJsonLd = dom.length === 0 || dom.filter(x => x.title).length < Math.min(5, dom.length);
-  const viaJson = needJsonLd ? fromJsonLd($, url, limit) : [];
-  const merged = mergePreferDom(dom, viaJson);
-  return merged.slice(0, limit);
+  let viaJson = needJsonLd ? fromJsonLd($, url, limit) : [];
+
+  // 3) 如果仍几乎没有结果，再做深度锚点兜底
+  if ((dom.length + viaJson.length) === 0 || dom.length < 3) {
+    const deep = deepAnchorFallback($, url, limit);
+    // 为了避免覆盖已有更完整的数据，这里把 deep 作为“补充”合并进去
+    viaJson = viaJson.length ? viaJson : deep;
+    if (viaJson.length === 0 && deep.length > 0) {
+      viaJson = deep;
+    } else if (viaJson.length && deep.length) {
+      // 合并去重
+      const map = new Map(viaJson.map(p => [stripFragment(p.url), p]));
+      for (const d of deep) {
+        const key = stripFragment(d.url);
+        if (!map.has(key)) map.set(key, d);
+      }
+      viaJson = Array.from(map.values()).slice(0, limit);
+    }
+  }
+
+  const merged = mergePreferDom(dom, viaJson).slice(0, limit);
+
+  // 4) 无结果日志
+  if (!merged.length) {
+    try {
+      const host = new URL(url).host;
+      // 调试日志，不会影响用户界面
+      // 供你排查“页面被误判为目录/主页”或“DOM 结构过深”情况
+      // 关键字：NoProductFound
+      console.debug(`[catalog] NoProductFound in ${host} (shopify) -> ${url}`);
+    } catch {
+      console.debug(`[catalog] NoProductFound (shopify) -> ${url}`);
+    }
+  }
+
+  return merged;
 }
 
 function parseShopify($, url, opts = {}) {
