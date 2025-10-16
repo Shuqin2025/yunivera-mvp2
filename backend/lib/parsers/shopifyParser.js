@@ -1,8 +1,61 @@
-// backend/lib/parsers/shopifyParser.js
 /* eslint-disable no-useless-escape */
+
+// ===== Common helpers =====
+function cleanText(txt) {
+  if (!txt) return "";
+  return String(txt).replace(/\s+/g, " ").trim();
+}
+
+function normalizeUrl(base, href) {
+  try {
+    if (!href) return "";
+    // //cdn.xxx
+    if (/^\/\//.test(href)) return "https:" + href;
+    // absolute
+    if (/^https?:\/\//i.test(href)) return href;
+    // relative
+    return new URL(href, base).toString();
+  } catch {
+    return href || "";
+  }
+}
+
+// 认为是“可能的产品链接”
+function isProbablyProductLink(link) {
+  if (!link) return false;
+  const u = link.toLowerCase();
+  // 仅接受 /products/，并排除评论锚点/评论页
+  if (!u.includes("/products/")) return false;
+  if (u.includes("#reviews") || u.includes("reviewssection") || u.includes("/reviews")) return false;
+  return true;
+}
+
+// 过滤明显是“去看评价/评论”的标题
+function isJunkTitle(title = "") {
+  const t = title.toLowerCase();
+  return (
+    t.includes("bewertungen") || // 德语：评价
+    t.includes("reviews") ||
+    t.includes("bewertung") ||
+    t.includes("zu den bewertungen") ||
+    /\{\{\s*title\s*\}\}/i.test(t) // 还没渲染的模板占位
+  );
+}
+
+function stripFragment(url) {
+  try {
+    const u = new URL(url);
+    u.hash = "";
+    return u.toString();
+  } catch {
+    return url.split("#")[0];
+  }
+}
+
+// ===== CSS Selector sets for Shopify themes =====
 const SELECTORSETS = [
-  // Dawn / Sense 等常见卡片
   {
+    // 常见卡片容器
     card: [
       "[class*=product-card]",
       "[class*=ProductItem]",
@@ -31,39 +84,15 @@ const SELECTORSETS = [
   }
 ];
 
-// 价格清洗：去掉符号/空白，只保留原文本（前端展示即可）
-function cleanPrice(txt) {
-  if (!txt) return "";
-  return String(txt).replace(/\s+/g, " ").trim();
-}
-
-function normalizeUrl(base, href) {
-  try {
-    if (!href) return "";
-    // 处理 data-src 等无协议的 CDN 链接
-    if (/^\/\//.test(href)) return "https:" + href;
-    // 已是绝对地址
-    if (/^https?:\/\//i.test(href)) return href;
-    // 相对路径
-    return new URL(href, base).toString();
-  } catch (_) {
-    return href || "";
-  }
-}
-
+// ===== DOM parsing =====
 function pickFirst($el, sel) {
   try {
     const node = $el.find(sel).first();
     if (!node || node.length === 0) return "";
-    // meta[itemprop=price] 场景
-    const isMeta = node[0] && node[0].name === "meta";
-    if (isMeta) {
-      const v = node.attr("content") || node.attr("value") || "";
-      return (v || "").trim();
+    if (node[0] && node[0].name === "meta") {
+      return cleanText(node.attr("content") || node.attr("value") || "");
     }
-    // 常规标签：取 text
-    const txt = node.text() || node.attr("title") || "";
-    return (txt || "").replace(/\s+/g, " ").trim();
+    return cleanText(node.text() || node.attr("title") || "");
   } catch {
     return "";
   }
@@ -78,6 +107,7 @@ function pickImage($el, base, sel = "img") {
 
 function fromDom($, url, limit = 50) {
   const out = [];
+
   for (const set of SELECTORSETS) {
     const $cards = $(set.card);
     if (!$cards || $cards.length === 0) continue;
@@ -88,63 +118,54 @@ function fromDom($, url, limit = 50) {
       const href = a.attr("href") || "";
       const link = normalizeUrl(url, href);
 
-      // 有些主题卡片没有直接放标题在卡片内部，回退试多个层级
+      if (!isProbablyProductLink(link)) return;
+
       let title =
         pickFirst($el, set.title) ||
-        (a.attr("title") || "").trim() ||
-        $el.attr("aria-label") ||
-        "";
+        cleanText(a.attr("title") || "") ||
+        cleanText($el.attr("aria-label") || "");
 
-      // 价格有两层：显示价 + data/meta 价
+      if (isJunkTitle(title)) title = "";
+
       let price =
         pickFirst($el, set.price) ||
-        ($el.find("meta[itemprop='price']").attr("content") || "").trim();
+        cleanText($el.find("meta[itemprop='price']").attr("content") || "");
 
       const img = pickImage($el, url, set.img);
 
-      // 如果至少拿到了链接，就先收一个骨架，后续 compare=1 时会详情补齐
-      if (link) {
-        out.push({
-          title: title || "",
-          url: link,
-          link,
-          img,
-          imgs: img ? [img] : [],
-          price: cleanPrice(price),
-          sku: "",
-          desc: ""
-        });
-      }
+      out.push({
+        title: title || "",
+        url: link,
+        link,
+        img,
+        imgs: img ? [img] : [],
+        price: cleanText(price),
+        sku: "",
+        desc: ""
+      });
     });
 
-    if (out.length) break; // 第一套命中就结束
+    if (out.length) break;
   }
 
-  // 去重（按 URL）
+  // 去重（按去掉 #fragment 后的 URL）
   const seen = new Set();
   const uniq = out.filter(x => {
-    if (!x.url) return false;
-    if (seen.has(x.url)) return false;
-    seen.add(x.url);
+    const key = stripFragment(x.url || "");
+    if (!key) return false;
+    if (seen.has(key)) return false;
+    seen.add(key);
     return true;
   });
 
   return uniq.slice(0, limit);
 }
 
-/**
- * JSON-LD 回退：抓取 <script type="application/ld+json"> 里的 ItemList
- * 兼容形如：
- * {
- *   "@type": "ItemList",
- *   "itemListElement": [
- *     {"@type":"ListItem","position":1,"url":"/products/xxx","name":"标题","image":"...","offers":{"price":"34.99","priceCurrency":"EUR"}}
- *   ]
- * }
- */
+// ===== JSON-LD fallback (ItemList / ListItem) =====
 function fromJsonLd($, url, limit = 50) {
   const out = [];
   const scripts = $("script[type='application/ld+json']");
+
   scripts.each((_, el) => {
     const raw = $(el).contents().text();
     if (!raw) return;
@@ -155,82 +176,86 @@ function fromJsonLd($, url, limit = 50) {
       return;
     }
 
-    const listCandidates = Array.isArray(data) ? data : [data];
-    listCandidates.forEach(node => {
-      // ItemList 结构
-      if (node && node["@type"] && String(node["@type"]).toLowerCase() === "itemlist" && Array.isArray(node.itemListElement)) {
-        node.itemListElement.forEach(item => {
-          // 兼容两种：item 直接是对象，或者 {item:{...}}
-          const cell = item.item || item;
-          if (!cell) return;
-          const href = cell.url || (cell["@id"] || "");
-          const link = normalizeUrl(url, href);
-          const title = (cell.name || "").trim();
-          // 优先 offers.price，其次 price，其次 meta
-          const price =
-            (cell.offers && (cell.offers.price || cell.offers.lowPrice)) ||
-            cell.price ||
-            "";
-          // 图片：可能是字符串或数组
-          let img = "";
-          if (Array.isArray(cell.image)) img = cell.image[0] || "";
-          else if (typeof cell.image === "string") img = cell.image;
-          img = normalizeUrl(url, img);
+    const nodes = Array.isArray(data) ? data : [data];
+    nodes.forEach(node => {
+      const type = (node && node["@type"] || "").toString().toLowerCase();
+      if (type !== "itemlist" || !Array.isArray(node.itemListElement)) return;
 
-          if (link) {
-            out.push({
-              title: title || "",
-              url: link,
-              link,
-              img,
-              imgs: img ? [img] : [],
-              price: cleanPrice(price),
-              sku: "",
-              desc: ""
-            });
-          }
+      node.itemListElement.forEach(item => {
+        const cell = item && (item.item || item);
+        if (!cell) return;
+
+        const href = cell.url || cell["@id"] || "";
+        const link = normalizeUrl(url, href);
+        if (!isProbablyProductLink(link)) return;
+
+        let title = cleanText(cell.name || "");
+        if (isJunkTitle(title)) title = "";
+
+        let price =
+          (cell.offers && (cell.offers.price || cell.offers.lowPrice)) ||
+          cell.price ||
+          "";
+
+        let img = "";
+        if (Array.isArray(cell.image)) img = cell.image[0] || "";
+        else if (typeof cell.image === "string") img = cell.image;
+        img = normalizeUrl(url, img);
+
+        out.push({
+          title: title || "",
+          url: link,
+          link,
+          img,
+          imgs: img ? [img] : [],
+          price: cleanText(price),
+          sku: "",
+          desc: ""
         });
-      }
+      });
     });
   });
 
-  // 去重 + 截断
+  // 去重（按去掉 #fragment 后的 URL）
   const seen = new Set();
   const uniq = out.filter(x => {
-    if (!x.url) return false;
-    if (seen.has(x.url)) return false;
-    seen.add(x.url);
+    const key = stripFragment(x.url || "");
+    if (!key) return false;
+    if (seen.has(key)) return false;
+    seen.add(key);
     return true;
   });
 
   return uniq.slice(0, limit);
 }
 
+// ===== Merge: DOM first, JSON-LD as supplement =====
 function mergePreferDom(domList, jsonldList) {
   if (!domList || domList.length === 0) return jsonldList || [];
   if (!jsonldList || jsonldList.length === 0) return domList;
 
-  const map = new Map(domList.map(p => [p.url, p]));
+  const map = new Map(domList.map(p => [stripFragment(p.url), { ...p }]));
   for (const j of jsonldList) {
-    if (!map.has(j.url)) {
-      map.set(j.url, j);
+    const key = stripFragment(j.url);
+    if (!key) continue;
+    if (!map.has(key)) {
+      map.set(key, j);
     } else {
-      const d = map.get(j.url);
-      // 用 JSON-LD 填补空缺字段
+      const d = map.get(key);
       if (!d.title && j.title) d.title = j.title;
       if (!d.price && j.price) d.price = j.price;
       if ((!d.img || d.img === "") && j.img) {
         d.img = j.img;
-        d.imgs = j.img ? [j.img] : d.imgs || [];
+        d.imgs = j.img ? [j.img] : (d.imgs || []);
       }
     }
   }
   return Array.from(map.values());
 }
 
+// ===== Public API =====
 function parse($, url, { limit = 50 } = {}) {
   const dom = fromDom($, url, limit);
-  // 如果 DOM 解析出的标题为空或数量很少，尝试 JSON-LD 回退补齐
   const needJsonLd = dom.length === 0 || dom.filter(x => x.title).length < Math.min(5, dom.length);
   const viaJson = needJsonLd ? fromJsonLd($, url, limit) : [];
   const merged = mergePreferDom(dom, viaJson);
