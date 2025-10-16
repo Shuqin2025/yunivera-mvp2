@@ -2,17 +2,19 @@
 const { load } = require('cheerio');
 const { detectStructure } = require('./structureDetector');
 
-// 模板解析器
+// —— 各平台解析器 ——
+// 命中平台优先走平台解析器；否则走 generic-links；再不行走极简兜底
 const shopware = require('./parsers/shopwareParser');
 const woo      = require('./parsers/woocommerceParser');
 const magento  = require('./parsers/magentoParser');
 const shopify  = require('./parsers/shopifyParser');
+const generic  = require('./parsers/genericLinksParser'); // ← 新增
 
 // 智能编号提取 & 详情页补抓
 const artikel = require('./modules/artikelExtractor');
 const details = require('./modules/detailFetcher');
 
-// 解析后结果过少的回退策略（命中模板但抓不到 >=3 个有效产品时返回空）
+// 解析后结果过少的回退策略（命中模板但抓不到 ≥3 个有效产品时返回空）
 function withFallback(parseFn, $, url, limit, adapterName) {
   try {
     const data = parseFn($, url, { limit }) || [];
@@ -20,13 +22,13 @@ function withFallback(parseFn, $, url, limit, adapterName) {
     if (valid.length >= 3) return data;
     if (process.env.DEBUG) console.log('[parser.fallback]', { adapter: adapterName, got: valid.length });
   } catch (e) {
-    if (process.env.DEBUG) console.log('[parser.fallback.error]', { adapter: adapterName, err: String(e && e.message || e) });
+    if (process.env.DEBUG) console.log('[parser.fallback.error]', { adapter: adapterName, err: String((e && e.message) || e) });
   }
   // 回退：避免误把导航当商品
   return [];
 }
 
-// —— 通用垃圾/站点链接过滤 ——
+// —— 通用垃圾/站点链接过滤 ——（与 detector 中保持同源词表）
 const GENERIC_LINK_BAD = new RegExp(
   [
     'hilfe','support','kundendienst','faq','service',
@@ -42,7 +44,8 @@ const GENERIC_LINK_BAD = new RegExp(
   'i'
 );
 
-// —— 兜底解析（极简） ——
+// —— 极简兜底（最后一道保险）——
+// 尽量从“看起来像商品卡片/可点击图片/标题”的节点里收集链接
 function fallbackParse($, url, limit = 50) {
   const items = [];
   const seen = new Set();
@@ -91,7 +94,7 @@ function fallbackParse($, url, limit = 50) {
   return items.slice(0, limit);
 }
 
-// 模板映射
+// —— 模板映射 ——（供优先级选择）
 const map = {
   Shopware:    shopware,
   WooCommerce: woo,
@@ -136,7 +139,7 @@ async function parse(html, url, opts = {}) {
 
   const $ = load(html);
 
-  // 1) 检测结构 & 平台
+  // 1) 检测结构 & 平台（用于选择解析路径 + 记录调试信息）
   let structure = { type: '', platform: '' };
   try {
     structure = await detectStructure(url, html);
@@ -144,24 +147,36 @@ async function parse(html, url, opts = {}) {
 
   const platformFromDetect = structure.platform || '';
   const typeFromDetect     = structure.type || '';
-  const type = typeHint || typeFromDetect;
+  const type               = typeHint || typeFromDetect;
 
   if (process.env.DEBUG) {
     console.log('[parser.detect]', JSON.stringify({ url, type, platform: platformFromDetect, debug: structure.debug }));
   }
 
-  // 2) 选择模板并解析；优先按“平台”，否则走兜底
-  let adapterName = platformFromDetect;
+  // 2) 选择解析器：平台 → generic-links → 极简兜底
+  let adapterName = '';
   let items = [];
 
+  // 2.1 平台解析（优先）
   if (platformFromDetect && map[platformFromDetect] && typeof map[platformFromDetect].parse === 'function') {
     items = withFallback(map[platformFromDetect].parse, $, url, limit, platformFromDetect);
+    adapterName = platformFromDetect;
   }
 
-  // 若平台不明或平台解析结果太少，则兜底
+  // 2.2 平台解析拿不到结果：尝试 generic-links（更“懂”目录页里的深层商品锚点）
+  //    - 如果 detector 判断是 catalog，优先试 generic-links
+  if (!items.length || type === 'catalog' || !adapterName) {
+    const genericData = withFallback(generic.parse, $, url, limit, 'generic-links');
+    if (genericData.length) {
+      items = genericData;
+      adapterName = 'generic-links';
+    }
+  }
+
+  // 2.3 仍无结果：极简兜底
   if (!items.length) {
     items = fallbackParse($, url, limit);
-    adapterName = adapterName || 'generic-links';
+    if (!adapterName) adapterName = 'fallback';
   }
 
   // 3) 二次过滤“站点链接”
@@ -174,7 +189,7 @@ async function parse(html, url, opts = {}) {
   // 4) 统一结构
   let unified = toUnified(items);
 
-  // 4.1) SKU 轻量补齐
+  // 4.1 SKU 轻量补齐
   for (const it of unified) {
     if (!skuMissingOrSuspicious(it.sku)) continue;
     const guess = artikel.extract([it.name, it.description].filter(Boolean).join(' '));
