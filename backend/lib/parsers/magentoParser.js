@@ -2,26 +2,37 @@
 function pickText($, el){ return ($(el).text()||'').replace(/\s+/g,' ').trim(); }
 function abs(base, href=''){ try{ return new URL(href, base).toString(); }catch{ return href||''; } }
 function firstSrc(srcset=''){ const x=(srcset||'').split(',')[0]||''; return x.split(/\s+/)[0]||''; }
+
 function cleanTitle(t=''){
   const s=String(t).replace(/\s+/g,' ').trim();
   if(!s) return '';
-  if (s === 'item' || s === '{{ title }}' || /^Zu den Bewertungen/i.test(s)) return '';
+  if (s === 'item' || s === '{{ title }}') return '';
+  if (/^Zu den Bewertungen/i.test(s)) return '';
   return s;
 }
+
 const BAD_LINK_PATTERNS=[
   '/cart','/checkout','/customer','/account','/wishlist',
-  '/kontakt','/contact','/hilfe','/support','/agb','/impressum',
-  '/privacy','/datenschutz','/shipping','/versand','/returns',
-  '/search','/catalogsearch'
+  '/contact','/impressum','/privacy','/datenschutz','/returns','/support','/hilfe'
 ];
 function isBadLink(u=''){ return BAD_LINK_PATTERNS.some(x=>u.includes(x)); }
+
+// 常见 Magento 商品链接：/catalog/product/ 或 站点直出 /<slug>.html
 function looksLikeProduct(u=''){
-  // Magento 常见详情：/something.html 或自定义 /product/
-  return (u.endsWith('.html') && !u.includes('/category/')) || u.includes('/product/');
+  if (/\/catalog\/product\//i.test(u)) return true;
+  if (/\.html(\?|$)/i.test(u)) return true;
+  return false;
 }
-function readPriceFromText(txt=''){
-  const m=String(txt).replace(/\s+/g,' ').match(/(\d+[.,]\d{2})/);
-  return m?m[1].replace(',', '.'):''; }
+
+function readPrice($, node){
+  // price-box 内有 data-price-amount 或 .price
+  const box=$(node).find('.price-box, [data-role="priceBox"], [data-price-amount]').first();
+  const data=box.attr('data-price-amount');
+  if(data) return String(data);
+  const txt=pickText($, box.length ? box : node);
+  const m=txt.match(/(\d+[.,]\d{2})/);
+  return m?m[1].replace(',', '.'):'';
+}
 
 function collectJsonLdProducts($, base){
   const out=[];
@@ -37,11 +48,11 @@ function collectJsonLdProducts($, base){
         const title=cleanTitle(p.name||p.title||'');
         const link =abs(base, p.url||p['@id']||'');
         const img  =abs(base, (Array.isArray(p.image)?p.image[0]:p.image)||'');
+        let price='', currency='';
         const offers=Array.isArray(p.offers)?p.offers[0]:p.offers;
-        const price=offers && (offers.price||'') || '';
-        const currency=offers && (offers.priceCurrency||'') || '';
+        if(offers){ price=String(offers.price||''); currency=String(offers.priceCurrency||''); }
         if(!title || !link || isBadLink(link) || !looksLikeProduct(link)) continue;
-        out.push({ title, url:link, link, img, imgs:img?[img]:[], price:String(price||''), currency:String(currency||''), sku:p.sku||p.mpn||'', moq:'', desc:p.description||'' });
+        out.push({ title, url:link, link, img, imgs:img?[img]:[], price, currency, sku:p.sku||p.mpn||'', moq:'', desc:p.description||'' });
       }
     }
   });
@@ -53,16 +64,21 @@ function deepAnchorFallback($, url, limit, logger){
   $('a[href]').each((_i,a)=>{
     const href=abs(url, $(a).attr('href')||'');
     if(!href || isBadLink(href) || !looksLikeProduct(href)) return;
+
     const title=cleanTitle( (($(a).attr('title')||'').trim()) || pickText($, a) );
     if(!title) return;
-    const $card=$(a).closest('li.product, .product-item, .product, [class*="product"]');
+
+    const $card=$(a).closest(
+      '.product-item, li.product, .product, .product-item-info, [data-role="product-item"], [class*="product-card"]'
+    );
     const imgEl=$card.find('img').first();
     const img=  abs(url, imgEl.attr('data-src')||'')
             ||  abs(url, firstSrc(imgEl.attr('data-srcset')||imgEl.attr('srcset')||''))
             ||  abs(url, imgEl.attr('src')||'');
-    const price=readPriceFromText(pickText($, $card.find('.price, .price-box [data-price-amount], [itemprop="price"]')));
+    const price=readPrice($, $card);
     out.push({ title, url:href, link:href, img, imgs:img?[img]:[], price, currency:'', sku:'', moq:'', desc:'' });
   });
+
   if(!out.length) logger?.warn?.(`NoProductFound in ${new URL(url).host} (magento deepAnchorFallback)`);
   const uniq=[]; const seen=new Set();
   for(const it of out){ const key=it.link||it.url; if(!key || seen.has(key)) continue; seen.add(key); uniq.push(it); if(uniq.length>=limit) break; }
@@ -71,18 +87,19 @@ function deepAnchorFallback($, url, limit, logger){
 
 function parse($, url, { limit=50, logger } = {}){
   const out=[];
-  // 1) DOM
+
+  // 1) DOM（Magento 网格/列表）
   const cards=$([
-    'li.product','.product-item','.item.product','.products .product'
+    'li.product','.products-grid .product-item','.product-item','.product-item-info','[data-role="product-item"]'
   ].join(','));
   cards.each((_i, el)=>{
     const $el=$(el);
-    const a=$el.find('a.product-item-link[href], a[href$=".html"], a[href*="/product/"]').first();
+    const a=$el.find('a.product-item-link[href], a[href*="/catalog/product/"], a[href$=".html"], a[href]').first();
     const link=abs(url, a.attr('href')||'');
     if(!link || isBadLink(link) || !looksLikeProduct(link)) return;
 
     const title=cleanTitle(
-      pickText($, $el.find('.product-item-name, .product.name a, .product-title, h2, h3, [itemprop="name"]').first()) ||
+      pickText($, $el.find('.product-item-link, .product.name a, .product-item-name, h2, h3, [itemprop="name"]').first()) ||
       (a.attr('title')||'').trim() || pickText($, a)
     );
     if(!title) return;
@@ -91,7 +108,7 @@ function parse($, url, { limit=50, logger } = {}){
     const img=  abs(url, imgEl.attr('data-src')||'')
             ||  abs(url, firstSrc(imgEl.attr('data-srcset')||imgEl.attr('srcset')||''))
             ||  abs(url, imgEl.attr('src')||'');
-    const price=readPriceFromText(pickText($, $el.find('.price, .price-box [data-price-amount], [itemprop="price"]')));
+    const price=readPrice($, $el);
     out.push({ title, url:link, link, img, imgs:img?[img]:[], price, currency:'', sku:'', moq:'', desc:'' });
   });
 
@@ -103,9 +120,9 @@ function parse($, url, { limit=50, logger } = {}){
   for(const it of out){ const key=it.link||it.url; if(!key || seen.has(key)) continue; seen.add(key); uniq.push(it); if(uniq.length>=limit) break; }
   if(uniq.length>=1) return uniq;
 
-  // 4) deepAnchorFallback
+  // 4) 兜底
   return deepAnchorFallback($, url, limit, logger);
 }
 
-const api={ id:'magento', test:(_$, u)=>/magento|\.html($|\?)|\/product\//i.test(u), parse };
+const api={ id:'magento', test:(_$, u)=>/magento|\/catalog\/category\/|\.html(\?|$)/i.test(u), parse };
 module.exports=api; module.exports.default=api;
