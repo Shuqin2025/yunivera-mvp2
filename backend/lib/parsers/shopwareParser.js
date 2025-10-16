@@ -17,7 +17,8 @@ function isBadLink(u=''){ return BAD_LINK_PATTERNS.some(x=>u.includes(x)); }
 function looksLikeProduct(u=''){ return u.includes('/detail/'); }
 function readPriceFromText(txt=''){
   const m=String(txt).replace(/\s+/g,' ').match(/(\d+[.,]\d{2})/);
-  return m?m[1].replace(',', '.'):''; }
+  return m?m[1].replace(',', '.'):'';
+}
 
 function collectJsonLdProducts($, baseUrl){
   const out=[];
