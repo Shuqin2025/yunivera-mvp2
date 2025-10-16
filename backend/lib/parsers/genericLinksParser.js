@@ -1,187 +1,255 @@
-/* generic-links: stronger product-like link extraction with scoring */
+// backend/lib/parsers/genericLinksParser.js
+// 强化版：过滤导航/法律页/账号页，只保留“像产品”的链接；从邻域和 JSON-LD 回填价格与图片
 
-function clean(s) {
-  return (s || "").replace(/\s+/g, " ").trim();
-}
+import { JSDOM } from "jsdom";
 
-function abs(base, href) {
-  try {
-    if (!href) return "";
-    if (/^\/\//.test(href)) return "https:" + href;
-    if (/^https?:\/\//i.test(href)) return href;
-    return new URL(href, base).toString();
-  } catch {
-    return href || "";
-  }
-}
-
-function stripHash(u) {
-  try {
-    const x = new URL(u);
-    x.hash = "";
-    return x.toString();
-  } catch {
-    return (u || "").split("#")[0];
-  }
-}
-
-/** 强排除关键词（文本或 URL 中出现即排除） */
-const NAVY_WORDS = [
-  "home","startseite","über uns","ueber uns","about","unternehmen",
-  "kundenservice","hilfe","support","kontakt","contact","impressum",
-  "agb","widerruf","widerrufsbelehrung","rückgabe","rueckgabe",
-  "datenschutz","privacy","versand","versandkosten","zahlung","zahlungs",
-  "info","blog","news","faq","newsletter",
-  "anmelden","login","konto","account","registrieren","signup","warenkorb",
-  "cart","checkout","kasse",
+const NAV_BLACKLIST = [
+  'kontakt','contact','ueber-uns','über-uns','uber-uns','about',
+  'agb','terms','privacy','datenschutz','impressum','widerruf','widerrufsbelehrung',
+  'zahlung','payment','versand','shipping','rueckgabe','return','retoure',
+  'hilfe','help','support','service','faq','sitemap','newsletter','blog',
+  'login','signin','anmelden','logout','account','konto','register','signup',
+  'cart','warenkorb','checkout','merkliste','wishlist','compare',
+  'home','startseite'
 ];
 
-const NAVY_PATHS = [
-  "/impressum","/agb","/widerruf","/datenschutz","/privacy",
-  "/kontakt","/contact","/hilfe","/support",
-  "/login","/account","/signup","/register",
-  "/cart","/checkout","/warenkorb",
+const PRODUCT_KEYWORDS = [
+  'produkt','produkte','product','products','artikel','artnr','sku','model','mod','item',
+  'kaufen','zum-produkt','details','detail','buy','add-to-cart'
 ];
 
-/** 产品型 URL 的正向特征（命中即加分） */
-const PRODUCTY_PATH_CUES = [
-  "/products/","/product/","/artikel/","/item/","/detail/",
-  "/p/","/sku/","/shop/","/kategorie/","/category/","-p"
-];
+// 典型产品链接特征：/products/xxx、/produkt/xxx、/artikel/12345、末尾带数字或 .html
+const PRODUCT_URL_REGEX = new RegExp(
+  [
+    '/products?/',
+    '/produkt/',
+    '/produkte/',
+    '/artikel/',
+    '/p/',
+    'product_id=\\d+',
+    'art(ikel)?nr=',
+    '\\d{4,}',       // 4+ 连号
+    '\\.html?$'
+  ].join('|'),
+  'i'
+);
 
-/** grid/listing 容器特征 */
-const GRID_CUES = ["product","grid","listing","catalog","category","tile","card","box","result","item","teaser"];
+const CURRENCY_REGEX = /(€|eur|chf|\$|usd|£|gbp)/i;
 
-/** 价格正则 */
-const PRICE_RE = /(?:€|eur|£|gbp|\$|usd)\s*\d{1,4}(?:[.,]\d{2})?|\d{1,4}(?:[.,]\d{2})\s*(?:€|eur|£|gbp|\$|usd)/i;
-
-function pickImg($scope, base) {
-  const n = $scope.find("img").first();
-  if (!n || !n.length) return "";
-  const src = n.attr("data-src") || n.attr("data-original") || n.attr("src") || "";
-  return abs(base, src);
+function isNavLike(href) {
+  const h = href.toLowerCase();
+  return NAV_BLACKLIST.some(k => h.includes(k));
 }
 
-function pickTitle($a, $scope) {
-  let t = clean($a.text()) || clean($a.attr("title") || $a.attr("aria-label") || "");
-  if (!t && $scope && $scope.length) {
-    t = clean(
-      $scope.find("[class*=title], [class*=heading], h1, h2, h3, [itemprop='name']").first().text()
-    );
+function isProbablyProductUrl(href) {
+  if (!href) return false;
+  const h = href.toLowerCase();
+  if (isNavLike(h)) return false;
+  return PRODUCT_URL_REGEX.test(h) || PRODUCT_KEYWORDS.some(k => h.includes(k));
+}
+
+function hasPriceText(el) {
+  if (!el) return false;
+  const t = el.textContent.replace(/\s+/g,' ').trim();
+  return /\d[\d\.\,\s]*\d?\s*(€|eur|chf|\$|usd|£|gbp)/i.test(t);
+}
+
+function nearestText(el, maxDepth = 3) {
+  let cur = el, depth = 0;
+  while (cur && depth <= maxDepth) {
+    const txt = cur.textContent.replace(/\s+/g,' ').trim();
+    if (txt) return txt;
+    cur = cur.parentElement;
+    depth++;
   }
-  return t;
+  return '';
 }
 
-function pickPrice($scope) {
-  if (!$scope || !$scope.length) return "";
-  const p1 =
-    clean(
-      $scope
-        .find("[class*=price], [class*=Price], price, [itemprop='price'], meta[itemprop='price']")
-        .first()
-        .text()
-    ) || clean($scope.find("meta[itemprop='price']").attr("content") || "");
-  if (p1) return p1;
-
-  const txt = clean($scope.text());
-  const m = txt.match(PRICE_RE);
-  return m ? clean(m[0]) : "";
-}
-
-function isHardNav(link, text) {
-  const lt = (text || "").toLowerCase();
-  if (NAVY_WORDS.some(w => lt.includes(w))) return true;
-
-  try {
-    const u = new URL(link.toLowerCase());
-    if (NAVY_PATHS.some(p => u.pathname.includes(p))) return true;
-  } catch {
-    if (NAVY_PATHS.some(p => (link || "").toLowerCase().includes(p))) return true;
+function findSiblingPrice(a) {
+  // 看自身与周围 2 层里是否带价格文本
+  if (hasPriceText(a)) return a.textContent;
+  let p = a.parentElement;
+  for (let d=0; d<2 && p; d++) {
+    const withPrice = p.querySelector('*:not(script):not(style)');
+    if (withPrice && hasPriceText(p)) return p.textContent;
+    const cand = Array.from(p.querySelectorAll('*')).find(hasPriceText);
+    if (cand) return cand.textContent;
+    p = p.parentElement;
   }
-  return false;
+  return '';
 }
 
-function scoreCandidate($, $a, link) {
+function findSiblingImage(a) {
+  const selfImg = a.querySelector('img[src]');
+  if (selfImg) return selfImg.getAttribute('src');
+  let p = a.parentElement;
+  for (let d=0; d<2 && p; d++) {
+    const img = p.querySelector('img[src]');
+    if (img) return img.getAttribute('src');
+    p = p.parentElement;
+  }
+  return '';
+}
+
+function scoreAnchor(a) {
+  const href = a.getAttribute('href') || '';
   let score = 0;
-  const urlL = (link || "").toLowerCase();
-  if (PRODUCTY_PATH_CUES.some(c => urlL.includes(c))) score += 3;
-
-  const $scope = $a.closest("article,li,div,section");
-  if ($scope && $scope.length) {
-    const cls = ($scope.attr("class") || "").toLowerCase();
-    if (GRID_CUES.some(c => cls.includes(c))) score += 2;
-
-    const img = pickImg($scope, "");
-    if (img) score += 2;
-
-    const price = pickPrice($scope);
-    if (price) score += 3;
-
-    const title = pickTitle($a, $scope);
-    if (title && title.length >= 4) score += 1;
+  if (isProbablyProductUrl(href)) score += 5;
+  const text = (a.textContent || '').toLowerCase();
+  if (PRODUCT_KEYWORDS.some(k => text.includes(k))) score += 2;
+  if (findSiblingImage(a)) score += 1;
+  if (findSiblingPrice(a)) score += 2;
+  // 列表块里的 a 权重大于 header/footer/nav/aside
+  let cur = a;
+  while (cur) {
+    const tag = (cur.tagName || '').toLowerCase();
+    if (['header','footer','nav','aside'].includes(tag)) { score -= 3; break; }
+    cur = cur.parentElement;
   }
-  if (/[/-]\d{3,}/.test(urlL)) score += 1;
   return score;
 }
 
-function parseGenericLinks($, url, { limit = 50 } = {}) {
-  const out = [];
+function uniqueByUrl(items) {
   const seen = new Set();
+  const out = [];
+  for (const it of items) {
+    const key = (it.url || '').replace(/#.*$/, '');
+    if (!seen.has(key)) {
+      seen.add(key);
+      out.push(it);
+    }
+  }
+  return out;
+}
 
-  $("a[href]").each((_, a) => {
-    const $a = $(a);
-    const link = abs(url, $a.attr("href") || "");
-    if (!link) return;
+function fromJsonLD(document) {
+  try {
+    const scripts = Array.from(document.querySelectorAll('script[type="application/ld+json"]'));
+    const items = [];
+    for (const s of scripts) {
+      let json;
+      try { json = JSON.parse(s.textContent); } catch { continue; }
+      const objs = Array.isArray(json) ? json : [json];
+      for (const obj of objs) {
+        const t = (obj['@type'] || obj.type || '').toString();
+        if (/product/i.test(t)) {
+          const name = obj.name || obj.title || '';
+          const url = obj.url || '';
+          const img = Array.isArray(obj.image) ? obj.image[0] : obj.image || '';
+          let price = '';
+          const offers = obj.offers || obj.Offer || null;
+          if (offers) {
+            const off = Array.isArray(offers) ? offers[0] : offers;
+            price = off.priceCurrency && off.price
+              ? `${off.price} ${off.priceCurrency}`
+              : (off.price || '');
+          }
+          if (url || name) items.push({ title: name || 'item', url, img, price });
+        }
+      }
+    }
+    return items;
+  } catch { return []; }
+}
 
-    const text = clean($a.text() || $a.attr("title") || "");
-    if (isHardNav(link, text)) return;
+export default function genericLinksParser({ url, document, logger }) {
+  // 1) 先尝试 JSON-LD（有就直接返回，质量最高）
+  const fromLD = fromJsonLD(document);
+  if (fromLD.length) {
+    logger.debug(`[generic-links] JSON-LD products: ${fromLD.length}`);
+    return fromLD.slice(0, 100).map((p, i) => ({
+      sku: '',
+      title: p.title || 'item',
+      url: p.url || url,
+      img: p.img || '',
+      price: p.price || '',
+      currency: '',
+      moq: '',
+      desc: '',
+      rank: i + 1,
+    }));
+  }
 
-    const s = scoreCandidate($, $a, link);
-    if (s <= 0) return;
+  // 2) 过滤候选 <a>
+  const anchors = Array.from(document.querySelectorAll('a[href]'))
+    .filter(a => {
+      const href = a.getAttribute('href') || '';
+      if (!href || href.startsWith('mailto:') || href.startsWith('tel:')) return false;
+      const low = href.toLowerCase();
+      if (isNavLike(low)) return false;
 
-    const $scope = $a.closest("article,li,div,section");
-    const img = $scope && $scope.length ? pickImg($scope, url) : "";
-    const price = $scope && $scope.length ? pickPrice($scope) : "";
-    const title = $scope && $scope.length ? pickTitle($a, $scope) : text;
+      // header/footer/nav/aside 里的链接通常不是产品
+      let cur = a;
+      let penalized = false;
+      while (cur) {
+        const tag = (cur.tagName || '').toLowerCase();
+        if (['header','footer','nav','aside'].includes(tag)) { penalized = true; break; }
+        cur = cur.parentElement;
+      }
+      // 仍允许：如果明显像产品（产品 URL 或者附近有价格/图）
+      if (penalized && !isProbablyProductUrl(low) && !findSiblingPrice(a) && !findSiblingImage(a)) {
+        return false;
+      }
 
-    const key = stripHash(link);
-    if (!key || seen.has(key)) return;
-    seen.add(key);
+      // 文本太短且无图/无价格 -> 多半是导航/图标
+      const text = (a.textContent || '').replace(/\s+/g,' ').trim();
+      if (text.length < 2 && !findSiblingImage(a) && !findSiblingPrice(a)) return false;
 
-    out.push({
-      title: title || "",
-      url: link,
-      link,
-      img,
-      imgs: img ? [img] : [],
-      price,
-      sku: "",
-      desc: ""
+      return isProbablyProductUrl(low) || findSiblingPrice(a) || PRODUCT_KEYWORDS.some(k => text.toLowerCase().includes(k));
     });
-  });
 
-  // 按得分从高到低（再算一次分避免 DOM 选择器定位不准）
-  out.sort((a, b) => {
-    const sa = scoreCandidate($, $("a[href='" + (a.url || "").replace(/"/g, '\\"') + "']"), a.url);
-    const sb = scoreCandidate($, $("a[href='" + (b.url || "").replace(/"/g, '\\"') + "']"), b.url);
-    return sb - sa;
-  });
+  // 3) 评分、去重、组装
+  const scored = anchors
+    .map(a => ({ a, score: scoreAnchor(a) }))
+    .filter(x => x.score >= 2)                  // 低分干掉
+    .sort((x, y) => y.score - x.score);
 
-  const top = out.slice(0, limit);
+  const products = uniqueByUrl(scored.map(({ a }) => {
+    const href = a.getAttribute('href') || '';
+    const abs = href.startsWith('http') ? href : new URL(href, url).toString();
+    const title = (a.getAttribute('title') || a.textContent || 'item').replace(/\s+/g,' ').trim() || 'item';
+    const img = findSiblingImage(a);
+    const priceTxt = findSiblingPrice(a);
+    const priceMatch = priceTxt && priceTxt.match(/([\d\.\,]+\s*(€|eur|chf|\$|usd|£|gbp))/i);
+    const price = priceMatch ? priceMatch[1] : '';
 
-  if (top.length === 0) {
-    try {
-      const host = new URL(url).host;
-      console.debug(`[catalog] NoProductFound in ${host} (generic-links) -> ${url}`);
-    } catch {
-      console.debug(`[catalog] NoProductFound (generic-links) -> ${url}`);
+    return {
+      sku: '',
+      title,
+      url: abs,
+      img,
+      price,
+      currency: '',
+      moq: '',
+      desc: '',
+      rank: 0,
+    };
+  }));
+
+  // 4) 如果仍然很少，最后再宽一点：选取 /products|produkt|artikel/ 的链接填充到 50 条
+  if (products.length < 10) {
+    const relaxed = Array.from(document.querySelectorAll('a[href]'))
+      .filter(a => {
+        const href = a.getAttribute('href') || '';
+        const low = href.toLowerCase();
+        if (isNavLike(low)) return false;
+        return PRODUCT_URL_REGEX.test(low);
+      })
+      .map(a => {
+        const href = a.getAttribute('href') || '';
+        const abs = href.startsWith('http') ? href : new URL(href, url).toString();
+        const title = (a.getAttribute('title') || a.textContent || 'item').replace(/\s+/g,' ').trim() || 'item';
+        return { sku: '', title, url: abs, img: '', price: '', currency: '', moq: '', desc: '', rank: 0 };
+      });
+
+    for (const r of relaxed) {
+      if (!products.find(p => p.url.replace(/#.*$/,'') === r.url.replace(/#.*$/,''))) {
+        products.push(r);
+        if (products.length >= 50) break;
+      }
     }
   }
 
-  return top;
+  logger.debug(`[generic-links] candidates: ${anchors.length}, selected: ${products.length}`);
+  return products.slice(0, 50).map((p, i) => ({ ...p, rank: i + 1 }));
 }
-
-module.exports = {
-  default: parseGenericLinks,
-  parse: parseGenericLinks,
-};
