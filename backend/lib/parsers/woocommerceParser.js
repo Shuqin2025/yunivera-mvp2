@@ -1,12 +1,33 @@
-// backend/lib/parsers/woocommerceParser.js
+// WooCommerce catalog parser (DOM first, JSON-LD fallback, strict filters)
 function pickText($, el) { return ($(el).text() || '').replace(/\s+/g, ' ').trim(); }
-function abs(base, href) { try { return new URL(href, base).toString(); } catch { return href || ''; } }
+function abs(base, href = '') { try { return new URL(href, base).toString(); } catch { return href || ''; } }
+function firstSrc(srcset = '') { const x = (srcset || '').split(',')[0] || ''; return x.split(/\s+/)[0] || ''; }
+function cleanTitle(t = '') {
+  const s = String(t).replace(/\s+/g, ' ').trim();
+  if (!s) return '';
+  const bad = ['item', '{{ title }}', 'Zu den Bewertungen für {{ title }}'];
+  if (bad.includes(s)) return '';
+  if (/^Zu den Bewertungen/i.test(s)) return '';
+  return s;
+}
+const BAD_LINK_PATTERNS = [
+  '/cart', '/checkout', '/account', '/my-account', '/wishlist',
+  '/kontakt', '/contact', '/hilfe', '/support', '/agb', '/impressum',
+  '/privacy', '/datenschutz', '/versand', '/shipping', '/returns'
+];
+function isBadLink(u = '') { return BAD_LINK_PATTERNS.some(x => u.includes(x)); }
+function looksLikeProduct(u = '') {
+  // Woo 常见详情：/product/slug 或主题定制但仍含 /product/
+  if (u.includes('/product/')) return true;
+  // 兜底：存在 ?add-to-cart 不是详情，直接否
+  if (u.includes('add-to-cart')) return false;
+  return false;
+}
 function readPrice($, node) {
   const txt = pickText($, $(node).find('.price, .amount, [itemprop="price"], .wc-block-grid__product-price'));
   const m = txt.match(/(\d+[.,]\d{2})/);
   return m ? m[1].replace(',', '.') : '';
 }
-function firstFromSrcset(s=''){ const x=(s||'').split(',')[0]||''; return x.split(/\s+/)[0]||''; }
 
 function collectJsonLdProducts($, base) {
   const out = [];
@@ -17,22 +38,16 @@ function collectJsonLdProducts($, base) {
     for (const node of bag) {
       const arr = [];
       if (node && node['@type'] === 'Product') arr.push(node);
-      if (node && Array.isArray(node['@graph'])) node['@graph'].forEach(x => { if (x['@type']==='Product') arr.push(x); });
+      if (node && Array.isArray(node['@graph'])) node['@graph'].forEach(x => { if (x && x['@type'] === 'Product') arr.push(x); });
       for (const p of arr) {
-        const title = p.name || p.title || '';
+        const title = cleanTitle(p.name || p.title || '');
         const link  = abs(base, p.url || p['@id'] || '');
         const img   = abs(base, (Array.isArray(p.image) ? p.image[0] : p.image) || '');
         let price = '', currency = '';
         const offers = Array.isArray(p.offers) ? p.offers[0] : p.offers;
         if (offers) { price = String(offers.price || ''); currency = String(offers.priceCurrency || ''); }
-        if (title && link) {
-          out.push({
-            title, url: link, link,
-            img, imgs: img ? [img] : [],
-            price, currency,
-            sku: p.sku || p.mpn || '', moq: '', desc: p.description || ''
-          });
-        }
+        if (!title || !link || isBadLink(link) || !looksLikeProduct(link)) continue;
+        out.push({ title, url: link, link, img, imgs: img ? [img] : [], price, currency, sku: p.sku || p.mpn || '', moq: '', desc: p.description || '' });
       }
     }
   });
@@ -42,53 +57,43 @@ function collectJsonLdProducts($, base) {
 function parse($, url, { limit = 50 } = {}) {
   const out = [];
 
-  const baseCards = $(
-    'ul.products li.product, ' +           // 经典 UL 列表
-    '.products .product, ' +               // 通用 products 容器
-    '.wc-block-grid__product, ' +          // Block Grid
-    '[class*="product-card"]'              // 一些主题的卡片类
-  );
+  // 1) DOM 抓取（最稳）
+  const cards = $([
+    'ul.products li.product',
+    '.products .product',
+    '.wc-block-grid__product',
+    '[class*="product-card"]'
+  ].join(','));
 
-  const linkAnchors = $('a.woocommerce-LoopProduct-link, a.woocommerce-LoopProduct__link, a[href*="/product/"]');
-  const fromLinks = linkAnchors.closest('li.product, .product, .wc-block-grid__product');
-
-  const cards = baseCards.add(fromLinks);
-
-  cards.each((_, el) => {
+  cards.each((_i, el) => {
     const $el = $(el);
-
-    const a = $el.find('a.woocommerce-LoopProduct-link[href], a.woocommerce-LoopProduct__link[href], a[href*="/product/"], a[href]').first().length
-      ? $el.find('a.woocommerce-LoopProduct-link[href], a.woocommerce-LoopProduct__link[href], a[href*="/product/"], a[href]').first()
-      : $el.closest('a[href]').first();
+    const a = $el.find('a.woocommerce-LoopProduct-link[href], a.woocommerce-LoopProduct__link[href], a[href*="/product/"], a[href]').first();
+    const link = abs(url, a.attr('href') || '');
+    if (!link || isBadLink(link) || !looksLikeProduct(link)) return;
 
     const title =
-      pickText($, $el.find('.woocommerce-loop-product__title, .product-title, .wc-block-grid__product-title, h2, h3, [itemprop="name"]').first()) ||
-      (a.attr('title') || '').trim() ||
-      pickText($, a);
-
-    const link = abs(url, a.attr('href') || '');
+      cleanTitle(
+        pickText($, $el.find('.woocommerce-loop-product__title, .product-title, .wc-block-grid__product-title, h2, h3, [itemprop="name"]').first()) ||
+        (a.attr('title') || '').trim() ||
+        pickText($, a)
+      );
+    if (!title) return;
 
     const imgEl = $el.find('img').first();
     const img =
       abs(url, imgEl.attr('data-src') || '') ||
-      abs(url, firstFromSrcset(imgEl.attr('data-srcset') || imgEl.attr('srcset') || '')) ||
+      abs(url, firstSrc(imgEl.attr('data-srcset') || imgEl.attr('srcset') || '')) ||
       abs(url, imgEl.attr('src') || '');
 
     const price = readPrice($, $el);
 
-    if (title && link) {
-      out.push({
-        title, url: link, link,
-        img, imgs: img ? [img] : [],
-        price, currency: '', sku: '', moq: '', desc: ''
-      });
-    }
+    out.push({ title, url: link, link, img, imgs: img ? [img] : [], price, currency: '', sku: '', moq: '', desc: '' });
   });
 
-  // JSON-LD 回退/补充
+  // 2) JSON-LD 回退/增强
   out.push(...collectJsonLdProducts($, url));
 
-  // 去重 + 截断
+  // 3) 去重 + 截断
   const uniq = [];
   const seen = new Set();
   for (const it of out) {
@@ -103,7 +108,7 @@ function parse($, url, { limit = 50 } = {}) {
 
 const api = {
   id: 'woocommerce',
-  test: (_$, url) => /woocommerce|\/product-category\//i.test(url),
+  test: (_$, u) => /woocommerce|\/product-category\//i.test(u),
   parse
 };
 
