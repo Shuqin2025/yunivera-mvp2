@@ -1,64 +1,92 @@
 // backend/lib/parsers/shopifyParser.js
-// 宽选择器覆盖常见主题（尽量不依赖具体主题类名）
-// 保留当前模块导出结构：module.exports = { id, test, parse }
+const { load } = require('cheerio');
 
-function pickText($, el) { return ($(el).text() || '').replace(/\s+/g, ' ').trim(); }
-function abs(base, href) { try { return new URL(href, base).toString(); } catch { return href || ''; } }
-function readPrice($, node) {
-  const txt = pickText($, $(node).find('[class*="price"], [data-price], [itemprop="price"]'));
-  const m = txt.match(/(\d+[.,]\d{2})/);
-  return m ? m[1].replace(',', '.') : '';
+function pick($el) {
+  return ($el.text() || '').replace(/\s+/g, ' ').trim();
 }
-function pickFromSelectors($, el, selList) {
-  for (const sel of selList) {
-    const t = ($(el).find(sel).first().text() || '').trim();
-    if (t) return t;
+function abs(base, href) {
+  try { return new URL(href, base).toString(); } catch { return href || ''; }
+}
+function firstAttr(el, keys) {
+  for (const k of keys) {
+    const v = el.attr(k);
+    if (v) return v;
   }
   return '';
 }
-
-function parse($, url, { limit = 50 } = {}) {
-  const out = [];
-  // 更“宽”的卡片选择器（兼容多主题）
-  const cards = $(
-    '.product-card, .grid-product, [data-product-id], li.grid__item, .product-item, .collection-grid-item'
-  );
-
-  cards.each((_, el) => {
-    const $el = $(el);
-    // 优先选择真正的产品链接
-    const a = $el.find('a[href*="/products/"]').first().length
-      ? $el.find('a[href*="/products/"]').first()
-      : ($el.find('a[href]').first().length ? $el.find('a[href]').first() : $el.closest('a[href]').first());
-
-    const title =
-      pickFromSelectors($, el, [
-        '.product-card__title', '[class*="product-title"]', '.grid-product__title',
-        '.product-item__title', 'h3', 'h2', '[itemprop="name"]'
-      ]) || (a.attr('title') || '').trim() || pickText($, a);
-
-    const link = abs(url, a && a.attr('href') || '');
-
-    const imgEl = $el.find('img').first();
-    const img = abs(url,
-      imgEl.attr('data-src') || (imgEl.attr('srcset') || '').split(' ').shift() || imgEl.attr('src') || ''
-    );
-
-    const price = readPrice($, $el);
-
-    if (title && link) {
-      out.push({ title, url: link, link, img, imgs: img ? [img] : [], sku: '', desc: '', price });
-    }
-  });
-
-  return out.slice(0, limit);
+function readPrice(raw) {
+  if (!raw) return '';
+  const m = String(raw).match(/([\d.,]+)\s*(€|eur|€)/i);
+  return m ? m[1].replace('.', '').replace(',', '.') : '';
 }
 
-const api = {
-  id: 'shopify',
-  test: (_$, url) => /myshopify\.com|\/collections\//i.test(url),
-  parse
-};
+module.exports = {
+  /**
+   * @param {CheerioAPI} $
+   * @param {string} url
+   * @param {{limit?:number}} opts
+   */
+  parse($, url, { limit = 50 } = {}) {
+    const out = [];
 
-module.exports = api;
-module.exports.default = api;
+    // 常见集合容器（不同主题）
+    const containers = [
+      '.collection, .collection__products, .collection-grid, .grid--collection',
+      '.product-grid, .grid, [data-products], [data-section-type*="collection"]',
+      '.template-collection, #Collection, main [role="main"]'
+    ];
+
+    let cards = $();
+    for (const sel of containers) {
+      const found = $(sel);
+      if (found.length) { cards = found; break; }
+    }
+    if (!cards.length) cards = $('*'); // 容错：在全局里找卡片
+
+    // 每张商品卡（购物主题差异极大，做多套选择器）
+    const productEls = cards.find([
+      '.product-card, .product-grid__item, .grid__item',
+      'li.grid__item, li.product, article, .card--product',
+      '[data-product-id], [data-product-handle]'
+    ].join(','));
+
+    productEls.each((_, node) => {
+      const el = $(node);
+      const a = el.find('a[href*="/products/"]').first();
+      const link = abs(url, a.attr('href') || '');
+
+      const title =
+        pick(el.find('.product-card__title').first()) ||
+        pick(el.find('.card__heading, .product-title, .full-unstyled-link').first()) ||
+        pick(a) ||
+        '';
+
+      // 懒加载图片兜底
+      const imgEl = el.find('img').first();
+      const img =
+        firstAttr(imgEl, ['data-src', 'data-original', 'data-lazy-src', 'data-srcset', 'srcset', 'src'])
+          .split(' ')
+          .shift() || '';
+
+      const priceRaw =
+        pick(el.find('.price-item--regular, .price__regular .price-item').first()) ||
+        pick(el.find('.price, .product-card__price, [class*="price"]').first()) ||
+        '';
+      const price = readPrice(priceRaw);
+
+      if (title && link) {
+        out.push({
+          title,
+          url: link,
+          img: img ? abs(url, img) : '',
+          imgs: img ? [abs(url, img)] : [],
+          price,
+          sku: '',
+          desc: ''
+        });
+      }
+    });
+
+    return out.slice(0, limit);
+  }
+};
