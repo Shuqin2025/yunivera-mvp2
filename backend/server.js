@@ -4,6 +4,9 @@ import cors from "cors";
 import axios from "axios";
 import * as cheerio from "cheerio";
 
+// health info
+import pkg from './package.json' assert { type: 'json' };
+
 // ✅ 可选翻译（保持你原有接口）
 import * as translate from "./lib/translate.js";
 
