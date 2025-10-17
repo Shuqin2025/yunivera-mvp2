@@ -17,6 +17,10 @@ const CART_TOKENS = [
   'in den einkaufswagen', 'zum warenkorb', 'checkout'
 ];
 
+// 🔥 更宽松的正则信号（你的同事要求）
+const PRICE_REGEX = /€|eur|preis|price|chf|\$|£|[0-9]\s*,\s*[0-9]{2}\s*€/i;
+const CART_REGEX  = /add\-?to\-?cart|warenkorb|in den warenkorb|detail\-?btn|buy\-?now/i;
+
 // 明显是站点级/资讯级链接或栏目（非商品）
 const GENERIC_LINK_BAD = new RegExp(
   [
@@ -129,7 +133,9 @@ async function detectStructure(url, html) {
   // —— 0) JSON-LD 强信号：直接判 product
   const jsonldProduct = hasJsonLdProduct($);
   if (jsonldProduct) {
-    return debugReturn('product', platform, 'Product via JSON-LD', { url, jsonldProduct: true });
+    const payload = debugReturn('product', platform, 'Product via JSON-LD', { url, jsonldProduct: true });
+    console.info?.(`[struct] type=${payload.type} platform=${payload.platform || '-'}`);
+    return payload;
   }
 
   // —— 1) 锚点 & 卡片粗判
@@ -145,18 +151,24 @@ async function detectStructure(url, html) {
     [class*="product-card"], [class*="product_item"], [data-product-id]
   `);
 
-  // —— 2) 商业信号：价格 / 购买
-  const hasPrice = textIncludesAny(bodyText, PRICE_TOKENS);
-  const hasCart  = textIncludesAny(bodyText, CART_TOKENS);
+  // —— 2) 商业信号：价格 / 购买（宽松 + 令牌）
+  const hasPriceTokens = textIncludesAny(bodyText, PRICE_TOKENS);
+  const hasCartTokens  = textIncludesAny(bodyText, CART_TOKENS);
+  const hasPriceWide   = PRICE_REGEX.test(bodyText);
+  const hasCartWide    = CART_REGEX.test(bodyText);
+  const hasPrice       = hasPriceTokens || hasPriceWide;
+  const hasCart        = hasCartTokens || hasCartWide;
 
   // —— 3) 详情页判定（保守：少量卡片 + 有价格/购买）
   // 典型详情页：卡片很少（<=3）且有价格/购买；或者商品锚点较少（<6）但同时出现价格与购买按钮
   if ((cardCount <= 3 && (hasPrice || hasCart)) || (productAnchorCount < 6 && hasPrice && hasCart)) {
     const mediaCount = $('img, video, picture').length;
     if (mediaCount >= 1) {
-      return debugReturn('product', platform, 'Single product signals', {
+      const payload = debugReturn('product', platform, 'Single product signals', {
         url, cardCount, productAnchorCount, hasPrice, hasCart, mediaCount
       });
+      console.info?.(`[struct] type=${payload.type} platform=${payload.platform || '-'}`);
+      return payload;
     }
   }
 
@@ -165,7 +177,7 @@ async function detectStructure(url, html) {
     let decision = 'catalog';
     let reason   = 'Many cards/anchors';
 
-    // ✦ 你要求的降级：catalog 但没有 price/cart → 很可能是栏目/品牌宫格/帮助页
+    // ✦ 兜底降级：catalog 但没有 price/cart → 很可能是栏目/品牌宫格/帮助页
     if (!hasPrice && !hasCart) {
       const firstLinks = $('a[href]').slice(0, 80).toArray().map(a => $(a).attr('href') || '');
       const badRatio = firstLinks.length
@@ -179,18 +191,23 @@ async function detectStructure(url, html) {
       if (badRatio > 0.40 && !looksLikeCatalogPath) {
         decision = 'homepage';
         reason   = 'Catalog downgraded: no price/cart & too many site-links';
+        console.warn?.(`[struct] catalog->homepage fallback (no price/cart signals)`);
       }
     }
 
-    return debugReturn(decision, platform, reason, {
+    const payload = debugReturn(decision, platform, reason, {
       url, cardCount, productAnchorCount, hasPrice, hasCart
     });
+    console.info?.(`[struct] type=${payload.type} platform=${payload.platform || '-'}`);
+    return payload;
   }
 
   // —— 5) 默认回到主页/栏目页（安全）
-  return debugReturn('homepage', platform, 'Low commerce signals', {
+  const payload = debugReturn('homepage', platform, 'Low commerce signals', {
     url, cardCount, productAnchorCount, hasPrice, hasCart
   });
+  console.info?.(`[struct] type=${payload.type} platform=${payload.platform || '-'}`);
+  return payload;
 }
 
 function debugReturn(type, platform, reason, extra = {}) {
@@ -208,3 +225,4 @@ function debugReturn(type, platform, reason, extra = {}) {
 }
 
 module.exports = { detectStructure };
+
