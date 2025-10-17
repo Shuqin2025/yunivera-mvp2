@@ -130,8 +130,74 @@ function parse($, url, { limit=50, logger } = {}){
   } catch {}
 
   // 5) deepAnchorFallback
-  return deepAnchorFallback($, url, limit, logger);
+  {
+    const r = deepAnchorFallback($, url, limit, logger) || [];
+    if (Array.isArray(r) && r.length) return r.slice(0, limit);
+  }
+
+  // 6) Magento deepAnchorFallback (addon, last resort)
+  try {
+    const fallbacks = magentoDeepAnchorFallback($, url) || [];
+    if (fallbacks.length) {
+      const title = cleanTitle($('title').text().trim()) || 'item';
+      const mapped = fallbacks.map(u => ({ title, url:u, link:u, img:'', imgs:[], price:'', currency:'', sku:'', moq:'', desc:'' }));
+      logger?.info?.('[Magento] deepAnchorFallback (addon) used', { count: mapped.length });
+      return mapped.slice(0, limit);
+    }
+  } catch {}
+  return [];
 }
 
+
+
+// ======= ADDON: deep anchor fallback for Magento (last resort) =======
+function magentoDeepAnchorFallback($, base){
+  const deny = /konto|account|login|customer|wishlist|cart|checkout|agb|datenschutz|privacy|impressum|versand|shipping|zahlung|payment|kontakt|contact|sitemap|newsletter|hilfe|support|widerruf|return|suche|search/i;
+  // 允许词（放宽，适配换皮）：
+  const allow = /product|produkt|artikel|.html/i;
+
+  const urls = new Set();
+  $('a[href]').each((_i, a) => {
+    const hrefRaw = String($(a).attr('href') || '').trim();
+    if (!hrefRaw || hrefRaw.startsWith('#') || deny.test(hrefRaw)) return;
+    try{
+      const abs = new URL(hrefRaw, base).toString();
+      // 只留站内
+      const hostBase = new URL(base).host;
+      if (/^https?:\/\//i.test(abs) && new URL(abs).host !== hostBase) return;
+
+      // 典型 Magento 商品链接：/catalog/product/ 或以 .html 结尾；或命中允许词
+      if (/\/catalog\/product\//i.test(abs) || /\.html(\?|$)/i.test(abs) || allow.test(abs)) {
+        urls.add(abs);
+        return;
+      }
+      // 降级判定：带商品卡片容器痕迹也收集
+      const $card = $(a).closest('.product-item, .product-item-info, li.product, .product, [data-role="product-item"], [class*="product-card"]');
+      if ($card.length) urls.add(abs);
+    }catch{}
+  });
+  return [...urls];
+}
+// ======= /ADDON =======
+
+
+// ======= ADDON: deep anchor fallback for Magento =======
+function magentoDeepAnchorFallback($, base) {
+  const deny = /account|customer|wishlist|cart|checkout|impressum|datenschutz|privacy|agb|hilfe|support|kontakt/i;
+
+  const urls = new Set();
+  $('a[href]').each((_, a) => {
+    const href = String($(a).attr('href') || '').trim();
+    if (!href || href.startsWith('#') || deny.test(href)) return;
+    if (/^https?:\/\//i.test(href) && !href.includes(base)) return;
+
+    // Magento 常见：a.product-item-link、/catalog/product/view/、/product/
+    if ($(a).is('.product-item-link') || /\/catalog\/product\/view/i.test(href) || /\/product\//i.test(href)) {
+      urls.add(new URL(href, base).toString());
+    }
+  });
+  return [...urls];
+}
+// ======= /ADDON =======
 const api={ id:'magento', test:(_$, u)=>/magento|\/catalog\/category\/|\.html(\?|$)/i.test(u), parse };
 module.exports=api; module.exports.default=api;
