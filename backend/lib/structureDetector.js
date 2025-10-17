@@ -67,6 +67,43 @@ function detectPlatform($, html) {
     $('meta[name="generator"][content*="Shopware"]').length
   ) return 'Shopware';
 
+  // ======= ADDON: stronger fingerprints for platform detection =======
+  // ---- WooCommerce ----
+  // 常见特征：<body class="woocommerce ...">、div.woocommerce、wp-json/、woocommerce_params 等
+  const isWooByCss =
+    /\bwoocommerce\b/i.test($('body').attr('class') || '') ||
+    $('.woocommerce').length > 0 ||
+    $('link[href*="woocommerce"]').length > 0 ||
+    $('script[src*="woocommerce"]').length > 0 ||
+    $('script:contains("woocommerce_params")').length > 0 ||
+    $('script:contains("wc_add_to_cart_params")').length > 0;
+
+  // ---- Shopware (v5/v6) ----
+  // 特征：meta[name=generator*="Shopware"]、data-shopware、sw- 前缀组件、/engine/Shopware、/bundles/storefront/ 等
+  const isShopwareByMeta = /shopware/i.test($('meta[name="generator"]').attr('content') || '');
+  const isShopwareByHints =
+    $('[data-shopware]').length > 0 ||
+    $('[class*="sw-"], [id*="sw-"]').length > 0 ||
+    $('script[src*="/engine/Shopware"], link[href*="/engine/Shopware"]').length > 0 ||
+    $('link[href*="/bundles/storefront/"], script[src*="/bundles/storefront/"]').length > 0 ||
+    $('script:contains("window.router")').length > 0;
+
+  // ---- Magento (2.x) ----
+  // 特征：requirejs-config.js、/static/frontend/、mage/、varien、"Magento" 字样、data-mage-init
+  const isMagentoByAssets =
+    $('script[src*="requirejs-config.js"]').length > 0 ||
+    $('link[href*="/static/frontend/"], script[src*="/static/frontend/"]').length > 0 ||
+    $('script[src*="/mage/"], script[src*="Magento_"]').length > 0 ||
+    $('[data-mage-init]').length > 0 ||
+    $('script:contains("Magento")').length > 0 ||
+    /Magento/i.test($('meta[name="generator"]').attr('content') || '');
+
+  // 将这些加强条件与原判断合并（原有分支未命中时再兜底）
+  if (isWooByCss) return 'WooCommerce';
+  if (isShopwareByMeta || isShopwareByHints) return 'Shopware';
+  if (isMagentoByAssets) return 'Magento';
+  // ======= /ADDON =======
+
   return '';
 }
 
