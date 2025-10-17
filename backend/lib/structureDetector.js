@@ -165,6 +165,14 @@ function hasJsonLdProduct($) {
 async function detectStructure(url, html, adapterHint = '') {
   const $ = load(html || '');
   const platform = detectPlatform($, html || '');
+  // ===== DEBUG: structure fingerprints =====
+  try {
+    if (process.env.DEBUG) {
+      const flags = __platformFlags($, html || '');
+      console.log('[struct]', 'flags=', flags);
+    }
+  } catch (_) {}
+  // ===== /DEBUG =====
   const bodyText = $('body').text() || '';
   const hint = adapterHint || process.env.ADAPTER_HINT || '';
 
@@ -260,5 +268,36 @@ function debugReturn(type, platform, reason, extra = {}, adapterHint = '') {
   }
   return payload;
 }
+
+
+
+// ===== DEBUG helper: platform flags (does not affect logic) =====
+function __platformFlags($, html) {
+  try {
+    const text = (html || $('html').html() || '').toLowerCase();
+    const shopify =
+      /cdn\.shopify\.com|window\.Shopify|Shopify\.theme/i.test(text) ||
+      $('meta[name="shopify-digital-wallet"], link[href*="shopify"]').length > 0;
+
+    const woocom =
+      /woocommerce|wp\-content\/plugins\/woocommerce/i.test(text) ||
+      $('[class*="woocommerce"], [class*="wc-"], .add_to_cart_button').length > 0 ||
+      $('meta[name="generator"][content*="WooCommerce"]').length > 0;
+
+    const magento =
+      /Magento|Mage\.Cookies|mage\/requirejs|pub\/static\/|form_key/i.test(text) ||
+      $('meta[name="generator"][content*="Magento"]').length > 0 ||
+      $('[data-mage-init]').length > 0;
+
+    const shopware =
+      /shopware|sw\-|Shopware\./i.test(text) ||
+      $('meta[name="generator"][content*="Shopware"]').length > 0 ||
+      $('[data-shopware]').length > 0 ||
+      $('[class*="sw-"], [id*="sw-"]').length > 0;
+
+    return { shopify: !!shopify, shopware: !!shopware, woocom: !!woocom, magento: !!magento };
+  } catch { return { shopify:false, shopware:false, woocom:false, magento:false }; }
+}
+// ===== /DEBUG helper =====
 
 module.exports = { detectStructure };
