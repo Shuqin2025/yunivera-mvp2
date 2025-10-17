@@ -9,6 +9,9 @@ import path from 'node:path';
 // health info
 import pkg from './package.json' assert { type: 'json' };
 
+// health router (per doc instructions)
+import health from './routes/health.js';
+
 // ✅ 可选翻译（保持你原有接口）
 import * as translate from "./lib/translate.js";
 
@@ -18,6 +21,7 @@ import sino from "./adapters/sinotronic.js";
 import parseUniversal from "./adapters/universal.js";
 
 const app = express();
+app.use(health);
 app.use(cors({ origin: "*", exposedHeaders: ["X-Lang", "X-Adapter"] }));
 
 /* ──────────────────────────── snapshots static ──────────────────────────── */
