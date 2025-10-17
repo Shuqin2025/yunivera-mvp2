@@ -180,6 +180,7 @@ async function parse(html, url, opts = {}) {
   if (!items.length) {
     items = fallbackParse($, url, limit);
     if (!adapterName) adapterName = 'fallback';
+    try { if (process.env.DEBUG) console.log('[tpl]', 'deepAnchorFallback HIT'); } catch (_) {}
   }
 
   // 3) 二次过滤“站点链接”
@@ -232,6 +233,9 @@ async function parse(html, url, opts = {}) {
     }));
   }
 
+  if (!unified.length) {
+    try { if (process.env.DEBUG) console.log('[tpl]', 'NoProductFound RETURN'); } catch (_) {}
+  }
   return unified.slice(0, limit);
 }
 
