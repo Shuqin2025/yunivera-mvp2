@@ -3,14 +3,15 @@
 // - axios(arraybuffer) + jschardet + iconv-lite 自动探测与解码（gb* → gb18030）
 // - 命中站点适配器（sinotronic / memoryking / templateParser / universal），否则走通用兜底
 // - debug=1 时回传完整调试信息
+// - useBrowser=1 时优先用 Playwright + templateParser.parseCatalog 抓“渲染后 DOM”
 
 import { Router } from "express";
 import axios from "axios";
 import * as cheerio from "cheerio";
 import jschardet from "jschardet";
 import iconv from "iconv-lite";
-import fs from 'node:fs';
-import path from 'node:path';
+import fs from "node:fs";
+import path from "node:path";
 
 // 站点适配器（专用）
 import sinotronic from "../adapters/sinotronic.js";
@@ -18,36 +19,53 @@ import memoryking from "../adapters/memoryking.js"; // 对象导出：.test / .p
 
 // 模板解析中枢 + 通用适配器
 import detectStructure from "../lib/structureDetector.js";
-import templateParser from "../lib/templateParser.js"; // 新增：四大系统模板入口（带 detailFetcher）
+import templateParser from "../lib/templateParser.js"; // 可能是函数，也可能是 { parse, parseCatalog }
 import universal from "../adapters/universal.js";      // 默认导出：async function ({url,limit,debug})
 
 const router = Router();
 
-// ---- metrics helper ----
+/* ---------------------- Playwright（可选依赖，动态加载） --------------------- */
+let chromium = null;
+try {
+  ({ chromium } = await import("playwright"));
+} catch {
+  // 未安装也不影响 Cheerio 路线
+}
+
+/* --------------------------------- metrics -------------------------------- */
 function computeFieldsRate(list) {
-  const keys = ['title','url','img','price','sku','desc'];
+  const keys = ["title", "url", "img", "price", "sku", "desc"];
   const n = Array.isArray(list) ? list.length : 0;
   const out = {};
   for (const k of keys) {
-    out[k] = n ? list.filter(x => x && String(x[k] || '').trim()).length / n : 0;
+    out[k] = n ? list.filter((x) => x && String(x[k] || "").trim()).length / n : 0;
   }
   return out;
 }
 
-
-
-// ---------------- 通用兜底选择器 ----------------
+/* ------------------------- 通用兜底选择器（保留） ------------------------- */
 const CONTAINER_FALLBACK = [
-  "#productlist", ".productlist", ".listBox", ".products", ".product-list",
-  "main", "body",
+  "#productlist",
+  ".productlist",
+  ".listBox",
+  ".products",
+  ".product-list",
+  "main",
+  "body",
 ];
 
 const ITEM_FALLBACK = [
-  "#productlist ul > li", "ul.products > li", "ul > li",
-  ".product", ".product-item", ".productItem", ".product-box", "li",
+  "#productlist ul > li",
+  "ul.products > li",
+  "ul > li",
+  ".product",
+  ".product-item",
+  ".productItem",
+  ".product-box",
+  "li",
 ];
 
-// ---------------- 过滤“站点通用链接”（generic 兜底时使用） ----------------
+/* ----------------- 过滤“站点通用链接”（generic 兜底时使用） ---------------- */
 const PATH_SKIP_PATTERNS = [
   // 常见德语/英语/泛用站点页面
   /(^|\/)(hilfe|support|kontakt|impressum|agb|datenschutz|widerruf|versand|zahlung|news|blog)(\/|$)/i,
@@ -64,44 +82,68 @@ const TITLE_SKIP_PATTERNS = [
 
 // 关键词黑名单（标题/链接中任意命中即视为站点链接，过滤掉）
 const SKIP_WORDS = [
-  'login','anmelden','register','konto','account','mein konto','my account',
-  'logout','cart','warenkorb','basket','wishlist','wunschliste',
-  'agb','impressum','datenschutz','privacy','policy','hilfe','support','kontakt',
-  'newsletter','blog','news','service','faq','payment','shipping','versand',
-  'returns','widerruf','revocation','cookie','sitemap'
+  "login",
+  "anmelden",
+  "register",
+  "konto",
+  "account",
+  "mein konto",
+  "my account",
+  "logout",
+  "cart",
+  "warenkorb",
+  "basket",
+  "wishlist",
+  "wunschliste",
+  "agb",
+  "impressum",
+  "datenschutz",
+  "privacy",
+  "policy",
+  "hilfe",
+  "support",
+  "kontakt",
+  "newsletter",
+  "blog",
+  "news",
+  "service",
+  "faq",
+  "payment",
+  "shipping",
+  "versand",
+  "returns",
+  "widerruf",
+  "revocation",
+  "cookie",
+  "sitemap",
 ];
-
-
 
 function isSiteLink(link = "", title = "") {
   try {
     const u = new URL(link, "http://_/");
     const p = (u.pathname || "").toLowerCase();
     // 路径基于正则的快速判断
-    if (PATH_SKIP_PATTERNS.some(re => re.test(p))) return true;
+    if (PATH_SKIP_PATTERNS.some((re) => re.test(p))) return true;
     // 关键词黑名单：路径中直接包含
-    if (SKIP_WORDS.some(w => p.includes(w))) return true;
+    if (SKIP_WORDS.some((w) => p.includes(w))) return true;
   } catch {}
   const t = (title || "").toLowerCase();
-  if (TITLE_SKIP_PATTERNS.some(re => re.test(t))) return true;
+  if (TITLE_SKIP_PATTERNS.some((re) => re.test(t))) return true;
   // 关键词黑名单：标题中直接包含
-  if (SKIP_WORDS.some(w => t.includes(w))) return true;
-  return false;
-}
- catch {}
-  const t = (title || "").toLowerCase();
-  if (TITLE_SKIP_PATTERNS.some(re => re.test(t))) return true;
+  if (SKIP_WORDS.some((w) => t.includes(w))) return true;
   return false;
 }
 
-// ---------------- 抓取并解码 HTML ----------------
+/* ------------------------------ 抓取并解码 HTML ----------------------------- */
+const UA_DESKTOP =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
+
 async function fetchHtml(url, wantDebug) {
   const res = await axios.get(url, {
     responseType: "arraybuffer",
     timeout: 20000,
     headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+      "User-Agent": UA_DESKTOP,
       Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
     },
@@ -110,46 +152,62 @@ async function fetchHtml(url, wantDebug) {
 
   const buf = Buffer.from(res.data);
   const guess = (jschardet.detect(buf)?.encoding || "").toLowerCase();
-  const useEnc =
-    !guess || guess === "ascii" ? "utf-8"
-      : guess.includes("gb") ? "gb18030"
-      : iconv.encodingExists(guess) ? guess : "utf-8";
+  const useEnc = !guess || guess === "ascii" ? "utf-8" : guess.includes("gb") ? "gb18030" : iconv.encodingExists(guess) ? guess : "utf-8";
 
   const html = iconv.decode(buf, useEnc);
 
-  const debugFetch = wantDebug
-    ? { http_status: res.status, detected_encoding: useEnc }
-    : undefined;
+  const debugFetch = wantDebug ? { http_status: res.status, detected_encoding: useEnc } : undefined;
 
   return { html, status: res.status, detected_encoding: useEnc, debugFetch };
 }
 
-// ---------------- 通用兜底抽取 ----------------
+/* ------------------------------- 通用兜底抽取 ------------------------------ */
 function genericExtract($, baseUrl, { limit = 50, debug = false } = {}) {
   const tried = { container: [], item: [] };
 
   // 1) 容器
-  let $container = $(), usedContainer = "";
+  let $container = $(),
+    usedContainer = "";
   for (const sel of CONTAINER_FALLBACK) {
     tried.container.push(sel);
     const hit = $(sel);
-    if (hit.length) { $container = hit.first(); usedContainer = sel; break; }
+    if (hit.length) {
+      $container = hit.first();
+      usedContainer = sel;
+      break;
+    }
   }
-  if (!$container.length) { $container = $("body"); usedContainer = "body"; }
+  if (!$container.length) {
+    $container = $("body");
+    usedContainer = "body";
+  }
 
   // 2) 条目：容器内相对优先，失败再全局兜底
-  let $items = $(), itemSelectorUsed = "";
+  let $items = $(),
+    itemSelectorUsed = "";
   for (const sel of ITEM_FALLBACK) {
     let list = sel.startsWith("#") ? $(sel) : $container.find(sel);
     if (!list.length) list = $(sel);
     tried.item.push(sel);
-    if (list.length) { $items = list; itemSelectorUsed = sel; break; }
+    if (list.length) {
+      $items = list;
+      itemSelectorUsed = sel;
+      break;
+    }
   }
-  if (!$items.length) { tried.item.push("li"); $items = $container.find("li"); itemSelectorUsed = "li"; }
+  if (!$items.length) {
+    tried.item.push("li");
+    $items = $container.find("li");
+    itemSelectorUsed = "li";
+  }
 
   const absolutize = (href) => {
     if (!href) return "";
-    try { return new URL(href, baseUrl).href; } catch { return href; }
+    try {
+      return new URL(href, baseUrl).href;
+    } catch {
+      return href;
+    }
   };
 
   const items = [];
@@ -163,7 +221,8 @@ function genericExtract($, baseUrl, { limit = 50, debug = false } = {}) {
     const imgRel =
       $el.find("img[src]").attr("src") ||
       $el.find("img[data-src]").attr("data-src") ||
-      $el.find("img[data-original]").attr("data-original") || "";
+      $el.find("img[data-original]").attr("data-original") ||
+      "";
     const img = absolutize(imgRel);
 
     let title =
@@ -181,18 +240,20 @@ function genericExtract($, baseUrl, { limit = 50, debug = false } = {}) {
     items.push({ sku: title, desc: title, minQty: "", price: "", img, link });
   });
 
-  const debugPart = debug ? {
-    tried,
-    container_matched: usedContainer,
-    item_selector_used: itemSelectorUsed,
-    item_count: $items.length,
-    first_item_html: $items.first().html() || null,
-  } : undefined;
+  const debugPart = debug
+    ? {
+        tried,
+        container_matched: usedContainer,
+        item_selector_used: itemSelectorUsed,
+        item_count: $items.length,
+        first_item_html: $items.first().html() || null,
+      }
+    : undefined;
 
   return { items, debugPart };
 }
 
-// ---------------- 适配器选择（前端 hint → 域名直连 → 结构识别） ----------------
+/* --------------------- 适配器选择（保留你原有策略） --------------------- */
 function chooseAdapter({ url, $, html, hintType, host }) {
   // 先看前端 hint（支持 &t= 强制）
   if (hintType) {
@@ -217,11 +278,34 @@ function chooseAdapter({ url, $, html, hintType, host }) {
   return "generic";
 }
 
-// ---------------- 统一跑适配器/兜底 ----------------
+/* ------------------------------- 模板解析入口 ------------------------------ */
+// 兼容：templateParser 可能是函数（老版），也可能是 { parse, parseCatalog }（新版）
+function callTemplateParse(html, url, opts) {
+  try {
+    if (templateParser && typeof templateParser.parse === "function") {
+      return templateParser.parse(loadHtml(html), url, opts); // 新版：parse($, url, {limit})
+    }
+    if (typeof templateParser === "function") {
+      // 老版：templateParser({ html, url, limit, debug })
+      return templateParser({ html, url, ...(opts || {}) });
+    }
+  } catch {}
+  return Promise.resolve([]);
+}
+function getParseCatalog() {
+  return templateParser && typeof templateParser.parseCatalog === "function" ? templateParser.parseCatalog : null;
+}
+function loadHtml(html) {
+  return cheerio.load(html, { decodeEntities: false });
+}
+
+/* --------------------------- 统一跑适配器/兜底（Cheerio） --------------------------- */
 async function runExtract(url, html, { limit = 50, debug = false, hintType = "" } = {}) {
   const $ = cheerio.load(html, { decodeEntities: false });
 
-  let used = "generic", items = [], debugPart;
+  let used = "generic",
+    items = [],
+    debugPart;
 
   // 0) 保留：sinotronic 专用逻辑（你已有）
   if (sinotronic.test(url)) {
@@ -233,60 +317,61 @@ async function runExtract(url, html, { limit = 50, debug = false, hintType = "" 
 
   // 1) 根据 hint/域名/结构识别选择适配器
   if (!items.length) {
-    const host = (() => { try { return new URL(url).host; } catch { return ""; } })();
+    const host = (() => {
+      try {
+        return new URL(url).host;
+      } catch {
+        return "";
+      }
+    })();
     const which = chooseAdapter({ url, $, html, hintType, host });
 
     if (which === "memoryking") {
-      // Memoryking 专用（已验证懒加载图片）
+      // Memoryking 专用
       const out = memoryking.parse($, url, { limit, debug });
-      let mmItems = Array.isArray(out) ? out : (out.items || out.products || []);
+      let mmItems = Array.isArray(out) ? out : out.items || out.products || [];
       if (debug && !debugPart) debugPart = out?.debugPart;
 
-      // 若为空 → 先回到模板解析（Shopware系更稳），再不行再 universal
       if (!mmItems || mmItems.length === 0) {
-        const tOut = await templateParser({ html, url, limit, debug });
-        mmItems = Array.isArray(tOut) ? tOut : (tOut?.items || tOut?.products || []);
+        const tOut = await callTemplateParse(html, url, { limit, debug });
+        mmItems = Array.isArray(tOut) ? tOut : tOut?.items || tOut?.products || [];
         if (!mmItems || mmItems.length === 0) {
           const u = await universal({ url, limit, debug });
-          mmItems = Array.isArray(u) ? u : (u?.items || u?.products || []);
-          used  = "universal-fallback";
+          mmItems = Array.isArray(u) ? u : u?.items || u?.products || [];
+          used = "universal-fallback";
         } else {
           used = "template-fallback";
         }
       } else {
-        used  = "memoryking";
+        used = "memoryking";
       }
       items = mmItems || [];
-    }
-
-    else if (which === "template") {
-      // 新增：模板解析优先（内部会根据 detectStructure 选择对应 parser，并可触发 detailFetcher）
-      const tOut = await templateParser({ html, url, limit, debug });
-      items = Array.isArray(tOut) ? tOut : (tOut?.items || tOut?.products || []);
-      used  = "template";
+    } else if (which === "template") {
+      // 模板解析优先
+      const tOut = await callTemplateParse(html, url, { limit, debug });
+      items = Array.isArray(tOut) ? tOut : tOut?.items || tOut?.products || [];
+      used = "template";
 
       // 若模板没取到，则回退到 universal（它会自抓）
       if (!items || items.length === 0) {
         const u = await universal({ url, limit, debug });
-        items = Array.isArray(u) ? u : (u?.items || u?.products || []);
-        used  = "universal-fallback";
+        items = Array.isArray(u) ? u : u?.items || u?.products || [];
+        used = "universal-fallback";
       }
-    }
-
-    else if (which === "generic") {
+    } else if (which === "generic") {
       // 先尝试模板（万一识别不准但模板能吃到），再 generic
-      const tOut = await templateParser({ html, url, limit, debug });
-      let tmp = Array.isArray(tOut) ? tOut : (tOut?.items || tOut?.products || []);
+      const tOut = await callTemplateParse(html, url, { limit, debug });
+      let tmp = Array.isArray(tOut) ? tOut : tOut?.items || tOut?.products || [];
       if (tmp && tmp.length) {
         items = tmp;
-        used  = "template-try";
+        used = "template-try";
       }
     }
 
     // 若上面都没命中，再让 universal 试一遍（例如特殊结构）
     if (!items.length) {
       const u = await universal({ url, limit, debug });
-      items = Array.isArray(u) ? u : (u?.items || u?.products || []);
+      items = Array.isArray(u) ? u : u?.items || u?.products || [];
       if (items && items.length) used = used === "generic" ? "universal" : used || "universal";
     }
   }
@@ -302,7 +387,7 @@ async function runExtract(url, html, { limit = 50, debug = false, hintType = "" 
   return { items, adapter_used: used, debugPart };
 }
 
-// ---------------- 路由 ----------------
+/* ----------------------------------- 路由 ---------------------------------- */
 router.all("/parse", async (req, res) => {
   try {
     const isGet = req.method === "GET";
@@ -313,45 +398,88 @@ router.all("/parse", async (req, res) => {
 
     const limit = Math.max(1, parseInt(qp.limit ?? 50, 10) || 50);
 
-    const imgMode  = String(qp.img || "").toLowerCase();     // "base64" | ""
+    const imgMode = String(qp.img || "").toLowerCase(); // "base64" | ""
     const imgCount = Math.max(0, parseInt(qp.imgCount ?? 0, 10) || 0);
 
-    const rawDebug   = qp.debug ?? qp.debug1 ?? qp.debug_1;
-    const wantDebug  = ["1","true","yes","on"].includes(String(rawDebug ?? "").toLowerCase());
+    const rawDebug = qp.debug ?? qp.debug1 ?? qp.debug_1;
+    const wantDebug = ["1", "true", "yes", "on"].includes(String(rawDebug ?? "").toLowerCase());
 
     // ★ 解析前端 hint（t/type）
     const hintType = (qp.t || qp.type || "").toString();
 
-    // 1) 抓取 + 解码（为专用/模板/兜底服务；universal 会自行再抓）
-    const { html, status, detected_encoding, debugFetch } = await fetchHtml(url, wantDebug);
-    if (!html || status >= 400) {
-      const payload = { ok: false, url, status, error: "fetch failed" };
-      if (wantDebug) payload.debug = { ...(debugFetch || {}), step: "fetch" };
-      return res.status(200).json(payload);
+    // ★ 浏览器渲染开关
+    const useBrowser = ["1", "true", "yes", "on"].includes(String(qp.useBrowser || qp.browser || "").toLowerCase());
+
+    let items = [];
+    let adapter_used = "";
+    let html = "";
+    let debugFetch = undefined;
+    let debugPart = undefined;
+
+    /* -------------------- 路线 A：浏览器渲染（可选） -------------------- */
+    if (useBrowser && chromium && getParseCatalog()) {
+      const browser = await chromium.launch({ headless: true });
+      const page = await browser.newPage({
+        userAgent: UA_DESKTOP,
+        viewport: { width: 1366, height: 900 },
+      });
+      try {
+        const r = await getParseCatalog()(page, url, hintType || "");
+        const browProducts = (r && Array.isArray(r.products)) ? r.products : [];
+        if (browProducts.length) {
+          // 统一结构（与后续保持一致字段）
+          items = browProducts.map((p) => ({
+            sku: p.sku || "",
+            title: p.title || p.name || "",
+            url: p.url || p.link || "",
+            link: p.link || p.url || "",
+            img: p.image || p.img || (Array.isArray(p.imgs) ? p.imgs[0] : ""),
+            price: p.price || "",
+            currency: p.currency || "",
+            moq: p.moq || p.minQty || "",
+            desc: p.desc || p.description || "",
+          }));
+          adapter_used = hintType || "browser-dom";
+        }
+      } catch {}
+      try { await page.close(); } catch {}
+      try { await browser.close(); } catch {}
     }
 
-    // 2) 解析（会根据 hint/域名/结构识别选择 memoryking / templateParser / universal / generic）
-    const { items, adapter_used, debugPart } = await runExtract(url, html, {
-      limit,
-      debug: wantDebug,
-      hintType,
-    });
+    /* -------------------- 路线 B：Cheerio（默认） -------------------- */
+    if (!items.length) {
+      const fetched = await fetchHtml(url, wantDebug);
+      html = fetched.html;
+      debugFetch = fetched.debugFetch;
+      if (!html || fetched.status >= 400) {
+        const payload = { ok: false, url, status: fetched.status, error: "fetch failed" };
+        if (wantDebug) payload.debug = { ...(debugFetch || {}), step: "fetch" };
+        return res.status(200).json(payload);
+      }
 
-    // 3) 可选：前 N 张图转 base64（不影响主逻辑）
+      const ret = await runExtract(url, html, { limit, debug: wantDebug, hintType });
+      items = ret.items || [];
+      adapter_used = ret.adapter_used || "auto";
+      debugPart = ret.debugPart;
+    }
+
+    /* -------------------- 可选：前 N 张图转 base64 -------------------- */
     if (imgMode === "base64" && items.length && imgCount > 0) {
       const N = Math.min(imgCount, items.length);
-      await Promise.all(items.slice(0, N).map(async it => {
-        if (!it.img) return;
-        try {
-          const r = await axios.get(it.img, { responseType: "arraybuffer" });
-          const ext = (it.img.split(".").pop() || "jpg").toLowerCase();
-          it.img = `data:image/${ext};base64,${Buffer.from(r.data).toString("base64")}`;
-        } catch {}
-      }));
+      await Promise.all(
+        items.slice(0, N).map(async (it) => {
+          if (!it.img) return;
+          try {
+            const r = await axios.get(it.img, { responseType: "arraybuffer" });
+            const ext = (it.img.split(".").pop() || "jpg").toLowerCase();
+            it.img = `data:image/${ext};base64,${Buffer.from(r.data).toString("base64")}`;
+          } catch {}
+        })
+      );
     }
 
-    // 4) 统一 products 结构（兼容不同适配器返回）
-    const products = (items || []).map(it => ({
+    /* -------------------- 统一 products 结构（兼容） -------------------- */
+    const products = (items || []).map((it) => ({
       sku: it.sku || it.code || "",
       title: it.title || it.desc || "",
       url: it.url || it.link || "",
@@ -360,48 +488,56 @@ router.all("/parse", async (req, res) => {
       price: it.price || "",
       currency: it.currency || "",
       moq: it.moq || it.minQty || "",
+      desc: it.desc || "",
     }));
 
-    
-/*__INJECT_METRICS__*/
-const count = (products || []).length;
-const fieldsRate = computeFieldsRate(products || []);
-const wantMetrics = ['1','true','yes','on'].includes(String(qp.metrics || '').toLowerCase());
-const wantSnapshot = ['1','true','yes','on'].includes(String(qp.snapshot || qp.debug || '').toLowerCase());
-const resp = {
+    /* -------------------- metrics & snapshots（保留并复用） -------------------- */
+    const count = (products || []).length;
+    const fieldsRate = computeFieldsRate(products || []);
+    const wantMetrics = ["1", "true", "yes", "on"].includes(String(qp.metrics || "").toLowerCase());
+    const wantSnapshot = ["1", "true", "yes", "on"].includes(String(qp.snapshot || qp.debug || "").toLowerCase());
+
+    const resp = {
       ok: true,
       url,
       count: count,
-      products,          // 前端直接使用 products
-      items,             // 兼容旧字段
-      adapter: adapter_used,  // 给前端 toast 显示“来源：xxx”
+      products, // 前端直接使用 products
+      items, // 兼容旧字段
+      adapter: adapter_used, // 给前端 toast 显示“来源：xxx”
     };
 
-    if (wantDebug) resp.debug = {
-      ...(debugFetch || {}),
-      ...(debugPart || {}),
-      adapter_used,
-      hintType,
-    };
+    if (wantDebug) {
+      resp.debug = {
+        ...(debugFetch || {}),
+        ...(debugPart || {}),
+        adapter_used,
+        hintType,
+        useBrowser: !!(useBrowser && chromium && getParseCatalog()),
+      };
+    }
 
-    
-if (wantMetrics) { resp.fieldsRate = fieldsRate; }
-try {
-  if (wantSnapshot) {
-    const SNAPSHOT_DIR = process.env.SNAPSHOT_DIR || path.resolve('./snapshots');
-    const ts = new Date();
-    const pad = (n)=>String(n).padStart(2,'0');
-    const stamp = `${ts.getFullYear()}${pad(ts.getMonth()+1)}${pad(ts.getDate())}-${pad(ts.getHours())}${pad(ts.getMinutes())}${pad(ts.getSeconds())}`;
-    const dir = path.join(SNAPSHOT_DIR, stamp);
-    fs.mkdirSync(dir, { recursive: true });
-    const payload = { stage:'PARSE', url, adapter: adapter_used, count, fieldsRate, products };
-    fs.writeFileSync(path.join(dir, 'parse.json'), JSON.stringify(payload, null, 2));
-  }
-} catch {}
-return res.json(resp);
+    if (wantMetrics) resp.fieldsRate = fieldsRate;
+
+    try {
+      if (wantSnapshot) {
+        const SNAPSHOT_DIR = process.env.SNAPSHOT_DIR || path.resolve("./snapshots");
+        const ts = new Date();
+        const pad = (n) => String(n).padStart(2, "0");
+        const stamp = `${ts.getFullYear()}${pad(ts.getMonth() + 1)}${pad(ts.getDate())}-${pad(ts.getHours())}${pad(
+          ts.getMinutes()
+        )}${pad(ts.getSeconds())}`;
+        const dir = path.join(SNAPSHOT_DIR, stamp);
+        fs.mkdirSync(dir, { recursive: true });
+        const payload = { stage: "PARSE", url, adapter: resp.adapter, count, fieldsRate, products };
+        fs.writeFileSync(path.join(dir, "parse.json"), JSON.stringify(payload, null, 2));
+      }
+    } catch {}
+
+    return res.json(resp);
   } catch (err) {
     return res.status(200).json({ ok: false, error: String(err?.message || err) });
   }
 });
 
 export default router;
+
