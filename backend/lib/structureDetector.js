@@ -17,7 +17,7 @@ const CART_TOKENS = [
   'in den einkaufswagen', 'zum warenkorb', 'checkout'
 ];
 
-// 🔥 更宽松的正则信号（你的同事要求）
+// 🔥 更宽松的正则信号
 const PRICE_REGEX = /€|eur|preis|price|chf|\$|£|[0-9]\s*,\s*[0-9]{2}\s*€/i;
 const CART_REGEX  = /add\-?to\-?cart|warenkorb|in den warenkorb|detail\-?btn|buy\-?now/i;
 
@@ -122,19 +122,20 @@ function hasJsonLdProduct($) {
  *   type: 'homepage' | 'catalog' | 'product',
  *   platform: 'Shopify' | 'WooCommerce' | 'Magento' | 'Shopware' | '',
  *   name: 同 type,
- *   debug: { reason, platform, ...metrics }
+ *   debug: { reason, platform, adapterHint, ...metrics }
  * }
  */
-async function detectStructure(url, html) {
+async function detectStructure(url, html, adapterHint = '') {
   const $ = load(html || '');
   const platform = detectPlatform($, html || '');
   const bodyText = $('body').text() || '';
+  const hint = adapterHint || process.env.ADAPTER_HINT || '';
 
   // —— 0) JSON-LD 强信号：直接判 product
   const jsonldProduct = hasJsonLdProduct($);
   if (jsonldProduct) {
-    const payload = debugReturn('product', platform, 'Product via JSON-LD', { url, jsonldProduct: true });
-    console.info?.(`[struct] type=${payload.type} platform=${payload.platform || '-'}`);
+    const payload = debugReturn('product', platform, 'Product via JSON-LD', { url, jsonldProduct: true }, hint);
+    console.info?.(`[struct] type=${payload.type} platform=${payload.platform || '-'} adapterHint=${hint || '-'}`);
     return payload;
   }
 
@@ -160,14 +161,13 @@ async function detectStructure(url, html) {
   const hasCart        = hasCartTokens || hasCartWide;
 
   // —— 3) 详情页判定（保守：少量卡片 + 有价格/购买）
-  // 典型详情页：卡片很少（<=3）且有价格/购买；或者商品锚点较少（<6）但同时出现价格与购买按钮
   if ((cardCount <= 3 && (hasPrice || hasCart)) || (productAnchorCount < 6 && hasPrice && hasCart)) {
     const mediaCount = $('img, video, picture').length;
     if (mediaCount >= 1) {
       const payload = debugReturn('product', platform, 'Single product signals', {
         url, cardCount, productAnchorCount, hasPrice, hasCart, mediaCount
-      });
-      console.info?.(`[struct] type=${payload.type} platform=${payload.platform || '-'}`);
+      }, hint);
+      console.info?.(`[struct] type=${payload.type} platform=${payload.platform || '-'} adapterHint=${hint || '-'}`);
       return payload;
     }
   }
@@ -191,31 +191,31 @@ async function detectStructure(url, html) {
       if (badRatio > 0.40 && !looksLikeCatalogPath) {
         decision = 'homepage';
         reason   = 'Catalog downgraded: no price/cart & too many site-links';
-        console.warn?.(`[struct] catalog->homepage fallback (no price/cart signals)`);
+        console.warn?.(`[struct] catalog->homepage fallback (no price/cart signals) adapterHint=${hint || '-'}`);
       }
     }
 
     const payload = debugReturn(decision, platform, reason, {
       url, cardCount, productAnchorCount, hasPrice, hasCart
-    });
-    console.info?.(`[struct] type=${payload.type} platform=${payload.platform || '-'}`);
+    }, hint);
+    console.info?.(`[struct] type=${payload.type} platform=${payload.platform || '-'} adapterHint=${hint || '-'}`);
     return payload;
   }
 
   // —— 5) 默认回到主页/栏目页（安全）
   const payload = debugReturn('homepage', platform, 'Low commerce signals', {
     url, cardCount, productAnchorCount, hasPrice, hasCart
-  });
-  console.info?.(`[struct] type=${payload.type} platform=${payload.platform || '-'}`);
+  }, hint);
+  console.info?.(`[struct] type=${payload.type} platform=${payload.platform || '-'} adapterHint=${hint || '-'}`);
   return payload;
 }
 
-function debugReturn(type, platform, reason, extra = {}) {
+function debugReturn(type, platform, reason, extra = {}, adapterHint = '') {
   const payload = {
     type,
     platform: platform || '',
     name: type,
-    debug: { reason, platform: platform || '', ...extra }
+    debug: { reason, platform: platform || '', adapterHint: adapterHint || '', ...extra }
   };
   // 开启 DEBUG 环境变量时输出便于排障的结构化日志
   if (process.env.DEBUG) {
@@ -225,4 +225,3 @@ function debugReturn(type, platform, reason, extra = {}) {
 }
 
 module.exports = { detectStructure };
-
