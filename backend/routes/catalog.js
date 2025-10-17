@@ -24,6 +24,18 @@ import universal from "../adapters/universal.js";      // 默认导出：async f
 
 const router = Router();
 
+// --- DEBUG helper (append-only) ---
+const __dbgR = (tag, data) => {
+  try {
+    if (process?.env?.DEBUG) {
+      const msg = typeof data === 'string' ? data : JSON.stringify(data);
+      console.log(`[route] ${tag} ${msg}`);
+    }
+  } catch {}
+};
+// --- /DEBUG helper ---
+
+
 /* ---------------------- Playwright（可选依赖，动态加载） --------------------- */
 let chromium = null;
 try {
@@ -392,6 +404,7 @@ router.all("/parse", async (req, res) => {
   try {
     const isGet = req.method === "GET";
     const qp = isGet ? req.query : req.body || {};
+    __dbgR('parse.start', { url: req?.body?.url || req?.query?.url });
     const DEBUG = process.env.DEBUG === '1' || process.env.DEBUG === 'true';
 
     const url = String(qp.url || "").trim();
@@ -544,6 +557,10 @@ router.all("/parse", async (req, res) => {
       }
     } catch {}
 
+    __dbgR('parse.done', { url: req?.body?.url || req?.query?.url, adapter: resp?.adapter, count: resp?.products?.length });
+    if ((resp?.products?.length || 0) === 0) {
+      __dbgR('parse.empty', { url: req?.body?.url || req?.query?.url, note: 'NoProductFound after adapter run' });
+    }
     return res.json(resp);
   } catch (err) {
     return res.status(200).json({ ok: false, error: String(err?.message || err) });
