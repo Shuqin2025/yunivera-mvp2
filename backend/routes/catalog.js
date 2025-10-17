@@ -392,6 +392,7 @@ router.all("/parse", async (req, res) => {
   try {
     const isGet = req.method === "GET";
     const qp = isGet ? req.query : req.body || {};
+    const DEBUG = process.env.DEBUG === '1' || process.env.DEBUG === 'true';
 
     const url = String(qp.url || "").trim();
     if (!url) return res.status(400).json({ ok: false, error: "missing url" });
@@ -409,6 +410,7 @@ router.all("/parse", async (req, res) => {
 
     // ★ 浏览器渲染开关
     const useBrowser = ["1", "true", "yes", "on"].includes(String(qp.useBrowser || qp.browser || "").toLowerCase());
+    DEBUG && console.log('[struct]', 'parse:start', { url, hintType, useBrowser });
 
     let items = [];
     let adapter_used = "";
@@ -497,6 +499,15 @@ router.all("/parse", async (req, res) => {
     const wantMetrics = ["1", "true", "yes", "on"].includes(String(qp.metrics || "").toLowerCase());
     const wantSnapshot = ["1", "true", "yes", "on"].includes(String(qp.snapshot || qp.debug || "").toLowerCase());
 
+    // ===== DEBUG: route catalog/parse =====
+    try {
+      if (DEBUG) {
+        const sample = (products && products[0] && (products[0].url || products[0].link)) || null;
+        console.log('[route]', 'adapter=', adapter_used, 'count=', Array.isArray(products) ? products.length : -1, 'url=', url, 'sample=', sample);
+      }
+    } catch (_) {}
+    // ===== /DEBUG =====
+
     const resp = {
       ok: true,
       url,
@@ -540,4 +551,3 @@ router.all("/parse", async (req, res) => {
 });
 
 export default router;
-
