@@ -23,7 +23,7 @@ function normalizeUrl(base, href) {
 function isProbablyProductLink(link) {
   if (!link) return false;
   const u = link.toLowerCase();
-  // 需要 /products/，且排除评论锚点等
+  // 典型 /products/
   if (!u.includes("/products/")) return false;
   if (u.includes("#reviews") || u.includes("reviewssection") || u.includes("/reviews")) return false;
   return true;
@@ -53,7 +53,7 @@ function stripFragment(url) {
 // ===== CSS Selector sets for Shopify themes =====
 const SELECTORSETS = [
   {
-    // 常见卡片
+    // 常见主题
     card: [
       "[class*=product-card]",
       "[class*=ProductItem]",
@@ -147,7 +147,7 @@ function fromDom($, url, limit = 50) {
     if (out.length) break;
   }
 
-  // 去重（以移除 fragment 的 URL 为键）
+  // 去重(按 URL 去掉 fragment)
   const seen = new Set();
   const uniq = out.filter(x => {
     const key = stripFragment(x.url || "");
@@ -160,7 +160,7 @@ function fromDom($, url, limit = 50) {
   return uniq.slice(0, limit);
 }
 
-// ===== 深度兜底：扫描整页 a[href*="/products/"] =====
+// ===== 兜底：遍历 a[href*="/products/"] =====
 function deepAnchorFallback($, url, limit = 50) {
   const out = [];
   const $as = $("a[href*='/products/']");
@@ -173,7 +173,7 @@ function deepAnchorFallback($, url, limit = 50) {
       const link = normalizeUrl(url, href);
       if (!isProbablyProductLink(link)) return;
 
-      // 标题：优先 a 文本，其次 title/aria-label，再其次邻近标题节点
+      // 先用 a 自身取 title/aria-label，不行再用父容器
       let title =
         cleanText($a.text()) ||
         cleanText($a.attr("title") || $a.attr("aria-label") || "");
@@ -192,7 +192,7 @@ function deepAnchorFallback($, url, limit = 50) {
       }
       if (isJunkTitle(title)) title = "";
 
-      // 价格：在最近容器内找 price 相关节点
+      // 近邻找一下 price
       let price = "";
       const $scope = $a.closest("article,li,div,section");
       if ($scope && $scope.length) {
@@ -207,7 +207,7 @@ function deepAnchorFallback($, url, limit = 50) {
           ) ||
           cleanText($scope.find("meta[itemprop='price']").attr("content") || "");
       }
-      // 图片：就近找 img
+      // 取图
       let img = "";
       if ($scope && $scope.length) {
         const n =
@@ -339,23 +339,21 @@ function mergePreferDom(domList, jsonldList) {
 }
 
 // ===== Public API =====
-function parse($, url, { limit = 50 } = {}) {
-  // 1) 先尝试卡片 DOM
+function parse($, url, { limit = 50, logger } = {}) {
+  // 1) 先跑 DOM
   let dom = fromDom($, url, limit);
 
-  // 2) 视情况触发 JSON-LD
+  // 2) 根据需要再跑 JSON-LD
   const needJsonLd = dom.length === 0 || dom.filter(x => x.title).length < Math.min(5, dom.length);
   let viaJson = needJsonLd ? fromJsonLd($, url, limit) : [];
 
-  // 3) 如果仍几乎没有结果，再做深度锚点兜底
+  // 3) 不足时叠加 deep anchors（在 JSON-LD 与 deep 间做调和）
   if ((dom.length + viaJson.length) === 0 || dom.length < 3) {
     const deep = deepAnchorFallback($, url, limit);
-    // 为了避免覆盖已有更完整的数据，这里把 deep 作为“补充”合并进去
     viaJson = viaJson.length ? viaJson : deep;
     if (viaJson.length === 0 && deep.length > 0) {
       viaJson = deep;
     } else if (viaJson.length && deep.length) {
-      // 合并去重
       const map = new Map(viaJson.map(p => [stripFragment(p.url), p]));
       for (const d of deep) {
         const key = stripFragment(d.url);
@@ -367,13 +365,21 @@ function parse($, url, { limit = 50 } = {}) {
 
   const merged = mergePreferDom(dom, viaJson).slice(0, limit);
 
-  // 4) 无结果日志
+  // 4) 若仍为空：试 genericLinksParser（Cheerio 同步兜底）
+  if (!merged.length) {
+    try {
+      const generic = require('./genericLinksParser');
+      if (generic && typeof generic.parse === 'function') {
+        const more = generic.parse($, url, { limit, logger, hint: 'shopify' }) || [];
+        if (Array.isArray(more) && more.length) return more.slice(0, limit);
+      }
+    } catch {}
+  }
+
+  // 5) 仍无 → 记录一下
   if (!merged.length) {
     try {
       const host = new URL(url).host;
-      // 调试日志，不会影响用户界面
-      // 供你排查“页面被误判为目录/主页”或“DOM 结构过深”情况
-      // 关键字：NoProductFound
       console.debug(`[catalog] NoProductFound in ${host} (shopify) -> ${url}`);
     } catch {
       console.debug(`[catalog] NoProductFound (shopify) -> ${url}`);
