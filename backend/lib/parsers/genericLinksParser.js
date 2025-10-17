@@ -280,6 +280,15 @@ module.exports = async function genericLinksParser(ctx) {
     const products = finalize(items);
     logger.info?.(`[generic-links] done for ${pageUrl} => ${products.length} items`);
 
+    // ===== DEBUG: generic-links =====
+    try {
+      if (process.env.DEBUG) {
+        const totalA = $('a[href]').length;
+        console.log('[links]', 'total_a=', totalA, 'emitted=', Array.isArray(items) ? items.length : -1, 'base=', pageUrl);
+      }
+    } catch (_) {}
+    // ===== /DEBUG =====
+
     // “无产品”日志（给你排查时看）
     if (!products.length) {
       logger.warn?.(`[NoProductFound] ${pageUrl} (generic-links)`);
