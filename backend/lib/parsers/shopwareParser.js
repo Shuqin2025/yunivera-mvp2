@@ -102,7 +102,16 @@ function parse($, url, { limit=50, logger } = {}){
   for(const it of out){ const key=it.link||it.url; if(!key || seen.has(key)) continue; seen.add(key); uniq.push(it); if(uniq.length>=limit) break; }
   if(uniq.length>=1) return uniq;
 
-  // 4) deepAnchorFallback
+  // 4) 先试通用兜底
+  try {
+    const generic = require('./genericLinksParser');
+    if (generic && typeof generic.parse === 'function') {
+      const more = generic.parse($, url, { limit, logger, hint: 'shopware' }) || [];
+      if (Array.isArray(more) && more.length) return more.slice(0, limit);
+    }
+  } catch {}
+
+  // 5) deepAnchorFallback
   return deepAnchorFallback($, url, limit, logger);
 }
 
