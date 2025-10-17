@@ -23,7 +23,7 @@ function normalizeUrl(base, href) {
 function isProbablyProductLink(link) {
   if (!link) return false;
   const u = link.toLowerCase();
-  // 典型 /products/
+  // 只接受 /products/，并排除“评价”等锚点
   if (!u.includes("/products/")) return false;
   if (u.includes("#reviews") || u.includes("reviewssection") || u.includes("/reviews")) return false;
   return true;
@@ -32,11 +32,11 @@ function isProbablyProductLink(link) {
 function isJunkTitle(title = "") {
   const t = title.toLowerCase();
   return (
-    t.includes("bewertungen") || // 德语：评价
+    t.includes("bewertungen") || // 德语“评价”
     t.includes("reviews") ||
     t.includes("bewertung") ||
     t.includes("zu den bewertungen") ||
-    /\{\{\s*title\s*\}\}/i.test(t) // 模板占位符
+    /\{\{\s*title\s*\}\}/i.test(t) // 模板占位
   );
 }
 
@@ -53,7 +53,7 @@ function stripFragment(url) {
 // ===== CSS Selector sets for Shopify themes =====
 const SELECTORSETS = [
   {
-    // 常见主题
+    // 常见主题卡片容器
     card: [
       "[class*=product-card]",
       "[class*=ProductItem]",
@@ -147,7 +147,7 @@ function fromDom($, url, limit = 50) {
     if (out.length) break;
   }
 
-  // 去重(按 URL 去掉 fragment)
+  // URL 去 hash 去重
   const seen = new Set();
   const uniq = out.filter(x => {
     const key = stripFragment(x.url || "");
@@ -160,7 +160,7 @@ function fromDom($, url, limit = 50) {
   return uniq.slice(0, limit);
 }
 
-// ===== 兜底：遍历 a[href*="/products/"] =====
+// ===== 深层 a[href*="/products/"] 兜底 =====
 function deepAnchorFallback($, url, limit = 50) {
   const out = [];
   const $as = $("a[href*='/products/']");
@@ -173,7 +173,7 @@ function deepAnchorFallback($, url, limit = 50) {
       const link = normalizeUrl(url, href);
       if (!isProbablyProductLink(link)) return;
 
-      // 先用 a 自身取 title/aria-label，不行再用父容器
+      // 先从 <a> 自身取 title/aria，再向外层找标题
       let title =
         cleanText($a.text()) ||
         cleanText($a.attr("title") || $a.attr("aria-label") || "");
@@ -192,7 +192,7 @@ function deepAnchorFallback($, url, limit = 50) {
       }
       if (isJunkTitle(title)) title = "";
 
-      // 近邻找一下 price
+      // 就近找价格
       let price = "";
       const $scope = $a.closest("article,li,div,section");
       if ($scope && $scope.length) {
@@ -207,7 +207,7 @@ function deepAnchorFallback($, url, limit = 50) {
           ) ||
           cleanText($scope.find("meta[itemprop='price']").attr("content") || "");
       }
-      // 取图
+      // 图片
       let img = "";
       if ($scope && $scope.length) {
         const n =
@@ -340,14 +340,14 @@ function mergePreferDom(domList, jsonldList) {
 
 // ===== Public API =====
 function parse($, url, { limit = 50, logger } = {}) {
-  // 1) 先跑 DOM
+  // 1) 先走 DOM
   let dom = fromDom($, url, limit);
 
-  // 2) 根据需要再跑 JSON-LD
+  // 2) 按需补 JSON-LD
   const needJsonLd = dom.length === 0 || dom.filter(x => x.title).length < Math.min(5, dom.length);
   let viaJson = needJsonLd ? fromJsonLd($, url, limit) : [];
 
-  // 3) 不足时叠加 deep anchors（在 JSON-LD 与 deep 间做调和）
+  // 3) 再兜底 deep anchors（若前两者仍弱）
   if ((dom.length + viaJson.length) === 0 || dom.length < 3) {
     const deep = deepAnchorFallback($, url, limit);
     viaJson = viaJson.length ? viaJson : deep;
@@ -365,7 +365,7 @@ function parse($, url, { limit = 50, logger } = {}) {
 
   const merged = mergePreferDom(dom, viaJson).slice(0, limit);
 
-  // 4) 若仍为空：试 genericLinksParser（Cheerio 同步兜底）
+  // 4) 仍为空 → 先试通用兜底（Cheerio 线路）
   if (!merged.length) {
     try {
       const generic = require('./genericLinksParser');
@@ -376,7 +376,7 @@ function parse($, url, { limit = 50, logger } = {}) {
     } catch {}
   }
 
-  // 5) 仍无 → 记录一下
+  // 5) 记录一下
   if (!merged.length) {
     try {
       const host = new URL(url).host;
