@@ -117,8 +117,54 @@ function parse($, url, { limit=50, logger } = {}){
   } catch {}
 
   // 5) deepAnchorFallback
-  return deepAnchorFallback($, url, limit, logger);
+  {
+    const r = deepAnchorFallback($, url, limit, logger) || [];
+    if (Array.isArray(r) && r.length) return r.slice(0, limit);
+  }
+
+  // 6) WooCommerce deepAnchorFallback (addon, last resort)
+  try {
+    const fallbacks = woocommerceDeepAnchorFallback($, url) || [];
+    if (fallbacks.length) {
+      const title = cleanTitle($('title').text().trim()) || 'item';
+      const mapped = fallbacks.map(u => ({ title, url:u, link:u, img:'', imgs:[], price:'', currency:'', sku:'', moq:'', desc:'' }));
+      logger?.info?.('[WooCommerce] deepAnchorFallback (addon) used', { count: mapped.length });
+      return mapped.slice(0, limit);
+    }
+  } catch {}
+  return [];
 }
 
+
+
+// ======= ADDON: deep anchor fallback for WooCommerce (last resort) =======
+function woocommerceDeepAnchorFallback($, base){
+  const deny = /konto|account|login|warenkorb|cart|checkout|agb|datenschutz|privacy|impressum|versand|shipping|zahlung|payment|kontakt|contact|sitemap|newsletter|hilfe|support|widerruf|return/i;
+  const allow = /product|produkt|artikel/i;
+
+  const urls = new Set();
+  $('a[href]').each((_, a) => {
+    const hrefRaw = String($(a).attr('href') || '').trim();
+    if (!hrefRaw || hrefRaw.startsWith('#') || deny.test(hrefRaw)) return;
+    // 只留站内链接
+    try{
+      const abs = new URL(hrefRaw, base).toString();
+      // 显式排除加购/操作类链接
+      if (/add-to-cart|wishlist|compare/i.test(abs)) return;
+
+      // 只要命中“允许词”或典型 product 路径就收集，尽量宽松以适应换皮
+      if (allow.test(abs) || /\/product\//i.test(abs) || /\/(produkt|artikel)\//i.test(abs)) {
+        urls.add(abs);
+        return;
+      }
+
+      // 降级判定：带有商品卡片容器痕迹也收集
+      const $card = $(a).closest('li.product, .product, .wc-block-grid__product, [class*="product-card"]');
+      if ($card.length) urls.add(abs);
+    }catch{}
+  });
+  return [...urls];
+}
+// ======= /ADDON =======
 const api={ id:'woocommerce', test:(_$, u)=>/woocommerce|\/product-category\//i.test(u), parse };
 module.exports=api; module.exports.default=api;
