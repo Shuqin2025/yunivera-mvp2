@@ -9,9 +9,6 @@ import path from 'node:path';
 // health info
 import pkg from './package.json' assert { type: 'json' };
 
-// health router (per doc instructions)
-import health from './routes/health.js';
-
 // ✅ 可选翻译（保持你原有接口）
 import * as translate from "./lib/translate.js";
 
@@ -21,7 +18,6 @@ import sino from "./adapters/sinotronic.js";
 import parseUniversal from "./adapters/universal.js";
 
 const app = express();
-app.use(health);
 app.use(cors({ origin: "*", exposedHeaders: ["X-Lang", "X-Adapter"] }));
 
 /* ──────────────────────────── snapshots static ──────────────────────────── */
@@ -52,12 +48,14 @@ app.get(["/", "/healthz", "/health", "/api/health"], (_req, res) =>
 );
 app.get("/v1/api/health", (_req, res) => {
   res.json({ ok: true, status: "up", ts: Date.now() });
-});
 
 /* --- health check (added) --- */
 app.get('/v1/health', (_req, res) => {
   res.json({ ok: true, service: 'mvp2-backend', version: process.env.npm_package_version || 'dev' });
 });
+
+});
+
 app.get("/v1/api/__version", (_req, res) => {
   res.json({
     version: "mvp-universal-parse-2025-10-06-beamer-paging-fix-artnr",
