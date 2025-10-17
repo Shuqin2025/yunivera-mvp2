@@ -117,8 +117,44 @@ function parse($, url, { limit=50, logger } = {}){
   } catch {}
 
   // 5) deepAnchorFallback
-  return deepAnchorFallback($, url, limit, logger);
+  {
+    const r = deepAnchorFallback($, url, limit, logger) || [];
+    if (Array.isArray(r) && r.length) return r.slice(0, limit);
+  }
+
+  // 6) Shopware deepAnchorFallback (addon, last resort)
+  try {
+    const fallbacks = shopwareDeepAnchorFallback($, url) || [];
+    if (fallbacks.length) {
+      let title = cleanTitle($('title').text().trim()) || 'item';
+      const mapped = fallbacks.map(u => ({ title, url: u, link: u, img: '', imgs: [], price: '', currency: '', sku: '', moq: '', desc: '' }));
+      logger?.info?.('[Shopware] deepAnchorFallback used', { count: mapped.length });
+      return mapped.slice(0, limit);
+    }
+  } catch {}
+  return [];
 }
 
 const api={ id:'woocommerce', test:(_$, u)=>/woocommerce|\/product-category\//i.test(u), parse };
+// ======= ADDON: deep anchor fallback for Shopware =======
+function shopwareDeepAnchorFallback($, base) {
+  const deny = /konto|account|login|warenkorb|cart|agb|datenschutz|impressum|versand|zahlung|kontakt|sitemap|newsletter|hilfe|support|widerruf/i;
+  const allow = /detail|produkt|artikel|product|/i;
+
+  const urls = new Set();
+  $('a[href]').each((_, a) => {
+    const href = String($(a).attr('href') || '').trim();
+    if (!href || href.startsWith('#') || deny.test(href)) return;
+    // 只留站内链接
+    if (/^https?:\/\//i.test(href) && !href.includes(base)) return;
+
+    // 常见 Shopware 商品链接形态
+    if (allow.test(href) || /\/detail\/\d+/i.test(href) || /\/Artikel\//i.test(href)) {
+      const u = new URL(href, base).toString();
+      urls.add(u);
+    }
+  });
+  return [...urls];
+}
+// ======= /ADDON =======
 module.exports=api; module.exports.default=api;
