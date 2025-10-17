@@ -5,6 +5,18 @@
 
 const { load } = require('cheerio');
 
+// --- DEBUG helper (append-only) ---
+const __dbg = (tag, data) => {
+  try {
+    if (process?.env?.DEBUG) {
+      const msg = typeof data === 'string' ? data : JSON.stringify(data);
+      console.log(`[struct] ${tag} ${msg}`);
+    }
+  } catch {}
+};
+// --- /DEBUG helper ---
+
+
 const PRICE_TOKENS = [
   'price', 'preise', 'preis', '€', '$', '¥', 'eur', 'usd',
   'inkl. mwst', 'in kl. mwst', 'inkl mwst', 'mwst',
@@ -165,6 +177,19 @@ function hasJsonLdProduct($) {
 async function detectStructure(url, html, adapterHint = '') {
   const $ = load(html || '');
   const platform = detectPlatform($, html || '');
+  // ===== DEBUG: fingerprints overview (append-only) =====
+  try {
+    const __flags = __platformFlags($, html || '');
+    const isShopify = !!__flags.shopify;
+    const isWoo = !!__flags.woocom;
+    const isShopware = !!__flags.shopware;
+    const isMagento = !!__flags.magento;
+    __dbg('fingerprints', { url, isShopify, isWoo, isShopware, isMagento });
+    if (!isShopify && !isWoo && !isShopware && !isMagento) {
+      __dbg('fallback', { reason: 'no platform matched, use generic-links' });
+    }
+  } catch {}
+  // ===== /DEBUG =====
   // ===== DEBUG: structure fingerprints =====
   try {
     if (process.env.DEBUG) {
