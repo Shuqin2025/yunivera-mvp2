@@ -1,5 +1,6 @@
 // backend/lib/templateParser.js
 const { load } = require('cheerio');
+const { logger } = require('./logger');
 const { detectStructure } = require('./structureDetector');
 
 // —— 各平台解析器 ——
@@ -8,7 +9,7 @@ const shopware = require('./parsers/shopwareParser');
 const woo      = require('./parsers/woocommerceParser');
 const magento  = require('./parsers/magentoParser');
 const shopify  = require('./parsers/shopifyParser');
-const generic  = require('./parsers/genericLinksParser'); // ← 新增
+const generic  = require('./parsers/genericLinksParser'); // ← 若不存在，请保持原状或忽略
 
 // 智能编号提取 & 详情页补抓
 const artikel = require('./modules/artikelExtractor');
@@ -124,7 +125,7 @@ function skuMissingOrSuspicious(s) {
 }
 
 /**
- * 解析统一入口
+ * 解析统一入口（Cheerio 路线，保留原有逻辑）
  */
 async function parse(html, url, opts = {}) {
   const {
@@ -166,10 +167,12 @@ async function parse(html, url, opts = {}) {
   // 2.2 平台解析拿不到结果：尝试 generic-links（更“懂”目录页里的深层商品锚点）
   //    - 如果 detector 判断是 catalog，优先试 generic-links
   if (!items.length || type === 'catalog' || !adapterName) {
-    const genericData = withFallback(generic.parse, $, url, limit, 'generic-links');
-    if (genericData.length) {
-      items = genericData;
-      adapterName = 'generic-links';
+    if (generic && typeof generic.parse === 'function') {
+      const genericData = withFallback(generic.parse, $, url, limit, 'generic-links');
+      if (genericData.length) {
+        items = genericData;
+        adapterName = 'generic-links';
+      }
     }
   }
 
@@ -232,4 +235,140 @@ async function parse(html, url, opts = {}) {
   return unified.slice(0, limit);
 }
 
-module.exports = { parse };
+/* -------------------------------------------------------------------------- */
+/*                  Puppeteer 路线：parseCatalog(page, url, …)                */
+/*   进入页面=等待 networkidle0 + 轻滚动触发懒加载 + 等待产品线索                */
+/*   evaluate 真正读取渲染后 DOM；失败时可选择截屏；再做去噪与去重              */
+/* -------------------------------------------------------------------------- */
+
+const PRODUCT_HINTS = [
+  '.product-item', '.product', '.products .item', '.product-card',
+  '[data-product-id]', '[data-product]', '[data-item-id]'
+];
+const WAIT_SELECTOR = PRODUCT_HINTS.join(', ');
+
+/**
+ * @param {import('puppeteer').Page} page
+ * @param {string} url
+ * @param {string} adapterHint 仅用于日志
+ * @returns {Promise<{ok: boolean, count: number, products: Array}>}
+ */
+async function parseCatalog(page, url, adapterHint) {
+  const t0 = Date.now();
+  logger?.info?.(`[parseCatalog] ▶️ open ${url} (hint=${adapterHint || '-'})`);
+
+  // 1) 进入页面 + 等待网络空闲（networkidle0）+ 一点点时间给懒加载
+  try {
+    await page.goto(url, { waitUntil: 'networkidle0', timeout: 60_000 });
+  } catch (_) {}
+  await page.waitForTimeout(800);
+
+  // 等候产品线索出现；若失败继续走 fallback（不要直接 throw）
+  let found = await page.$(WAIT_SELECTOR);
+  if (!found) {
+    // 轻度滚动触发懒加载
+    await autoScroll(page, 1200);
+    await page.waitForTimeout(600);
+    found = await page.$(WAIT_SELECTOR);
+  }
+
+  // 2) evaluate 真正读取“渲染后的 DOM”
+  const result = await page.evaluate((HINTS) => {
+    const sel = HINTS.join(', ');
+    const cards = Array.from(document.querySelectorAll(sel));
+
+    // 如果还没抓到产品卡，降级用“深层 a[href]”兜底（避开 Logo / 顶导航）
+    const deepAnchors = (cards.length ? [] : Array.from(
+      document.querySelectorAll('main a[href], .content a[href], .page a[href]')
+    )).filter(a => {
+      const href = (a.getAttribute('href') || '').toLowerCase();
+      const txt = (a.textContent || '').trim().toLowerCase();
+      // 排除登录/隐私/关于等明显非产品
+      if (/login|anmelden|agb|datenschutz|kontakt|impressum|support|widerruf/i.test(href + ' ' + txt)) return false;
+      // 仅保留看起来像商品/分类的链接
+      return /product|prod|artikel|item|sku|\/p\/|\/dp\/|\/shop\//i.test(href) || /\b(kabel|socken|dell|server|audio)\b/i.test(txt);
+    }).slice(0, 120); // 限制数量，防炸
+
+    const nodes = cards.length ? cards : deepAnchors;
+
+    const products = nodes.map((n) => {
+      // 兼容 <a> 或 <div.card>
+      const root = n.tagName === 'A' ? n : (n.closest('a') || n);
+      const find = (s) => root.querySelector(s);
+
+      const imgEl   = find('img');
+      const priceEl = find('.price, [class*="price"], .amount, .money, [itemprop="price"]');
+      const titleEl = find('h1,h2,h3,.title,[itemprop="name"]') || root;
+      const href    = root.getAttribute('href') || root.getAttribute('data-href') || '';
+
+      let abs = href;
+      try { abs = href.startsWith('http') ? href : new URL(href, location.href).href; } catch {}
+
+      return {
+        sku:   (root.getAttribute('data-sku') || '').trim(),
+        title: (titleEl.textContent || '').trim() || 'item',
+        url:   abs,
+        price: (priceEl?.textContent || '').trim(),
+        image: imgEl?.getAttribute('data-src') || imgEl?.getAttribute('src') || '',
+      };
+    });
+
+    return { products, hintUsed: cards.length ? 'cards' : 'deepAnchors' };
+  }, PRODUCT_HINTS);
+
+  // 3) 调试快照（按需打开）
+  if (process.env.DEBUG_SNAPSHOT === '1') {
+    try {
+      await page.screenshot({ path: `debug_${Date.now()}.png`, fullPage: true });
+    } catch {}
+    logger?.info?.(`[parseCatalog] snapshot saved. hint=${result.hintUsed} count=${result.products.length}`);
+  }
+
+  // 去掉明显的“整站页块” & 空标题“item”重复项
+  const filtered = dedupeAndFilter(result.products);
+
+  logger?.info?.(
+    `[parseCatalog] ✅ parsed=${filtered.length} (raw=${result.products.length}, hint=${result.hintUsed}, ${Date.now()-t0}ms)`
+  );
+
+  // 始终返回统一结构
+  return {
+    ok: true,
+    count: filtered.length,
+    products: filtered,
+  };
+}
+
+function dedupeAndFilter(items) {
+  const bad = /impressum|agb|datenschutz|kontakt|login|anmelden|widerruf|versand|support|about|über\s*uns/i;
+  const seen = new Set();
+  const out = [];
+  for (const p of items || []) {
+    if (!p || !p.url) continue;
+    const both = (String(p.url) + ' ' + String(p.title || '')).toLowerCase();
+    if (bad.test(both)) continue;
+
+    // 去掉 title === "item" 且 URL 重复的
+    const key = (p.url.split('#')[0] || '') + '::' + (p.title || '');
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    out.push(p);
+  }
+  return out.slice(0, 200);
+}
+
+async function autoScroll(page, height = 1200) {
+  await page.evaluate(async (h) => {
+    await new Promise((resolve) => {
+      let scrolled = 0;
+      const timer = setInterval(() => {
+        window.scrollBy(0, 250);
+        scrolled += 250;
+        if (scrolled >= h) { clearInterval(timer); resolve(); }
+      }, 80);
+    });
+  }, height);
+}
+
+module.exports = { parse, parseCatalog };
