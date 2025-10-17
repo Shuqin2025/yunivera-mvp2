@@ -15,6 +15,17 @@ const generic  = require('./parsers/genericLinksParser'); // ← 若不存在，
 const artikel = require('./modules/artikelExtractor');
 const details = require('./modules/detailFetcher');
 
+// --- DEBUG helper (append-only) ---
+const __dbgT = (tag, data) => {
+  try {
+    if (process?.env?.DEBUG) {
+      const msg = typeof data === 'string' ? data : JSON.stringify(data);
+      console.log(`[templ] ${tag} ${msg}`);
+    }
+  } catch {}
+};
+// --- /DEBUG helper ---
+
 // 解析后结果过少的回退策略（命中模板但抓不到 ≥3 个有效产品时返回空）
 function withFallback(parseFn, $, url, limit, adapterName) {
   try {
@@ -153,6 +164,7 @@ async function parse(html, url, opts = {}) {
   if (process.env.DEBUG) {
     console.log('[parser.detect]', JSON.stringify({ url, type, platform: platformFromDetect, debug: structure.debug }));
   }
+  __dbgT('choose-adapter.in', { url, platform: structure?.platform, hints: structure });
 
   // 2) 选择解析器：平台 → generic-links → 极简兜底
   let adapterName = '';
@@ -182,6 +194,8 @@ async function parse(html, url, opts = {}) {
     if (!adapterName) adapterName = 'fallback';
     try { if (process.env.DEBUG) console.log('[tpl]', 'deepAnchorFallback HIT'); } catch (_) {}
   }
+
+  __dbgT('choose-adapter.out', { url, adapter: adapterName || 'generic-links' });
 
   // 3) 二次过滤“站点链接”
   items = items.filter(it => {
