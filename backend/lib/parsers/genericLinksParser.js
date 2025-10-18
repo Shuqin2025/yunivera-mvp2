@@ -281,6 +281,8 @@ module.exports = async function genericLinksParser(ctx) {
 
     if (items.length < MIN_PRIMARY_HITS) {
       logger.info?.(`[generic-links] primary hits=${items.length} < ${MIN_PRIMARY_HITS}, fallback to deep a[href]…`);
+      // >>> 新增：明确进入 deepAnchorFallback
+      logger.debug?.('[links] deepAnchorFallback: entering');
       const deep = await parseByDeepAnchors($, pageUrl, logger);
 
       // 优先保留 primary，再补充 deep
@@ -311,6 +313,7 @@ module.exports = async function genericLinksParser(ctx) {
 
     // “无产品”日志（给你排查时看）
     if (!products.length) {
+      logger.warn?.('[links] NoProductFound: fall back to nav links / sitewide anchors');
       logger.warn?.(`[NoProductFound] ${pageUrl} (generic-links)`);
     }
 
