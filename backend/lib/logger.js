@@ -1,74 +1,50 @@
-// backend/lib/logger.js
-// 统一简单 Logger：永远写到 stdout；DEBUG 环境变量可开 debug；LOG_LEVEL 可覆盖默认级别
-// 使用方式：
-//   DEBUG=1          # 开启 debug
-//   LOG_LEVEL=warn   # 仅 warn 以上
-// 说明：Render 会自动收集 stdout/stderr，无需写文件
+// backend/lib/logger.js  (ESM)
+// 轻量日志器：stdout + 按天落盘；支持 DEBUG/LOG_LEVEL 控制 debug 级别
+import fs from 'node:fs';
+import path from 'node:path';
 
-const debugOn = /^(1|true|on|yes)$/i.test(String(process.env.DEBUG || ''));
-const envLevel = String(process.env.LOG_LEVEL || (debugOn ? 'debug' : 'info')).toLowerCase();
-
-// 等级优先级（越小越详细）
-const LEVEL_ORDER = { debug: 10, info: 20, warn: 30, error: 40 };
-const currentLevel = LEVEL_ORDER[envLevel] ?? LEVEL_ORDER.info;
+const LOG_DIR = 'logs';
+if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true });
 
 function stamp() {
-  return new Date().toISOString();
+  const d = new Date();
+  return d.toISOString().replace('T', ' ').replace('Z', '');
 }
 
-function out(level, msg) {
-  const line = `[${stamp()}] [${level.toUpperCase()}] ${msg}`;
-  // 永远写到 stdout（Render 会收集）
-  process.stdout.write(line + '\n');
+function writeLine(level, msg) {
+  const line = `[${stamp()}] [${level}] ${msg}\n`;
+  // 控制台
+  process.stdout.write(line);
+  // 按天写文件
+  try {
+    const file = path.join(LOG_DIR, `${new Date().toISOString().slice(0, 10)}.log`);
+    fs.appendFileSync(file, line);
+  } catch {}
 }
 
-function shouldLog(level) {
-  const lv = LEVEL_ORDER[level] ?? LEVEL_ORDER.info;
-  return lv >= currentLevel ? true : false;
-}
+// ——— 级别控制：LOG_LEVEL=debug 或 DEBUG=1/true 时打开 debug ———
+const envLevel =
+  process.env.LOG_LEVEL ||
+  ((process.env.DEBUG === '1' || process.env.DEBUG === 'true') ? 'debug' : undefined);
 
-const logger = {
-  debug: (m, ...rest) => {
-    if (shouldLog('debug')) out('debug', fmt(m, rest));
-  },
-  info: (m, ...rest) => {
-    if (shouldLog('info')) out('info', fmt(m, rest));
-  },
-  warn: (m, ...rest) => {
-    if (shouldLog('warn')) out('warn', fmt(m, rest));
-  },
-  error: (m, ...rest) => {
-    // error 一律打
-    out('error', fmt(m, rest));
-  },
+const isDebugOn = String(envLevel || '').toLowerCase() === 'debug';
+
+// ——— 对外导出：logger（命名导出 + default），以及 dbg() 小助手 ———
+export const logger = {
+  info:  (m) => writeLine('INFO',  m),
+  warn:  (m) => writeLine('WARN',  m),
+  error: (m) => writeLine('ERROR', m),
+  debug: (m) => { if (isDebugOn) writeLine('DEBUG', m); },
 };
 
-// 简易格式化（支持 printf 风格和对象）
-function fmt(m, rest) {
-  if (typeof m === 'string' && rest?.length) {
-    // 仅处理最常用的 %s / %d
-    let i = 0;
-    return m.replace(/%[sd]/g, () => String(rest[i++])).concat(
-      rest.slice(i).length ? ' ' + rest.slice(i).map(safeStringify).join(' ') : ''
-    );
-  }
-  if (rest?.length) return [safeStringify(m), ...rest.map(safeStringify)].join(' ');
-  return safeStringify(m);
-}
-
-function safeStringify(v) {
-  if (typeof v === 'string') return v;
-  try { return JSON.stringify(v); } catch { return String(v); }
-}
-
-// 开机打一行当前日志级别，便于在 Logs 中确认
-logger.info(`[logger] level=${envLevel}, DEBUG=${process.env.DEBUG || ''}, LOG_LEVEL=${process.env.LOG_LEVEL || ''}`);
-
-export default logger;
-
-// 方便结构化调试时的别名（与你们代码里可能用到的 dbg 保持一致）
+// === DEBUG helper（append-only）===
+// 在 DEBUG 打开时，直接把原始参数打到 stdout（方便快速插桩）
 export const dbg = (...args) => {
-  if (shouldLog('debug')) {
-    process.stdout.write(`[${stamp()}] [DEBUG] ` + args.map(safeStringify).join(' ') + '\n');
+  const on = isDebugOn || process.env.DEBUG === '1' || process.env.DEBUG === 'true';
+  if (on) {
+    try { console.log(...args); } catch {}
   }
 };
+
+// 兼容 default 导出（避免未来有人用 default 引用）
+export default logger;
