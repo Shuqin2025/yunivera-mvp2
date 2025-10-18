@@ -22,6 +22,9 @@ import detectStructure from "../lib/structureDetector.js";
 import templateParser from "../lib/templateParser.js"; // 可能是函数，也可能是 { parse, parseCatalog }
 import universal from "../adapters/universal.js";      // 默认导出：async function ({url,limit,debug})
 
+// ★ 新增：最小化路由日志
+import logger from "../lib/logger.js";
+
 const router = Router();
 
 // --- DEBUG helper (append-only) ---
@@ -408,6 +411,9 @@ router.all("/parse", async (req, res) => {
     const DEBUG = process.env.DEBUG === '1' || process.env.DEBUG === 'true';
 
     const url = String(qp.url || "").trim();
+    // ★ 新增：入口最小化日志
+    logger.debug(`[route/catalog.parse] url=${url} size=${qp.size ?? ""}`);
+
     if (!url) return res.status(400).json({ ok: false, error: "missing url" });
 
     const limit = Math.max(1, parseInt(qp.limit ?? 50, 10) || 50);
@@ -542,20 +548,8 @@ router.all("/parse", async (req, res) => {
 
     if (wantMetrics) resp.fieldsRate = fieldsRate;
 
-    try {
-      if (wantSnapshot) {
-        const SNAPSHOT_DIR = process.env.SNAPSHOT_DIR || path.resolve("./snapshots");
-        const ts = new Date();
-        const pad = (n) => String(n).padStart(2, "0");
-        const stamp = `${ts.getFullYear()}${pad(ts.getMonth() + 1)}${pad(ts.getDate())}-${pad(ts.getHours())}${pad(
-          ts.getMinutes()
-        )}${pad(ts.getSeconds())}`;
-        const dir = path.join(SNAPSHOT_DIR, stamp);
-        fs.mkdirSync(dir, { recursive: true });
-        const payload = { stage: "PARSE", url, adapter: resp.adapter, count, fieldsRate, products };
-        fs.writeFileSync(path.join(dir, "parse.json"), JSON.stringify(payload, null, 2));
-      }
-    } catch {}
+    // ★ 新增：出口最小化日志
+    logger.debug(`[route/catalog.parse] done url=${url} adapter=${resp?.adapter} count=${resp?.products?.length ?? 0}`);
 
     __dbgR('parse.done', { url: req?.body?.url || req?.query?.url, adapter: resp?.adapter, count: resp?.products?.length });
     if ((resp?.products?.length || 0) === 0) {
@@ -563,6 +557,8 @@ router.all("/parse", async (req, res) => {
     }
     return res.json(resp);
   } catch (err) {
+    // ★ 新增：异常日志
+    logger.error(`[route/catalog.parse] ERROR url=${req?.body?.url || req?.query?.url} -> ${err?.message || err}`);
     return res.status(200).json({ ok: false, error: String(err?.message || err) });
   }
 });
