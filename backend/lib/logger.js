@@ -24,3 +24,10 @@ export const logger = {
   error: (m) => writeLine('ERROR', m),
   debug: (m) => { if (process.env.DEBUG) writeLine('DEBUG', m); },
 };
+
+// === DEBUG helper (append-only) ===
+export const dbg = (...args) => {
+  const on = process.env.DEBUG === '1' || process.env.DEBUG === 'true';
+  if (on) console.log(...args);
+};
+// === /DEBUG helper ===
