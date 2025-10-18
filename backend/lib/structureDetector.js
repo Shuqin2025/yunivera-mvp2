@@ -1,5 +1,4 @@
 // backend/lib/structureDetector.js
-// backend/lib/structureDetector.js
 // 轻量、可解释的页面结构判定：homepage | catalog | product
 // - 保守：宁可判为 homepage 也不误判为 catalog/product
 // - 可观察：DEBUG=1 时输出完整判定原因，便于线上排障
@@ -17,15 +16,22 @@ const __dbg = (tag, data) => {
 };
 // --- /DEBUG helper ---
 
-// ===== 引入 dbg（与 ESM/CJS 兼容的安全方案；失败则回退到本地实现） =====
-let dbg = (...args) => { try { if (process?.env?.DEBUG) console.log(...args); } catch {} };
+// ===== 安全引入 logger（兼容 ESM/CJS）；失败则回退到 console.debug =====
+let __logger = null;
 try {
-  // 如果 logger.js 以 ESM 导出 dbg，这里 require 可能抛错，所以上面先准备了回退
-  // eslint-disable-next-line import/no-dynamic-require, global-require
   const maybe = require('../logger.js');
-  if (maybe && typeof maybe.dbg === 'function') dbg = maybe.dbg;
+  __logger = maybe?.default || maybe || null;
 } catch {}
-// ===== /dbg 引入 =====
+const __logDebug = (msg) => {
+  try {
+    if (__logger && typeof __logger.debug === 'function') {
+      __logger.debug(msg);
+    } else {
+      console.debug?.(msg);
+    }
+  } catch {}
+};
+// ===== /logger 引入 =====
 
 const PRICE_TOKENS = [
   'price', 'preise', 'preis', '€', '$', '¥', 'eur', 'usd',
@@ -146,23 +152,21 @@ function detectPlatform($, html) {
       },
     };
 
-    // 这里的 isShopify/isWoo/isShopware/isMagento 仅作“当前函数视角”的判定总览
     const verdict = {
-      isShopify: false,                       // 上面 Shopify 的强判已提前 return
+      isShopify: false, // 上面 Shopify 的强判已提前 return
       isWoo: !!isWooByCss,
       isShopware: !!(isShopwareByMeta || isShopwareByHints),
       isMagento: !!isMagentoByAssets,
     };
     const isGenericCandidate = !verdict.isShopify && !verdict.isWoo && !verdict.isShopware && !verdict.isMagento;
 
-    dbg('[struct] counts', cnt);
-    dbg('[struct] verdict', { ...verdict, isGenericCandidate });
+    __dbg('counts', cnt);
+    __dbg('verdict', { ...verdict, isGenericCandidate });
   } catch (e) {
-    dbg('[struct] debug error', String(e));
+    __dbg('debug error', String(e));
   }
   // === /统计与总览 ===
 
-  // 将这些加强条件与原判断合并（原有分支未命中时再兜底）
   if (isWooByCss) return 'WooCommerce';
   if (isShopwareByMeta || isShopwareByHints) return 'Shopware';
   if (isMagentoByAssets) return 'Magento';
@@ -260,6 +264,14 @@ async function detectStructure(url, html, adapterHint = '') {
   const jsonldProduct = hasJsonLdProduct($);
   if (jsonldProduct) {
     const payload = debugReturn('product', platform, 'Product via JSON-LD', { url, jsonldProduct: true }, hint);
+
+    // ✅ 总览行：把布尔位与最终“决定”一起打一行
+    try {
+      const f = __platformFlags($, html || '');
+      const decidedAdapter = platform || (hint || '');
+      __logDebug(`[struct] url=${url} isShopify=${!!f.shopify} isWoo=${!!f.woocom} isShopware=${!!f.shopware} isMagento=${!!f.magento} -> decided=type=${payload.type},platform=${decidedAdapter || '-'}`);
+    } catch {}
+
     console.info?.(`[struct] type=${payload.type} platform=${payload.platform || '-'} adapterHint=${hint || '-'}`);
     return payload;
   }
@@ -292,6 +304,14 @@ async function detectStructure(url, html, adapterHint = '') {
       const payload = debugReturn('product', platform, 'Single product signals', {
         url, cardCount, productAnchorCount, hasPrice, hasCart, mediaCount
       }, hint);
+
+      // ✅ 总览行
+      try {
+        const f = __platformFlags($, html || '');
+        const decidedAdapter = platform || (hint || '');
+        __logDebug(`[struct] url=${url} isShopify=${!!f.shopify} isWoo=${!!f.woocom} isShopware=${!!f.shopware} isMagento=${!!f.magento} -> decided=type=${payload.type},platform=${decidedAdapter || '-'}`);
+      } catch {}
+
       console.info?.(`[struct] type=${payload.type} platform=${payload.platform || '-'} adapterHint=${hint || '-'}`);
       return payload;
     }
@@ -309,7 +329,6 @@ async function detectStructure(url, html, adapterHint = '') {
         ? firstLinks.filter(h => GENERIC_LINK_BAD.test(h || '')).length / firstLinks.length
         : 0;
 
-      // 同时结合 canonical/category/collections 的微弱信号，避免过度降级
       const canonical = ($('link[rel="canonical"]').attr('href') || '').toLowerCase();
       const looksLikeCatalogPath = /(category|categories|collection|collections|catalog|produkte|produkte\/|kategorie|waren)/.test(canonical);
 
@@ -323,6 +342,14 @@ async function detectStructure(url, html, adapterHint = '') {
     const payload = debugReturn(decision, platform, reason, {
       url, cardCount, productAnchorCount, hasPrice, hasCart
     }, hint);
+
+    // ✅ 总览行
+    try {
+      const f = __platformFlags($, html || '');
+      const decidedAdapter = platform || (hint || '');
+      __logDebug(`[struct] url=${url} isShopify=${!!f.shopify} isWoo=${!!f.woocom} isShopware=${!!f.shopware} isMagento=${!!f.magento} -> decided=type=${payload.type},platform=${decidedAdapter || '-'}`);
+    } catch {}
+
     console.info?.(`[struct] type=${payload.type} platform=${payload.platform || '-'} adapterHint=${hint || '-'}`);
     return payload;
   }
@@ -331,6 +358,14 @@ async function detectStructure(url, html, adapterHint = '') {
   const payload = debugReturn('homepage', platform, 'Low commerce signals', {
     url, cardCount, productAnchorCount, hasPrice, hasCart
   }, hint);
+
+  // ✅ 总览行
+  try {
+    const f = __platformFlags($, html || '');
+    const decidedAdapter = platform || (hint || '');
+    __logDebug(`[struct] url=${url} isShopify=${!!f.shopify} isWoo=${!!f.woocom} isShopware=${!!f.shopware} isMagento=${!!f.magento} -> decided=type=${payload.type},platform=${decidedAdapter || '-'}`);
+  } catch {}
+
   console.info?.(`[struct] type=${payload.type} platform=${payload.platform || '-'} adapterHint=${hint || '-'}`);
   return payload;
 }
@@ -342,13 +377,11 @@ function debugReturn(type, platform, reason, extra = {}, adapterHint = '') {
     name: type,
     debug: { reason, platform: platform || '', adapterHint: adapterHint || '', ...extra }
   };
-  // 开启 DEBUG 环境变量时输出便于排障的结构化日志
   if (process.env.DEBUG) {
     try { console.log('[detector]', JSON.stringify(payload)); } catch {}
   }
   return payload;
 }
-
 
 // ===== DEBUG helper: platform flags (does not affect logic) =====
 function __platformFlags($, html) {
@@ -380,3 +413,4 @@ function __platformFlags($, html) {
 // ===== /DEBUG helper =====
 
 module.exports = { detectStructure };
+
