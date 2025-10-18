@@ -1,4 +1,5 @@
 // backend/lib/structureDetector.js
+// backend/lib/structureDetector.js
 // 轻量、可解释的页面结构判定：homepage | catalog | product
 // - 保守：宁可判为 homepage 也不误判为 catalog/product
 // - 可观察：DEBUG=1 时输出完整判定原因，便于线上排障
