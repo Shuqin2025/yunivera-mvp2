@@ -16,6 +16,15 @@ const __dbg = (tag, data) => {
 };
 // --- /DEBUG helper ---
 
+// ===== 引入 dbg（与 ESM/CJS 兼容的安全方案；失败则回退到本地实现） =====
+let dbg = (...args) => { try { if (process?.env?.DEBUG) console.log(...args); } catch {} };
+try {
+  // 如果 logger.js 以 ESM 导出 dbg，这里 require 可能抛错，所以上面先准备了回退
+  // eslint-disable-next-line import/no-dynamic-require, global-require
+  const maybe = require('../logger.js');
+  if (maybe && typeof maybe.dbg === 'function') dbg = maybe.dbg;
+} catch {}
+// ===== /dbg 引入 =====
 
 const PRICE_TOKENS = [
   'price', 'preise', 'preis', '€', '$', '¥', 'eur', 'usd',
@@ -81,7 +90,6 @@ function detectPlatform($, html) {
 
   // ======= ADDON: stronger fingerprints for platform detection =======
   // ---- WooCommerce ----
-  // 常见特征：<body class="woocommerce ...">、div.woocommerce、wp-json/、woocommerce_params 等
   const isWooByCss =
     /\bwoocommerce\b/i.test($('body').attr('class') || '') ||
     $('.woocommerce').length > 0 ||
@@ -91,7 +99,6 @@ function detectPlatform($, html) {
     $('script:contains("wc_add_to_cart_params")').length > 0;
 
   // ---- Shopware (v5/v6) ----
-  // 特征：meta[name=generator*="Shopware"]、data-shopware、sw- 前缀组件、/engine/Shopware、/bundles/storefront/ 等
   const isShopwareByMeta = /shopware/i.test($('meta[name="generator"]').attr('content') || '');
   const isShopwareByHints =
     $('[data-shopware]').length > 0 ||
@@ -101,7 +108,6 @@ function detectPlatform($, html) {
     $('script:contains("window.router")').length > 0;
 
   // ---- Magento (2.x) ----
-  // 特征：requirejs-config.js、/static/frontend/、mage/、varien、"Magento" 字样、data-mage-init
   const isMagentoByAssets =
     $('script[src*="requirejs-config.js"]').length > 0 ||
     $('link[href*="/static/frontend/"], script[src*="/static/frontend/"]').length > 0 ||
@@ -109,6 +115,51 @@ function detectPlatform($, html) {
     $('[data-mage-init]').length > 0 ||
     $('script:contains("Magento")').length > 0 ||
     /Magento/i.test($('meta[name="generator"]').attr('content') || '');
+
+  // === 追加：统计计数与总览（只加不改） ===
+  try {
+    const cnt = {
+      woo: {
+        bodyClass: /\bwoocommerce\b/i.test($('body').attr('class') || '') ? 1 : 0,
+        divWoo: $('.woocommerce').length,
+        linkWoo: $('link[href*="woocommerce"]').length,
+        scriptWoo: $('script[src*="woocommerce"]').length,
+        params:
+          $('script:contains("woocommerce_params")').length +
+          $('script:contains("wc_add_to_cart_params")').length,
+      },
+      shopware: {
+        meta: /shopware/i.test($('meta[name="generator"]').attr('content') || '') ? 1 : 0,
+        dataAttr: $('[data-shopware]').length,
+        swPrefix: $('[class*="sw-"], [id*="sw-"]').length,
+        engine: $('script[src*="/engine/Shopware"], link[href*="/engine/Shopware"]').length,
+        bundles: $('link[href*="/bundles/storefront/"], script[src*="/bundles/storefront/"]').length,
+      },
+      magento: {
+        reqjs: $('script[src*="requirejs-config.js"]').length,
+        staticFront: $('link[href*="/static/frontend/"], script[src*="/static/frontend/"]').length,
+        mage: $('script[src*="/mage/"], script[src*="Magento_"]').length,
+        mageInit: $('[data-mage-init]').length,
+        metaGen: /Magento/i.test($('meta[name="generator"]').attr('content') || '') ? 1 : 0,
+        word: $('script:contains("Magento")').length,
+      },
+    };
+
+    // 这里的 isShopify/isWoo/isShopware/isMagento 仅作“当前函数视角”的判定总览
+    const verdict = {
+      isShopify: false,                       // 上面 Shopify 的强判已提前 return
+      isWoo: !!isWooByCss,
+      isShopware: !!(isShopwareByMeta || isShopwareByHints),
+      isMagento: !!isMagentoByAssets,
+    };
+    const isGenericCandidate = !verdict.isShopify && !verdict.isWoo && !verdict.isShopware && !verdict.isMagento;
+
+    dbg('[struct] counts', cnt);
+    dbg('[struct] verdict', { ...verdict, isGenericCandidate });
+  } catch (e) {
+    dbg('[struct] debug error', String(e));
+  }
+  // === /统计与总览 ===
 
   // 将这些加强条件与原判断合并（原有分支未命中时再兜底）
   if (isWooByCss) return 'WooCommerce';
@@ -177,6 +228,7 @@ function hasJsonLdProduct($) {
 async function detectStructure(url, html, adapterHint = '') {
   const $ = load(html || '');
   const platform = detectPlatform($, html || '');
+
   // ===== DEBUG: fingerprints overview (append-only) =====
   try {
     const __flags = __platformFlags($, html || '');
@@ -190,6 +242,7 @@ async function detectStructure(url, html, adapterHint = '') {
     }
   } catch {}
   // ===== /DEBUG =====
+
   // ===== DEBUG: structure fingerprints =====
   try {
     if (process.env.DEBUG) {
@@ -198,6 +251,7 @@ async function detectStructure(url, html, adapterHint = '') {
     }
   } catch (_) {}
   // ===== /DEBUG =====
+
   const bodyText = $('body').text() || '';
   const hint = adapterHint || process.env.ADAPTER_HINT || '';
 
@@ -293,7 +347,6 @@ function debugReturn(type, platform, reason, extra = {}, adapterHint = '') {
   }
   return payload;
 }
-
 
 
 // ===== DEBUG helper: platform flags (does not affect logic) =====
