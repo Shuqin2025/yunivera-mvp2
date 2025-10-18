@@ -23,7 +23,7 @@ function normalizeUrl(base, href) {
 function isProbablyProductLink(link) {
   if (!link) return false;
   const u = link.toLowerCase();
-  // 只接受 /products/，并排除“评价”等锚点
+  // 只接受 /products/ 详情，忽略评论等锚点
   if (!u.includes("/products/")) return false;
   if (u.includes("#reviews") || u.includes("reviewssection") || u.includes("/reviews")) return false;
   return true;
@@ -32,11 +32,11 @@ function isProbablyProductLink(link) {
 function isJunkTitle(title = "") {
   const t = title.toLowerCase();
   return (
-    t.includes("bewertungen") || // 德语“评价”
+    t.includes("bewertungen") || // “评价”类
     t.includes("reviews") ||
     t.includes("bewertung") ||
     t.includes("zu den bewertungen") ||
-    /\{\{\s*title\s*\}\}/i.test(t) // 模板占位
+    /\{\{\s*title\s*\}\}/i.test(t) // 模板占位符
   );
 }
 
@@ -53,7 +53,7 @@ function stripFragment(url) {
 // ===== CSS Selector sets for Shopify themes =====
 const SELECTORSETS = [
   {
-    // 常见主题卡片容器
+    // 常见主题的卡片/标题/价格/img
     card: [
       "[class*=product-card]",
       "[class*=ProductItem]",
@@ -103,6 +103,58 @@ function pickImage($el, base, sel = "img") {
   return normalizeUrl(base, src);
 }
 
+/* ==================== 价格兜底（只加不改原逻辑）==================== */
+function pickText($el) {
+  try { return ($el && $el.text && $el.text().trim()) || ""; } catch { return ""; }
+}
+
+function firstMoney($scope) {
+  // 常见展示容器（主题差异覆盖）
+  const cands = [
+    '.price__container .price__regular .price-item .money',
+    '.price__container .price__regular .price__current .money',
+    '.price__regular .price-item .money',
+    '.price .price-item .money',
+    '.price [class*="money"]',
+    '[data-product-price]',
+    '[data-price]',
+    '[data-price-min]',
+    '[data-price-max]',
+  ];
+  for (const sel of cands) {
+    const t = pickText($scope.find(sel).first());
+    if (t) return t;
+  }
+  // 卡片内直接找 “29,99€” / “€29.99” 等字样
+  const raw = pickText($scope);
+  const m = raw && raw.match(/(?:€\s?\d[\d.,]*|\d[\d.,]*\s?€)/);
+  if (m) return m[0];
+  return "";
+}
+
+function ldJsonPrice($doc) {
+  try {
+    const nodes = $doc.find('script[type="application/ld+json"]');
+    for (let i = 0; i < nodes.length; i++) {
+      const txt = nodes.eq(i).html() || '';
+      if (!txt) continue;
+      let json;
+      try { json = JSON.parse(txt); } catch { continue; }
+      const items = Array.isArray(json) ? json : [json];
+      for (const it of items) {
+        const offer = it && (it.offers || (it.itemOffered && it.itemOffered.offers));
+        if (offer && (offer.price || (offer[0] && offer[0].price))) {
+          const p = offer.price || offer[0].price;
+          const cur = offer.priceCurrency || (offer[0] && offer[0].priceCurrency) || '€';
+          return `${p}${cur === 'EUR' ? '€' : ''}`;
+        }
+      }
+    }
+  } catch {}
+  return "";
+}
+/* ================== /价格兜底 ================== */
+
 // ===== DOM parsing (card-first) =====
 function fromDom($, url, limit = 50) {
   const out = [];
@@ -129,6 +181,11 @@ function fromDom($, url, limit = 50) {
       let price =
         pickFirst($el, set.price) ||
         cleanText($el.find("meta[itemprop='price']").attr("content") || "");
+
+      // === 价格兜底补强（仅在原来取不到时触发） ===
+      if (!price) {
+        price = firstMoney($el) || ldJsonPrice($);
+      }
 
       const img = pickImage($el, url, set.img);
 
@@ -173,7 +230,7 @@ function deepAnchorFallback($, url, limit = 50) {
       const link = normalizeUrl(url, href);
       if (!isProbablyProductLink(link)) return;
 
-      // 先从 <a> 自身取 title/aria，再向外层找标题
+      // 从 <a> 及其上层容器推标题
       let title =
         cleanText($a.text()) ||
         cleanText($a.attr("title") || $a.attr("aria-label") || "");
@@ -192,7 +249,7 @@ function deepAnchorFallback($, url, limit = 50) {
       }
       if (isJunkTitle(title)) title = "";
 
-      // 就近找价格
+      // 价格
       let price = "";
       const $scope = $a.closest("article,li,div,section");
       if ($scope && $scope.length) {
@@ -206,7 +263,16 @@ function deepAnchorFallback($, url, limit = 50) {
               .text()
           ) ||
           cleanText($scope.find("meta[itemprop='price']").attr("content") || "");
+
+        // === 价格兜底补强（仅在取不到时触发） ===
+        if (!price) {
+          price = firstMoney($scope) || ldJsonPrice($);
+        }
+      } else {
+        // 没有合适 scope 也试试全局 JSON-LD
+        if (!price) price = ldJsonPrice($);
       }
+
       // 图片
       let img = "";
       if ($scope && $scope.length) {
@@ -340,14 +406,14 @@ function mergePreferDom(domList, jsonldList) {
 
 // ===== Public API =====
 function parse($, url, { limit = 50, logger } = {}) {
-  // 1) 先走 DOM
+  // 1) DOM 优先
   let dom = fromDom($, url, limit);
 
-  // 2) 按需补 JSON-LD
+  // 2) 必要时补 JSON-LD
   const needJsonLd = dom.length === 0 || dom.filter(x => x.title).length < Math.min(5, dom.length);
   let viaJson = needJsonLd ? fromJsonLd($, url, limit) : [];
 
-  // 3) 再兜底 deep anchors（若前两者仍弱）
+  // 3) 再试 deep anchors(深层 a[href])
   if ((dom.length + viaJson.length) === 0 || dom.length < 3) {
     const deep = deepAnchorFallback($, url, limit);
     viaJson = viaJson.length ? viaJson : deep;
@@ -365,7 +431,7 @@ function parse($, url, { limit = 50, logger } = {}) {
 
   const merged = mergePreferDom(dom, viaJson).slice(0, limit);
 
-  // 4) 仍为空 → 先试通用兜底（Cheerio 线路）
+  // 4) 如果还没有，就调用 genericLinks 作为最后手段（Cheerio 还在）
   if (!merged.length) {
     try {
       const generic = require('./genericLinksParser');
@@ -376,7 +442,7 @@ function parse($, url, { limit = 50, logger } = {}) {
     } catch {}
   }
 
-  // 5) 记录一下
+  // 5) 记录空结果
   if (!merged.length) {
     try {
       const host = new URL(url).host;
