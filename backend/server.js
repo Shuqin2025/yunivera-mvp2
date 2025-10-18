@@ -6,6 +6,9 @@ import * as cheerio from "cheerio";
 import fs from 'node:fs';
 import path from 'node:path';
 
+// 新增：引入自定义 logger（仅用于 http 访问日志）
+import { logger } from './lib/logger.js';
+
 // health info
 import pkg from './package.json' assert { type: 'json' };
 
@@ -19,6 +22,19 @@ import parseUniversal from "./adapters/universal.js";
 
 const app = express();
 app.use(cors({ origin: "*", exposedHeaders: ["X-Lang", "X-Adapter"] }));
+
+// === 新增：JSON 解析 + HTTP 访问日志中间件（在挂载任何路由之前） ===
+app.use(express.json());
+app.use((req, _res, next) => {
+  try {
+    const ip =
+      (req.headers["x-forwarded-for"]?.toString().split(",")[0] || req.ip || "").trim();
+    const ua = (req.headers["user-agent"] || "").slice(0, 120);
+    logger.info(`[http] ${req.method} ${req.url} ip=${ip} ua="${ua}"`);
+  } catch {}
+  next();
+});
+// === /新增 ===
 
 /* ──────────────────────────── snapshots static ──────────────────────────── */
 const SNAPSHOT_DIR = process.env.SNAPSHOT_DIR || path.resolve('./snapshots');
@@ -39,7 +55,6 @@ app.use('/snapshots', (req, res, next) => {
   } catch {}
   next();
 }, (req, res, next) => express.static(SNAPSHOT_DIR)(req, res, next));
-
 
 
 /* ──────────────────────────── health ──────────────────────────── */
@@ -683,7 +698,6 @@ async function overwriteSkuFromBeamerDetail(items, maxCount = 30) {
         $("dt,th,.data,.spec,.label,li,div,p").each((_k, el) => {
           if (found) return false;
           const t = text($(el));
-          if (!t) return;
           // 同节点：例如 “Artikel-Nr.: 1090066”
           const mInline = t.match(/(Artikel-?Nr\.?|Artikelnummer|Art\.-?Nr\.?|Bestellnummer|Produktnummer|Item\s*(?:No\.?|Number)|Hersteller-?Nr\.?)\s*[:：]?\s*([A-Za-z0-9][A-Za-z0-9\-_.\/]{1,})/i);
           if (mInline && !BADLBL.test(mInline[1] || "")) {
@@ -1425,3 +1439,4 @@ if (typeof fetchHtml === 'function') {
   }
 });
 app.listen(PORT, () => console.log(`[mvp2-backend] listening on :${PORT}`));
+
