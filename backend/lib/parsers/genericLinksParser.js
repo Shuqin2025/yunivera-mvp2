@@ -4,6 +4,18 @@
 
 const { URL } = require("url");
 
+// --- DEBUG: safe dbg import (append-only, CJS friendly) ----------------------
+let dbg = (...args) => {
+  const on = process.env.DEBUG === '1' || process.env.DEBUG === 'true' || !!process.env.DEBUG;
+  if (on) { try { console.log(...args); } catch {} }
+};
+try {
+  // 与 ESM 导出的 ../logger.js 兼容：require 成功则复用其中的 dbg
+  const maybe = require('../logger.js');
+  if (maybe && typeof maybe.dbg === 'function') dbg = maybe.dbg;
+} catch { /* fallback to local dbg */ }
+// ---------------------------------------------------------------------------
+
 // --- 可调参数 ---------------------------------------------------------------
 const MAX_RESULTS = 200;           // 最多回传多少条
 const MIN_PRIMARY_HITS = 6;        // 主选择器命中少于此数则触发 deepAnchorFallback
@@ -288,6 +300,14 @@ module.exports = async function genericLinksParser(ctx) {
       }
     } catch (_) {}
     // ===== /DEBUG =====
+
+    // 兜底原因（明确告诉日志：为什么走了 generic-links）
+    try {
+      const aCount = $('a[href]').length || 0;
+      dbg('[generic-links] fallback', { aCount, note: 'no platform-specific parser matched' });
+    } catch (e) {
+      dbg('[generic-links] debug error', String(e));
+    }
 
     // “无产品”日志（给你排查时看）
     if (!products.length) {
