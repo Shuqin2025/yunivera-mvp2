@@ -1,23 +1,38 @@
-// backend/lib/templateParser.js
-const { load } = require('cheerio');
+// backend/lib/templateParser.js  (ESM-compatible)
+//
+// This file converts the previous CommonJS implementation to ESM while preserving behavior.
+// - Uses `import` instead of `require`
+// - Provides both named exports (parse, parseCatalog) AND a default export object
+// - Loads sibling modules in a CJS/ESM compatible way (default-or-namespace)
 
-// 兼容 logger 默认导出与命名导出两种写法
-const _loggerMod = require('./logger');
-const logger = _loggerMod?.default || _loggerMod;
+import { load } from "cheerio";
 
-const { detectStructure } = require('./structureDetector');
+// ---- logger (compatible import) ----
+let logger = null;
+try {
+  const mod = await import("./logger.js").catch(() => ({}));
+  logger = mod.default || mod.logger || null;
+} catch {}
 
-// —— 各平台解析器 ——
-// 命中平台优先走平台解析器；否则走 generic-links；再不行走极简兜底
-const shopware = require('./parsers/shopwareParser');
-const woo      = require('./parsers/woocommerceParser');
-const magento  = require('./parsers/magentoParser');
-const shopify  = require('./parsers/shopifyParser');
-const generic  = require('./parsers/genericLinksParser'); // ← 若不存在，请保持原状或忽略
+// ---- structure detector (named export exists in our repo) ----
+let detectStructure = null;
+try {
+  const mod = await import("./structureDetector.js").catch(() => ({}));
+  detectStructure = mod.detectStructure || mod.default || null;
+} catch {}
 
-// 智能编号提取 & 详情页补抓
-const artikel = require('./modules/artikelExtractor');
-const details = require('./modules/detailFetcher');
+// ---- platform parsers (lazy top-level import; support default or namespace) ----
+const shopware = (await import("./parsers/shopwareParser.js").catch(() => ({}))).default ?? (await import("./parsers/shopwareParser.js").catch(() => ({})));
+const woo      = (await import("./parsers/woocommerceParser.js").catch(() => ({}))).default ?? (await import("./parsers/woocommerceParser.js").catch(() => ({})));
+const magento  = (await import("./parsers/magentoParser.js").catch(() => ({}))).default ?? (await import("./parsers/magentoParser.js").catch(() => ({})));
+const shopify  = (await import("./parsers/shopifyParser.js").catch(() => ({}))).default ?? (await import("./parsers/shopifyParser.js").catch(() => ({})));
+const generic  = (await import("./parsers/genericLinksParser.js").catch(() => ({}))).default ?? (await import("./parsers/genericLinksParser.js").catch(() => ({})));
+
+// ---- helpers: artikel extractor & detail fetcher ----
+const artikelMod = await import("./modules/artikelExtractor.js").catch(() => ({}));
+const detailsMod = await import("./modules/detailFetcher.js").catch(() => ({}));
+const artikel = artikelMod.default || artikelMod;
+const details = detailsMod.default || detailsMod;
 
 // --- DEBUG helper (append-only) ---
 const __dbgT = (tag, data) => {
@@ -33,10 +48,12 @@ const __dbgT = (tag, data) => {
 // 解析后结果过少的回退策略（命中模板但抓不到 ≥3 个有效产品时返回空）
 function withFallback(parseFn, $, url, limit, adapterName) {
   try {
-    const data = parseFn($, url, { limit }) || [];
-    const valid = Array.isArray(data) ? data.filter(x => x && x.title && x.url) : [];
-    if (valid.length >= 3) return data;
-    if (process.env.DEBUG) console.log('[parser.fallback]', { adapter: adapterName, got: valid.length });
+    if (typeof parseFn === "function") {
+      const data = parseFn($, url, { limit }) || [];
+      const valid = Array.isArray(data) ? data.filter(x => x && x.title && x.url) : [];
+      if (valid.length >= 3) return data;
+      if (process.env.DEBUG) console.log('[parser.fallback]', { adapter: adapterName, got: valid.length });
+    }
   } catch (e) {
     if (process.env.DEBUG) console.log('[parser.fallback.error]', { adapter: adapterName, err: String((e && e.message) || e) });
   }
@@ -142,7 +159,7 @@ function skuMissingOrSuspicious(s) {
 /**
  * 解析统一入口（Cheerio 路线，保留原有逻辑）
  */
-async function parse(html, url, opts = {}) {
+export async function parse(html, url, opts = {}) {
   const {
     limit = 50,
     typeHint = '',
@@ -158,7 +175,9 @@ async function parse(html, url, opts = {}) {
   // 1) 检测结构 & 平台（用于选择解析路径 + 记录调试信息）
   let structure = { type: '', platform: '' };
   try {
-    structure = await detectStructure(url, html);
+    if (typeof detectStructure === "function") {
+      structure = await detectStructure(url, html);
+    }
   } catch {}
 
   const platformFromDetect = structure.platform || '';
@@ -178,8 +197,9 @@ async function parse(html, url, opts = {}) {
   let items = [];
 
   // 2.1 平台解析（优先）
-  if (platformFromDetect && map[platformFromDetect] && typeof map[platformFromDetect].parse === 'function') {
-    items = withFallback(map[platformFromDetect].parse, $, url, limit, platformFromDetect);
+  const chosenAdapter = platformFromDetect && map[platformFromDetect];
+  if (chosenAdapter && typeof chosenAdapter.parse === 'function') {
+    items = withFallback(chosenAdapter.parse, $, url, limit, platformFromDetect);
     adapterName = platformFromDetect;
   }
 
@@ -231,8 +251,12 @@ async function parse(html, url, opts = {}) {
   // 4.1 SKU 轻量补齐
   for (const it of unified) {
     if (!skuMissingOrSuspicious(it.sku)) continue;
-    const guess = artikel.extract([it.name, it.description].filter(Boolean).join(' '));
-    if (guess) it.sku = guess;
+    try {
+      if (artikel && typeof artikel.extract === "function") {
+        const guess = artikel.extract([it.name, it.description].filter(Boolean).join(' '));
+        if (guess) it.sku = guess;
+      }
+    } catch {}
   }
 
   // 5) 详情页补抓（仅缺失/可疑 SKU）
@@ -243,21 +267,23 @@ async function parse(html, url, opts = {}) {
 
     if (need.length) {
       try {
-        const enriched = await details.fetchDetails(
-          need.map(x => x.link),
-          { concurrency, timeout: 15000 }
-        );
-        const byUrl = new Map(unified.map(x => [x.link, x]));
-        for (const r of enriched) {
-          const t = byUrl.get(r.url);
-          if (!t) continue;
-          if (skuMissingOrSuspicious(t.sku) && r.sku) t.sku = r.sku;
-          if (!t.name && r.title) t.name = r.title;
-          if (!t.price && r.price) t.price = r.price;
-          if (!t.image && r.image) t.image = r.image;
-          if (!t.description && r.description) t.description = r.description;
+        if (details && typeof details.fetchDetails === "function") {
+          const enriched = await details.fetchDetails(
+            need.map(x => x.link),
+            { concurrency, timeout: 15000 }
+          );
+          const byUrl = new Map(unified.map(x => [x.link, x]));
+          for (const r of enriched || []) {
+            const t = byUrl.get(r.url);
+            if (!t) continue;
+            if (skuMissingOrSuspicious(t.sku) && r.sku) t.sku = r.sku;
+            if (!t.name && r.title) t.name = r.title;
+            if (!t.price && r.price) t.price = r.price;
+            if (!t.image && r.image) t.image = r.image;
+            if (!t.description && r.description) t.description = r.description;
+          }
+          unified = Array.from(byUrl.values());
         }
-        unified = Array.from(byUrl.values());
       } catch {}
     }
   }
@@ -292,7 +318,7 @@ const WAIT_SELECTOR = PRODUCT_HINTS.join(', ');
  * @param {string} adapterHint 仅用于日志
  * @returns {Promise<{ok: boolean, count: number, products: Array}>}
  */
-async function parseCatalog(page, url, adapterHint) {
+export async function parseCatalog(page, url, adapterHint) {
   const t0 = Date.now();
   logger?.info?.(`[parseCatalog] ▶️ open ${url} (hint=${adapterHint || '-'})`);
 
@@ -414,17 +440,6 @@ function safeJson(obj) {
   try { return JSON.stringify(obj); } catch { return '{}'; }
 }
 
-module.exports = { parse, parseCatalog };
-
-/* ===== ESM 默认导出兼容层（append-only, 不改变已有功能） ===== */
-/* 目的：当别处使用 `import templateParser from "../lib/templateParser.js"`
-   时，提供一个默认导出对象，内含已存在的命名导出（若存在）。*/
-
-const __defaultExport = {};
-try { if (typeof parse !== "undefined") __defaultExport.parse = parse; } catch {}
-try { if (typeof parseCatalog !== "undefined") __defaultExport.parseCatalog = parseCatalog; } catch {}
-try { if (typeof parseDetail !== "undefined") __defaultExport.parseDetail = parseDetail; } catch {}
-try { if (typeof parseUniversal !== "undefined") __defaultExport.parseUniversal = parseUniversal; } catch {}
-
-// 若没有任何可用成员，也给一个空对象，保证默认导入不再报错
+// Provide a default export object for compatibility with `import templateParser from ...`
+const __defaultExport = { parse, parseCatalog };
 export default __defaultExport;
