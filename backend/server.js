@@ -6,6 +6,7 @@ import * as cheerio from "cheerio";
 import fs from 'node:fs';
 import path from 'node:path';
 import compat from './routes/compat.js';
+import compat from "./routes/compat.js";  //
 
 // 新增：引入自定义 logger（仅用于 http 访问日志）
 import { logger } from './lib/logger.js';
@@ -22,6 +23,21 @@ import sino from "./adapters/sinotronic.js";
 import parseUniversal from "./adapters/universal.js";
 
 const app = express();
+// 让后端能读到 JSON body（你已有的话可跳过）
+app.use(express.json({ limit: "1mb" }));
+
+// 兼容所有跨域场景（含预检）
+app.use(cors({ origin: "*", exposedHeaders: ["X-Lang", "X-Adapter"] }));
+
+// ✅ 极简 CORS（允许任意跨域；覆盖预检），保证任何场景都不会被 OPTIONS 卡住
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Headers", "*, Authorization, Content-Type");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  if (req.method === "OPTIONS") return res.sendStatus(200);
+  next();
+});
+
 app.use(cors({ origin: "*", exposedHeaders: ["X-Lang", "X-Adapter"] }));
 
 // === 新增：JSON 解析 + HTTP 访问日志中间件（在挂载任何路由之前） ===
@@ -1390,6 +1406,11 @@ app.get("/v1/api/catalog/parse", async (req, res) => {
     });
     res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
+});
+// ⭐⭐ 让老路径（/catalog、/match、/export、/quote、/pdf、/health）映射到 /v1/api/*
+app.use(compat);
+app.get("/v1/health", (_req, res) => {
+  res.json({ ok: true, service: "mvp2-backend", ts: Date.now() });
 });
 
 // 兼容别名：/v1/api/parse
