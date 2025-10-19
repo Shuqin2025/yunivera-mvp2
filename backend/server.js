@@ -94,19 +94,11 @@ app.use('/snapshots', (req, res, next) => {
 }, (req, res, next) => express.static(SNAPSHOT_DIR)(req, res, next));
 
 
-/* ──────────────────────────── health ──────────────────────────── */
-app.get(["/", "/healthz", "/health", "/api/health"], (_req, res) =>
-  res.type("text/plain").send("ok")
-);
-
-
 /* --- health check (added) --- */
 
 // 兼容路由：让 /v1/* 和 /v1/api/* 都走新路由；同时保留根前缀以兼容旧请求
 
 
- });
-});
 app.get("/v1/api/__version", (_req, res) => {
   res.json({
     version: "mvp-universal-parse-2025-10-06-beamer-paging-fix-artnr",
