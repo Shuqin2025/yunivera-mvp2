@@ -1405,38 +1405,8 @@ app.get("/v1/api/catalog/parse", async (req, res) => {
     res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
 });
-// ⭐⭐ 让老路径（/catalog、/match、/export、/quote、/pdf、/health）映射到 /v1/api/*
- });
-});
-
 // 兼容别名：/v1/api/parse
-app.get("/v1/api/parse", (req, res) =>
-  app._router.handle(
-    {
-      ...req,
-      url:
-        "/v1/api/catalog/parse" +
-        (req.url.includes("?") ? req.url.slice(req.url.indexOf("?")) : ""),
-    },
-    res,
-    () => {}
-  )
-);
-
 // ✅ 兼容老路径：/v1/api/catalog 与 *.json 变体
-app.get(["/v1/api/catalog", "/v1/api/catalog.json", "/v1/api/catalog/parse.json"], (req, res) =>
-  app._router.handle(
-    {
-      ...req,
-      url:
-        "/v1/api/catalog/parse" +
-        (req.url.includes("?") ? req.url.slice(req.url.indexOf("?")) : ""),
-    },
-    res,
-    () => {}
-  )
-);
-
 /* ──────────────────────────── listen ──────────────────────────── */
 const PORT = process.env.PORT || 3000;
 
