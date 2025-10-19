@@ -416,3 +416,15 @@ function safeJson(obj) {
 
 module.exports = { parse, parseCatalog };
 
+/* ===== ESM 默认导出兼容层（append-only, 不改变已有功能） ===== */
+/* 目的：当别处使用 `import templateParser from "../lib/templateParser.js"`
+   时，提供一个默认导出对象，内含已存在的命名导出（若存在）。*/
+
+const __defaultExport = {};
+try { if (typeof parse !== "undefined") __defaultExport.parse = parse; } catch {}
+try { if (typeof parseCatalog !== "undefined") __defaultExport.parseCatalog = parseCatalog; } catch {}
+try { if (typeof parseDetail !== "undefined") __defaultExport.parseDetail = parseDetail; } catch {}
+try { if (typeof parseUniversal !== "undefined") __defaultExport.parseUniversal = parseUniversal; } catch {}
+
+// 若没有任何可用成员，也给一个空对象，保证默认导入不再报错
+export default __defaultExport;
