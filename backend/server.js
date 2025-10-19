@@ -25,26 +25,12 @@ const app = express();
 // 让后端能读到 JSON body（你已有的话可跳过）
 
 // --- Global CORS & preflight (allow any origin; cover OPTIONS) ---
-app.use((req, res, next) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Headers', '*, Authorization, Content-Type');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  if (req.method === 'OPTIONS') return res.sendStatus(200);
-  next();
-});
+
 app.use(express.json({ limit: "1mb" }));
 
 // 兼容所有跨域场景（含预检）
 app.use(cors({ origin: "*", exposedHeaders: ["X-Lang", "X-Adapter"] }));
 // --- CORS 预检（允许任意跨域；覆盖预检）---
-app.use((req, res, next) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Headers", "*, Authorization, Content-Type");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  if (req.method === "OPTIONS") return res.sendStatus(200);
-  next();
-});
-// --- /CORS 预检 ---
 
 // ✅ 极简 CORS（允许任意跨域；覆盖预检），保证任何场景都不会被 OPTIONS 卡住
 app.use((req, res, next) => {
