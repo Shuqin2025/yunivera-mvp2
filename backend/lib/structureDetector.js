@@ -1,9 +1,12 @@
-// backend/lib/structureDetector.js
-// 轻量、可解释的页面结构判定：homepage | catalog | product
-// - 保守：宁可判为 homepage 也不误判为 catalog/product
-// - 可观察：DEBUG=1 时输出完整判定原因，便于线上排障
+/**
+ * backend/lib/structureDetector.js (ESM)
+ * - Convert from CJS to ESM to satisfy: import { detectStructure } from "../lib/structureDetector.js"
+ * - Keeps original logic & debug helpers; only changes imports/exports
+ */
 
-const { load } = require('cheerio');
+import * as cheerio from "cheerio";
+
+const { load } = cheerio;
 
 // --- DEBUG helper (append-only) ---
 const __dbg = (tag, data) => {
@@ -19,15 +22,18 @@ const __dbg = (tag, data) => {
 // ===== 安全引入 logger（兼容 ESM/CJS）；失败则回退到 console.debug =====
 let __logger = null;
 try {
-  const maybe = require('../logger.js');
-  __logger = maybe?.default || maybe || null;
+  // Try ESM default first
+  const mod = await import('../logger.js').catch(() => null);
+  if (mod) {
+    __logger = mod.default || mod.logger || null;
+  }
 } catch {}
 const __logDebug = (msg) => {
   try {
     if (__logger && typeof __logger.debug === 'function') {
       __logger.debug(msg);
-    } else {
-      console.debug?.(msg);
+    } else if (typeof console !== 'undefined' && typeof console.debug === 'function') {
+      console.debug(msg);
     }
   } catch {}
 };
@@ -153,7 +159,7 @@ function detectPlatform($, html) {
     };
 
     const verdict = {
-      isShopify: false, // 上面 Shopify 的强判已提前 return
+      isShopify: false, // Shopify 强判已提前 return
       isWoo: !!isWooByCss,
       isShopware: !!(isShopwareByMeta || isShopwareByHints),
       isMagento: !!isMagentoByAssets,
@@ -180,7 +186,6 @@ function looksLikeProductHref(href = '') {
   const h = (href || '').toLowerCase().trim();
   if (!h) return false;
   if (GENERIC_LINK_BAD.test(h)) return false;
-  // 常见的详情路径形态
   return /\/product[s]?\/|\/prod\/|\/item\/|\/p\/|\/detail\/|\/details\/|\/artikel\/|\/sku\/|\/dp\/|\/kaufen\/|\/buy\//.test(h);
 }
 
@@ -223,14 +228,9 @@ function hasJsonLdProduct($) {
 /**
  * 结构检测
  * 返回：
- * {
- *   type: 'homepage' | 'catalog' | 'product',
- *   platform: 'Shopify' | 'WooCommerce' | 'Magento' | 'Shopware' | '',
- *   name: 同 type,
- *   debug: { reason, platform, adapterHint, ...metrics }
- * }
+ * { type, platform, name, debug }
  */
-async function detectStructure(url, html, adapterHint = '') {
+export async function detectStructure(url, html, adapterHint = '') {
   const $ = load(html || '');
   const platform = detectPlatform($, html || '');
 
@@ -264,14 +264,11 @@ async function detectStructure(url, html, adapterHint = '') {
   const jsonldProduct = hasJsonLdProduct($);
   if (jsonldProduct) {
     const payload = debugReturn('product', platform, 'Product via JSON-LD', { url, jsonldProduct: true }, hint);
-
-    // ✅ 总览行：把布尔位与最终“决定”一起打一行
     try {
       const f = __platformFlags($, html || '');
       const decidedAdapter = platform || (hint || '');
       __logDebug(`[struct] url=${url} isShopify=${!!f.shopify} isWoo=${!!f.woocom} isShopware=${!!f.shopware} isMagento=${!!f.magento} -> decided=type=${payload.type},platform=${decidedAdapter || '-'}`);
     } catch {}
-
     console.info?.(`[struct] type=${payload.type} platform=${payload.platform || '-'} adapterHint=${hint || '-'}`);
     return payload;
   }
@@ -304,14 +301,11 @@ async function detectStructure(url, html, adapterHint = '') {
       const payload = debugReturn('product', platform, 'Single product signals', {
         url, cardCount, productAnchorCount, hasPrice, hasCart, mediaCount
       }, hint);
-
-      // ✅ 总览行
       try {
         const f = __platformFlags($, html || '');
         const decidedAdapter = platform || (hint || '');
         __logDebug(`[struct] url=${url} isShopify=${!!f.shopify} isWoo=${!!f.woocom} isShopware=${!!f.shopware} isMagento=${!!f.magento} -> decided=type=${payload.type},platform=${decidedAdapter || '-'}`);
       } catch {}
-
       console.info?.(`[struct] type=${payload.type} platform=${payload.platform || '-'} adapterHint=${hint || '-'}`);
       return payload;
     }
@@ -342,14 +336,11 @@ async function detectStructure(url, html, adapterHint = '') {
     const payload = debugReturn(decision, platform, reason, {
       url, cardCount, productAnchorCount, hasPrice, hasCart
     }, hint);
-
-    // ✅ 总览行
     try {
       const f = __platformFlags($, html || '');
       const decidedAdapter = platform || (hint || '');
       __logDebug(`[struct] url=${url} isShopify=${!!f.shopify} isWoo=${!!f.woocom} isShopware=${!!f.shopware} isMagento=${!!f.magento} -> decided=type=${payload.type},platform=${decidedAdapter || '-'}`);
     } catch {}
-
     console.info?.(`[struct] type=${payload.type} platform=${payload.platform || '-'} adapterHint=${hint || '-'}`);
     return payload;
   }
@@ -358,14 +349,11 @@ async function detectStructure(url, html, adapterHint = '') {
   const payload = debugReturn('homepage', platform, 'Low commerce signals', {
     url, cardCount, productAnchorCount, hasPrice, hasCart
   }, hint);
-
-  // ✅ 总览行
   try {
     const f = __platformFlags($, html || '');
     const decidedAdapter = platform || (hint || '');
     __logDebug(`[struct] url=${url} isShopify=${!!f.shopify} isWoo=${!!f.woocom} isShopware=${!!f.shopware} isMagento=${!!f.magento} -> decided=type=${payload.type},platform=${decidedAdapter || '-'}`);
   } catch {}
-
   console.info?.(`[struct] type=${payload.type} platform=${payload.platform || '-'} adapterHint=${hint || '-'}`);
   return payload;
 }
@@ -412,5 +400,4 @@ function __platformFlags($, html) {
 }
 // ===== /DEBUG helper =====
 
-module.exports = { detectStructure };
-
+export default detectStructure;
