@@ -5,6 +5,7 @@ import axios from "axios";
 import * as cheerio from "cheerio";
 import fs from 'node:fs';
 import path from 'node:path';
+import compat from './routes/compat.js';
 
 // 新增：引入自定义 logger（仅用于 http 访问日志）
 import { logger } from './lib/logger.js';
@@ -25,6 +26,19 @@ app.use(cors({ origin: "*", exposedHeaders: ["X-Lang", "X-Adapter"] }));
 
 // === 新增：JSON 解析 + HTTP 访问日志中间件（在挂载任何路由之前） ===
 app.use(express.json());
+
+// ADDON: 极简 CORS（允许任意跨域；覆盖预检）
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Headers', '*, Authorization, Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  if (req.method === 'OPTIONS') return res.sendStatus(200);
+  next();
+});
+
+// ADDON: 兼容路由挂载
+app.use(compat);
+
 app.use((req, _res, next) => {
   try {
     const ip =
@@ -1439,4 +1453,3 @@ if (typeof fetchHtml === 'function') {
   }
 });
 app.listen(PORT, () => console.log(`[mvp2-backend] listening on :${PORT}`));
-
