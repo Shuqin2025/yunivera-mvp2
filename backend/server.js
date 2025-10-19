@@ -28,20 +28,35 @@ const app = express();
 
 app.use(express.json({ limit: "1mb" }));
 
+// === 极简 CORS（允许任意跨域；覆盖预检） ===
+// 保证任何场景都不会被 OPTIONS 卡住
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Headers', '*, Authorization, Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS,PUT,PATCH,DELETE');
+  if (req.method === 'OPTIONS') return res.sendStatus(200);
+  next();
+});
+
+// 兼容路由：让 /v1/* 和 /v1/api/* 都走同一套新路由
+app.use(['/v1', '/v1/api'], compat);
+// 统一 health 路由（多前缀）
+app.get(['/v1/health', '/health', '/api/health', '/'], (_req, res) => {
+  res.json({ ok: true, service: "mvp2-backend", ts: Date.now() });
+});
+
+
+
+
+
 // 兼容所有跨域场景（含预检）
 app.use(cors({ origin: "*", exposedHeaders: ["X-Lang", "X-Adapter"] }));
 // --- CORS 预检（允许任意跨域；覆盖预检）---
 
 // ✅ 极简 CORS（允许任意跨域；覆盖预检），保证任何场景都不会被 OPTIONS 卡住
-app.use((req, res, next) => {
-  res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Headers", "*, Authorization, Content-Type");
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  if (req.method === "OPTIONS") return res.sendStatus(200);
-  next();
-});
 
-app.use(cors({ origin: "*", exposedHeaders: ["X-Lang", "X-Adapter"] }));
+
+
 
 // === 新增：JSON 解析 + HTTP 访问日志中间件（在挂载任何路由之前） ===
 app.use(express.json());
@@ -83,19 +98,15 @@ app.use('/snapshots', (req, res, next) => {
 app.get(["/", "/healthz", "/health", "/api/health"], (_req, res) =>
   res.type("text/plain").send("ok")
 );
-app.get("/v1/api/health", (_req, res) => {
-  res.json({ ok: true, status: "up", ts: Date.now() });
+
 
 /* --- health check (added) --- */
 
 // 兼容路由：让 /v1/* 和 /v1/api/* 都走新路由；同时保留根前缀以兼容旧请求
-app.use("/v1", compat);
-app.use("/v1/api", compat);
-app.get(["/v1/health", "/health", "/api/health"], (_req, res) => { res.json({ ok: true, service: "mvp2-backend", ts: Date.now() }); });
-});
 
-});
 
+ });
+});
 app.get("/v1/api/__version", (_req, res) => {
   res.json({
     version: "mvp-universal-parse-2025-10-06-beamer-paging-fix-artnr",
@@ -1403,7 +1414,7 @@ app.get("/v1/api/catalog/parse", async (req, res) => {
   }
 });
 // ⭐⭐ 让老路径（/catalog、/match、/export、/quote、/pdf、/health）映射到 /v1/api/*
-app.get(["/v1/health", "/health", "/api/health"], (_req, res) => { res.json({ ok: true, service: "mvp2-backend", ts: Date.now() }); });
+ });
 });
 
 // 兼容别名：/v1/api/parse
