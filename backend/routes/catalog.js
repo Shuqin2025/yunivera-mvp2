@@ -18,7 +18,7 @@ import sinotronic from "../adapters/sinotronic.js";
 import memoryking from "../adapters/memoryking.js"; // 对象导出：.test / .parse($,url,...)
 
 // 模板解析中枢 + 通用适配器
-import detectStructure from "../lib/structureDetector.js";
+import { detectStructure } from "../lib/structureDetector.js";
 import templateParser from "../lib/templateParser.js"; // 可能是函数，也可能是 { parse, parseCatalog }
 import universal from "../adapters/universal.js";      // 默认导出：async function ({url,limit,debug})
 
