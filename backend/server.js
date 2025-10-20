@@ -39,7 +39,7 @@ app.use((req, res, next) => {
 });
 
 // 兼容路由：让 /v1/* 和 /v1/api/* 都走同一套新路由
-app.use(compat);
+app.use(['/v1', '/v1/api'], compat);
 // 统一 health 路由（多前缀）
 app.get(['/v1/health', '/health', '/api/health', '/'], (_req, res) => {
   res.json({ ok: true, service: "mvp2-backend", ts: Date.now() });
