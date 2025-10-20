@@ -404,31 +404,51 @@ async function runExtract(url, html, { limit = 50, debug = false, hintType = "" 
 
 /* ----------------------------------- 路由 ---------------------------------- */
 router.all("/parse", async (req, res) => {
+  const t0 = Date.now();
   try {
     const isGet = req.method === "GET";
-    const qp = isGet ? req.query : req.body || {};
+    const qp = isGet ? (req.query || {}) : (req.body || {});
     __dbgR('parse.start', { url: req?.body?.url || req?.query?.url });
+
     const DEBUG = process.env.DEBUG === '1' || process.env.DEBUG === 'true';
 
     const url = String(qp.url || "").trim();
-    // ★ 新增：入口最小化日志
-    logger.debug(`[route/catalog.parse] url=${url} size=${qp.size ?? ""}`);
 
-    if (!url) return res.status(400).json({ ok: false, error: "missing url" });
+    // ---- minimal access log ----
+    logger.info?.(`[route/catalog.parse] url=${url}`);
 
+    // A) 参数兜底
+    if (!url) {
+      return res.status(400).json({ ok: false, url, error: 'MISSING_URL', code: 'MISSING_URL', message: '请粘贴目录页链接' });
+    }
+
+    // B) 拦住把网关当目录页的误用（按需调整域名规则）
+    function isInternalGateway(u) {
+      try {
+        const { hostname, pathname } = new URL(u);
+        return /onrender\.com$/i.test(hostname) && /^\/v1\/api/i.test(pathname);
+      } catch { return false; }
+    }
+    if (isInternalGateway(url)) {
+      return res.status(400).json({
+        ok: false,
+        url,
+        error: 'GATEWAY_URL_NOT_ALLOWED',
+        code: 'GATEWAY_URL_NOT_ALLOWED',
+        message: '请粘贴店铺目录页链接，而不是网关 API 地址'
+      });
+    }
+
+    // 参数解析（与前端保持一致）
     const limit = Math.max(1, parseInt(qp.limit ?? 50, 10) || 50);
-
     const imgMode = String(qp.img || "").toLowerCase(); // "base64" | ""
     const imgCount = Math.max(0, parseInt(qp.imgCount ?? 0, 10) || 0);
-
     const rawDebug = qp.debug ?? qp.debug1 ?? qp.debug_1;
     const wantDebug = ["1", "true", "yes", "on"].includes(String(rawDebug ?? "").toLowerCase());
-
-    // ★ 解析前端 hint（t/type）
     const hintType = (qp.t || qp.type || "").toString();
-
-    // ★ 浏览器渲染开关
     const useBrowser = ["1", "true", "yes", "on"].includes(String(qp.useBrowser || qp.browser || "").toLowerCase());
+    const detailSkuMax = Math.max(0, parseInt(qp.detailSkuMax ?? 8, 10) || 8);
+
     DEBUG && console.log('[struct]', 'parse:start', { url, hintType, useBrowser });
 
     let items = [];
@@ -448,7 +468,6 @@ router.all("/parse", async (req, res) => {
         const r = await getParseCatalog()(page, url, hintType || "");
         const browProducts = (r && Array.isArray(r.products)) ? r.products : [];
         if (browProducts.length) {
-          // 统一结构（与后续保持一致字段）
           items = browProducts.map((p) => ({
             sku: p.sku || "",
             title: p.title || p.name || "",
@@ -462,7 +481,9 @@ router.all("/parse", async (req, res) => {
           }));
           adapter_used = hintType || "browser-dom";
         }
-      } catch {}
+      } catch (e) {
+        logger.warn?.(`[route/catalog.parse] browser route failed: ${e?.message || e}`);
+      }
       try { await page.close(); } catch {}
       try { await browser.close(); } catch {}
     }
@@ -473,9 +494,16 @@ router.all("/parse", async (req, res) => {
       html = fetched.html;
       debugFetch = fetched.debugFetch;
       if (!html || fetched.status >= 400) {
-        const payload = { ok: false, url, status: fetched.status, error: "fetch failed" };
+        const payload = {
+          ok: false,
+          url,
+          error: 'FETCH_FAILED',
+          code: 'FETCH_FAILED',
+          status: fetched.status,
+          message: '抓取目录页失败'
+        };
         if (wantDebug) payload.debug = { ...(debugFetch || {}), step: "fetch" };
-        return res.status(200).json(payload);
+        return res.status(422).json(payload);
       }
 
       const ret = await runExtract(url, html, { limit, debug: wantDebug, hintType });
@@ -512,54 +540,41 @@ router.all("/parse", async (req, res) => {
       desc: it.desc || "",
     }));
 
-    /* -------------------- metrics & snapshots（保留并复用） -------------------- */
     const count = (products || []).length;
-    const fieldsRate = computeFieldsRate(products || []);
-    const wantMetrics = ["1", "true", "yes", "on"].includes(String(qp.metrics || "").toLowerCase());
-    const wantSnapshot = ["1", "true", "yes", "on"].includes(String(qp.snapshot || qp.debug || "").toLowerCase());
-
-    // ===== DEBUG: route catalog/parse =====
-    try {
-      if (DEBUG) {
-        const sample = (products && products[0] && (products[0].url || products[0].link)) || null;
-        console.log('[route]', 'adapter=', adapter_used, 'count=', Array.isArray(products) ? products.length : -1, 'url=', url, 'sample=', sample);
-      }
-    } catch (_) {}
-    // ===== /DEBUG =====
 
     const resp = {
       ok: true,
       url,
-      count: count,
-      products, // 前端直接使用 products
-      items, // 兼容旧字段
-      adapter: adapter_used, // 给前端 toast 显示“来源：xxx”
+      adapter: adapter_used || 'unknown',
+      count,
+      products,
+      meta: {
+        ms: Date.now() - t0,
+        wantImgBase64: imgMode === 'base64',
+        imgCount,
+        detailSkuMax,
+        t: hintType || undefined,
+        useBrowser: !!(useBrowser && chromium && getParseCatalog()),
+      },
     };
 
-    if (wantDebug) {
-      resp.debug = {
-        ...(debugFetch || {}),
-        ...(debugPart || {}),
-        adapter_used,
-        hintType,
-        useBrowser: !!(useBrowser && chromium && getParseCatalog()),
-      };
-    }
-
-    if (wantMetrics) resp.fieldsRate = fieldsRate;
-
-    // ★ 新增：出口最小化日志
-    logger.debug(`[route/catalog.parse] done url=${url} adapter=${resp?.adapter} count=${resp?.products?.length ?? 0}`);
-
+    logger.info?.(`[parse:done] ${resp.url} adapter=${resp.adapter} count=${resp.count} ms=${resp.meta.ms}`);
     __dbgR('parse.done', { url: req?.body?.url || req?.query?.url, adapter: resp?.adapter, count: resp?.products?.length });
-    if ((resp?.products?.length || 0) === 0) {
+
+    if (count === 0) {
       __dbgR('parse.empty', { url: req?.body?.url || req?.query?.url, note: 'NoProductFound after adapter run' });
     }
-    return res.json(resp);
+
+    return res.status(200).json(resp);
   } catch (err) {
-    // ★ 新增：异常日志
-    logger.error(`[route/catalog.parse] ERROR url=${req?.body?.url || req?.query?.url} -> ${err?.message || err}`);
-    return res.status(200).json({ ok: false, error: String(err?.message || err) });
+    logger.error?.('[parse:fail]', { url: req?.body?.url || req?.query?.url, err: String(err?.message || err) });
+    return res.status(500).json({
+      ok: false,
+      url: req?.body?.url || req?.query?.url || '',
+      error: 'PARSE_FAILED',
+      code: 'PARSE_FAILED',
+      message: String(err?.message || err),
+    });
   }
 });
 
