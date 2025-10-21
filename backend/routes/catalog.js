@@ -26,6 +26,7 @@ import universal from "../adapters/universal.js";      // 默认导出：async f
 import logger from "../lib/logger.js";
 // 调试：阶段快照
 import snapshot from "../modules/diagnostics/debugSnapshot.js";
+import snapshot from "../lib/debugSnapshot.js";
 
 const router = Router();
 
