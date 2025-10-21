@@ -11,7 +11,7 @@ import compat from './routes/compat.js';
 import { logger } from './lib/logger.js';
 // 调试：阶段快照 & 自动日志巡检
 import snapshot from "./lib/debugSnapshot.js";
-import autoLogInspector from "./modules/diagnostics/autoLogInspector.js";
+import { autoLogInspector } from "./modules/diagnostics/autoLogInspector.js";
 import errorCollector from "./modules/errorCollector.js";
 
 // health info
