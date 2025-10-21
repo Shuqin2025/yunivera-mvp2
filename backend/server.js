@@ -9,6 +9,9 @@ import compat from './routes/compat.js';
 
 // 新增：引入自定义 logger（仅用于 http 访问日志）
 import { logger } from './lib/logger.js';
+// 调试：阶段快照 & 自动日志巡检
+import snapshot from "./lib/debugSnapshot.js";
+import autoLogInspector from "./modules/diagnostics/autoLogInspector.js";
 
 // health info
 import pkg from './package.json' assert { type: 'json' };
@@ -27,6 +30,8 @@ const app = express();
 // --- Global CORS & preflight (allow any origin; cover OPTIONS) ---
 
 app.use(express.json({ limit: "1mb" }));
+// 自动日志巡检（轻量拦截，记录关键信息）
+app.use(autoLogInspector());
 
 // === 极简 CORS（允许任意跨域；覆盖预检） ===
 // 保证任何场景都不会被 OPTIONS 卡住
