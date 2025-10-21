@@ -24,9 +24,11 @@ import universal from "../adapters/universal.js";      // 默认导出：async f
 
 // ★ 新增：最小化路由日志
 import logger from "../lib/logger.js";
-// 调试：阶段快照
-import snapshot from "../modules/diagnostics/debugSnapshot.js";
+
+// 调试：阶段快照（只保留这一条）
 import snapshot from "../lib/debugSnapshot.js";
+
+// 自适应抓取 & 模板聚合 & 错误收集
 import { decideFetchStrategy, fetchHtml as fetchHtmlAdaptive } from "../modules/adaptiveCrawler.js";
 import { classify } from "../modules/templateCluster.js";
 import errorCollector from "../modules/errorCollector.js";
