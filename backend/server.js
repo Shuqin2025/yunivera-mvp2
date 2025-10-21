@@ -50,20 +50,31 @@ app.use(['/v1', '/v1/api'], compat);
 app.get(['/v1/health', '/health', '/api/health', '/'], (_req, res) => {
   res.json({ ok: true, service: "mvp2-backend", ts: Date.now() });
 });
-// === 全局错误兜底：务必放在所有路由之后 ===
+// 放在所有 app.use('/v1'...) 路由后面
 app.use((err, req, res, next) => {
   try {
-    errorCollector.capture(err, { req });   // 统一收敛错误
-  } catch (_) {}
-  const status = err.status || 500;
-  res.status(status).json({
-    ok: false,
-    error: err.name || "INTERNAL_ERROR",
-    code: err.code || "INTERNAL_ERROR",
-    message: err.message || "Internal Server Error",
-    ts: Date.now(),
-  });
+    // 可选：如果你已经有 errorCollector，可保留这行
+    // await errorCollector.capture(err, req);
+
+    const status = Number(err?.status) || 500;
+    res.status(status).json({
+      ok: false,
+      error: err?.name || 'INTERNAL_ERROR',
+      code: err?.code || 'INTERNAL_ERROR',
+      message: err?.message || 'Internal Server Error',
+      ts: Date.now(),
+    });
+  } catch {
+    res.status(500).json({
+      ok: false,
+      error: 'INTERNAL_ERROR',
+      code: 'INTERNAL_ERROR',
+      message: 'Internal Server Error',
+      ts: Date.now(),
+    });
+  }
 });
+
 
 // 兼容所有跨域场景（含预检）
 app.use(cors({ origin: "*", exposedHeaders: ["X-Lang", "X-Adapter"] }));
