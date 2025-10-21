@@ -12,6 +12,7 @@ import { logger } from './lib/logger.js';
 // 调试：阶段快照 & 自动日志巡检
 import snapshot from "./lib/debugSnapshot.js";
 import autoLogInspector from "./modules/diagnostics/autoLogInspector.js";
+import errorCollector from "./modules/errorCollector.js";
 
 // health info
 import pkg from './package.json' assert { type: 'json' };
@@ -49,10 +50,20 @@ app.use(['/v1', '/v1/api'], compat);
 app.get(['/v1/health', '/health', '/api/health', '/'], (_req, res) => {
   res.json({ ok: true, service: "mvp2-backend", ts: Date.now() });
 });
-
-
-
-
+// === 全局错误兜底：务必放在所有路由之后 ===
+app.use((err, req, res, next) => {
+  try {
+    errorCollector.capture(err, { req });   // 统一收敛错误
+  } catch (_) {}
+  const status = err.status || 500;
+  res.status(status).json({
+    ok: false,
+    error: err.name || "INTERNAL_ERROR",
+    code: err.code || "INTERNAL_ERROR",
+    message: err.message || "Internal Server Error",
+    ts: Date.now(),
+  });
+});
 
 // 兼容所有跨域场景（含预检）
 app.use(cors({ origin: "*", exposedHeaders: ["X-Lang", "X-Adapter"] }));
