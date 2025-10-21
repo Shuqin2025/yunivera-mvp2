@@ -27,6 +27,9 @@ import logger from "../lib/logger.js";
 // 调试：阶段快照
 import snapshot from "../modules/diagnostics/debugSnapshot.js";
 import snapshot from "../lib/debugSnapshot.js";
+import { decideFetchStrategy, fetchHtml as fetchHtmlAdaptive } from "../modules/adaptiveCrawler.js";
+import { classify } from "../modules/templateCluster.js";
+import errorCollector from "../modules/errorCollector.js";
 
 const router = Router();
 
@@ -480,14 +483,27 @@ router.all("/parse", async (req, res) => {
 
     /* -------------------- 路线 B：Cheerio（默认） -------------------- */
     if (!items.length) {
-      const fetched = await fetchHtml(url, wantDebug);
-      html = fetched.html;
-      debugFetch = fetched.debugFetch;
-      if (!html || fetched.status >= 400) {
-        const payload = { ok: false, url, status: fetched.status, error: "fetch failed" };
-        if (wantDebug) payload.debug = { ...(debugFetch || {}), step: "fetch" };
-        return res.status(200).json(payload);
-      }
+      
+const strat = decideFetchStrategy({ url, hintType });
+const fetched = await fetchHtmlAdaptive({ url, strategy: strat });
+const { html: htmlFromAdaptive, status, used } = fetched || {};
+html = htmlFromAdaptive;
+if (!html) {
+  throw Object.assign(new Error("crawlPages: fetchHtml is required"), {
+    code: "FETCH_EMPTY",
+    status,
+    used,
+  });
+}
+try {
+  const preClass = classify(url, html);
+  if (!hintType && preClass && preClass.adapterHint) {
+    hintType = preClass.platform;
+  }
+  try { await snapshot("pre-classify", { url, preClass }); } catch {}
+} catch {}
+
+    
 
       const ret = await runExtract(url, html, { limit, debug: wantDebug, hintType });
       items = ret.items || [];
@@ -571,6 +587,7 @@ router.all("/parse", async (req, res) => {
   } catch (err) {
     // ★ 新增：异常日志
     logger.error(`[route/catalog.parse] ERROR url=${req?.body?.url || req?.query?.url} -> ${err?.message || err}`);
+    try { await errorCollector.note(err, { route: "catalog.parse", url: req?.body?.url || req?.query?.url, hintType }); } catch {}
     try { await __snap("parse:error", { url: req?.body?.url || req?.query?.url, error: err?.message || String(err) }); } catch {}
     return res.status(200).json({ ok: false, error: String(err?.message || err) });
   }
