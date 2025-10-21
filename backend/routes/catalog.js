@@ -31,7 +31,7 @@ import snapshot from "../lib/debugSnapshot.js";
 // 自适应抓取 & 模板聚合 & 错误收集
 import { decideFetchStrategy, fetchHtml as fetchHtmlAdaptive } from "../modules/adaptiveCrawler.js";
 import { classify } from "../modules/templateCluster.js";
-import errorCollector from "../modules/errorCollector.js";
+import * as errorCollector from "../modules/errorCollector.js";
 
 const router = Router();
 
@@ -440,7 +440,7 @@ router.all("/parse", async (req, res) => {
     const wantDebug = ["1", "true", "yes", "on"].includes(String(rawDebug ?? "").toLowerCase());
 
     // ★ 解析前端 hint（t/type）
-    const hintType = (qp.t || qp.type || "").toString();
+    let hintType = (qp.t || qp.type || "").toString();
 
     // ★ 浏览器渲染开关
     const useBrowser = ["1", "true", "yes", "on"].includes(String(qp.useBrowser || qp.browser || "").toLowerCase());
