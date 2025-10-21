@@ -24,6 +24,8 @@ import universal from "../adapters/universal.js";      // 默认导出：async f
 
 // ★ 新增：最小化路由日志
 import logger from "../lib/logger.js";
+// 调试：阶段快照
+import snapshot from "../lib/debugSnapshot.js";
 
 const router = Router();
 
