@@ -1,28 +1,29 @@
 #!/usr/bin/env node
-// =/usr/bin/env node
+// === imports（robust, ESM-safe） ===
+import fs from 'node:fs';
 import path from 'node:path';
 import urlMod from 'node:url';
 
 import config from '../lib/config.js';
-import logger from '../lib/logger.js';
+import { logger } from '../lib/logger.js';
 import { withRetry } from '../lib/retryHandler.js';
 import { ProgressBar } from '../lib/progressBar.js';
 
-import detectStructure from '../lib/structureDetector.js';
-import parseWithTemplate from '../lib/templateParser.js';
+import * as Structure from '../lib/structureDetector.js';
+import * as Tpl from '../lib/templateParser.js';
 
-// 这三条改为「默认导入」——对应模块是 default export
-import fetchDetailsAndMerge from '../lib/modules/detailFetcher.js';
-import extractArtikelNr from '../lib/modules/artikelExtractor.js';
-import exportToExcel from '../lib/modules/excelExporter.js';
+// 这三个模块的导出在各分支里不完全一致：可能是命名导出，也可能是 default
+import * as Detail from '../lib/modules/detailFetcher.js';
+import * as Artikel from '../lib/modules/artikelExtractor.js';
+import * as Excel from '../lib/modules/excelExporter.js';
 
-const extractArtikelNr = Artikel.extractArtikelNr || Artikel.default;
+// 统一做兼容映射（只声明一次，避免重复声明）
+const detectStructure    = Structure.detectStructure    || Structure.default;
+const parseWithTemplate  = Tpl.parseWithTemplate        || Tpl.default;
+const fetchDetailsAndMerge = Detail.fetchDetailsAndMerge || Detail.default;
+const extractArtikelNr     = Artikel.extractArtikelNr    || Artikel.default;
+const exportToExcel        = Excel.exportToExcel         || Excel.default;
 
-import * as Exporter from '../lib/modules/excelExporter.js';
-const exportToExcel = Exporter.exportToExcel || Exporter.default;
-
-
-// 可选：调试快照
 let writeSnapshot = null;
 let makeTaskId   = null;
 try {
