@@ -1,18 +1,21 @@
 #!/usr/bin/env node
-import fs from 'node:fs';
+// =/usr/bin/env node
 import path from 'node:path';
 import urlMod from 'node:url';
 
 import config from '../lib/config.js';
-import { logger } from '../lib/logger.js';
+import logger from '../lib/logger.js';
 import { withRetry } from '../lib/retryHandler.js';
 import { ProgressBar } from '../lib/progressBar.js';
 
-import { detectStructure } from '../lib/structureDetector.js';
-import { parseWithTemplate } from '../lib/templateParser.js';
-import { fetchDetailsAndMerge } from '../lib/modules/detailFetcher.js';
-// 兼容「命名导出」与「默认导出」
-import * as Artikel from '../lib/modules/artikelExtractor.js';
+import detectStructure from '../lib/structureDetector.js';
+import parseWithTemplate from '../lib/templateParser.js';
+
+// 这三条改为「默认导入」——对应模块是 default export
+import fetchDetailsAndMerge from '../lib/modules/detailFetcher.js';
+import extractArtikelNr from '../lib/modules/artikelExtractor.js';
+import exportToExcel from '../lib/modules/excelExporter.js';
+
 const extractArtikelNr = Artikel.extractArtikelNr || Artikel.default;
 
 import * as Exporter from '../lib/modules/excelExporter.js';
