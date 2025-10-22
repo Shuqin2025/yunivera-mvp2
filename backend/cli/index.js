@@ -11,8 +11,13 @@ import { ProgressBar } from '../lib/progressBar.js';
 import { detectStructure } from '../lib/structureDetector.js';
 import { parseWithTemplate } from '../lib/templateParser.js';
 import { fetchDetailsAndMerge } from '../lib/modules/detailFetcher.js';
-import { extractArtikelNr } from '../lib/modules/artikelExtractor.js';
-import { exportToExcel } from '../lib/modules/excelExporter.js';
+// 兼容「命名导出」与「默认导出」
+import * as Artikel from '../lib/modules/artikelExtractor.js';
+const extractArtikelNr = Artikel.extractArtikelNr || Artikel.default;
+
+import * as Exporter from '../lib/modules/excelExporter.js';
+const exportToExcel = Exporter.exportToExcel || Exporter.default;
+
 
 // 可选：调试快照
 let writeSnapshot = null;
