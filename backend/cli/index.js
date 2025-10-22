@@ -14,26 +14,24 @@ import { fetchDetailsAndMerge } from '../lib/modules/detailFetcher.js';
 import { extractArtikelNr } from '../lib/modules/artikelExtractor.js';
 import { exportToExcel } from '../lib/modules/excelExporter.js';
 
-// 兼容性的快照导入（如果模块里是 writeSnapshot/makeTaskId，就包装成 debugSnapshot）
+// 可选：调试快照
 let writeSnapshot = null;
 let makeTaskId   = null;
 try {
   const m = await import('../lib/debugSnapshot.js');
   writeSnapshot = m.writeSnapshot || null;
   makeTaskId    = m.makeTaskId    || null;
-} catch {
-  // 可选模块，不存在就忽略
-}
+} catch {}
 
 // ------------------------- CLI 参数 -------------------------
 const argv = process.argv.slice(2);
 const urls = [];
-let limit         = 50;
-let outName       = (config.export?.defaultXlsxName) || 'catalog.xlsx';
-let outDir        = (config.export?.outDir)          || 'output';
+let limit          = 50;
+let outName        = (config.export?.defaultXlsxName) || 'catalog.xlsx';
+let outDir         = (config.export?.outDir)          || 'output';
 let enableSnapshot = false;
-let concurrency   = (config.concurrency?.parse)      || 3;
-let taskId        = null;
+let concurrency    = (config.concurrency?.parse)      || 3;
+let taskId         = null;
 
 function printHelp() {
   const msg = `
@@ -55,7 +53,6 @@ Yunivera CLI - 输入 URL 抓取目录并导出 Excel
 示例:
   npm run cli -- \\
     --url "https://snocks.com/collections/socken" \\
-    --url "https://themes.woocommerce.com/storefront/shop/" \\
     -l 60 -o result.xlsx --outdir ./output -c 4 --snapshot
 `.trim();
   console.log(msg);
@@ -80,7 +77,7 @@ if (urls.length === 0) {
 
 if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
 
-// 快照包装（可关可开、可兼容）
+// 快照封装
 if (!taskId) {
   if (makeTaskId) {
     taskId = makeTaskId('yunivera');
@@ -140,7 +137,7 @@ async function runOne(url) {
     } : { title:0, price:0, img:0, sku:0 },
   });
 
-  // 3) 详情页补抓（仅当必要时）
+  // 3) 详情页补抓（必要时）
   const needDetail = rows.some(r => (!r.sku && !r.ean) || (!r.price && !r.img));
   if (needDetail) {
     logger.info(`触发详情页补抓…（${rows.length} 记录）`);
@@ -166,14 +163,14 @@ async function runOne(url) {
     };
   });
 
-  // 5) 导出 Excel
-  const host    = (() => { try { return (new urlMod.URL(url)).hostname; } catch { return 'unknown-host'; } })();
-  const safeHost= host.replace(/[^\w.-]/g, '_');
-  const outPath = path.join(outDir, `${safeHost}__${outName}`);
-  await exportToExcel(rows, { file: outPath });
+  // 5) 导出 Excel（写到固定 outDir/outName）
+  const host     = (() => { try { return (new urlMod.URL(url)).hostname; } catch { return 'unknown-host'; } })();
+  const safeHost = host.replace(/[^\w.-]/g, '_');
+  const outPath  = path.join(outDir, `${safeHost}__${outName}`);
+  const saved    = await exportToExcel(rows, { file: outPath });
+  logger.info(`✅ 完成: ${url} → ${saved}（共 ${rows.length} 条）`);
 
-  logger.info(`✅ 完成: ${url} → ${outPath}（共 ${rows.length} 条）`);
-  return { url, count: rows.length, out: outPath };
+  return { url, count: rows.length, out: saved, ok: true };
 }
 
 // ------------------------- 简易并发任务池 -------------------------
@@ -201,6 +198,54 @@ async function runPool(items, worker, poolSize) {
   });
 }
 
+// ------------------------- 邮件汇总（可选） -------------------------
+async function sendSummaryMail({ taskId, results }) {
+  const to = process.env.REPORT_TO || 'shuqinamberg@proton.me';
+  const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS } = process.env;
+  if (!SMTP_HOST || !SMTP_PORT || !SMTP_USER || !SMTP_PASS) {
+    logger.warn('邮件未发送：缺少 SMTP_* 环境变量');
+    return;
+  }
+
+  let nodemailer;
+  try {
+    nodemailer = (await import('nodemailer')).default;
+  } catch {
+    logger.warn('邮件未发送：未安装 nodemailer（已安全跳过）');
+    return;
+  }
+
+  const okList   = results.filter(r => r.ok).map(r => r.value);
+  const failList = results.filter(r => !r.ok);
+
+  const textLines = [
+    `Task: ${taskId}`,
+    `Time: ${new Date().toISOString()}`,
+    ``,
+    `✅ 成功 ${okList.length} 个：`,
+    ...okList.map(r => `- ${r.url}  →  ${r.out}  (${r.count} 条)`),
+    ``,
+    `❌ 失败 ${failList.length} 个：`,
+    ...failList.map(r => `- ${r.error?.url || ''}  ${r.error?.message || r.error || ''}`),
+  ];
+
+  const transporter = nodemailer.createTransport({
+    host: SMTP_HOST,
+    port: Number(SMTP_PORT),
+    secure: Number(SMTP_PORT) === 465,
+    auth: { user: SMTP_USER, pass: SMTP_PASS },
+  });
+
+  await transporter.sendMail({
+    from: `"Yunivera Bot" <${SMTP_USER}>`,
+    to,
+    subject: `[Yunivera] 批次完成 - OK ${okList.length} / FAIL ${failList.length} - ${taskId}`,
+    text: textLines.join('\n'),
+  });
+
+  logger.info(`📧 已发送汇总邮件给 ${to}`);
+}
+
 // ------------------------- 批处理与汇总 -------------------------
 (async () => {
   logger.info(`任务ID: ${taskId}`);
@@ -216,7 +261,7 @@ async function runPool(items, worker, poolSize) {
       } catch (err) {
         logger.error(`❌ 失败: ${u} → ${err?.message || err}`);
         bar.tick();
-        return { url: u, ok: false, error: err?.message || String(err) };
+        return { ok: false, error: { url: u, message: err?.message || String(err) } };
       }
     },
     concurrency
@@ -225,7 +270,14 @@ async function runPool(items, worker, poolSize) {
   const ok   = results.filter(r => r.ok).length;
   const fail = results.length - ok;
   logger.info(`批次完成：成功 ${ok}，失败 ${fail}`);
-  if (fail) logger.warn('失败条目：' + results.filter(r => !r.ok).map(r => r.url).join(', '));
+  if (fail) logger.warn('失败条目：' + results.filter(r => !r.ok).map(r => r.error.url).join(', '));
+
+  // 可选：发送汇总邮件
+  try {
+    await sendSummaryMail({ taskId, results });
+  } catch (e) {
+    logger.warn(`发送汇总邮件失败：${e?.message || e}`);
+  }
 
   process.exit(0);
 })();
