@@ -18,11 +18,11 @@ import * as Artikel from '../lib/modules/artikelExtractor.js';
 import * as Excel from '../lib/modules/excelExporter.js';
 
 // 统一做兼容映射（只声明一次，避免重复声明）
-const detectStructure    = Structure.detectStructure    || Structure.default;
-const parseWithTemplate  = Tpl.parseWithTemplate        || Tpl.default;
-const fetchDetailsAndMerge = Detail.fetchDetailsAndMerge || Detail.default;
-const extractArtikelNr     = Artikel.extractArtikelNr    || Artikel.default;
-const exportToExcel        = Excel.exportToExcel         || Excel.default;
+const detectStructure      = Structure.detectStructure      || Structure.default;
+const parseWithTemplate    = Tpl.parseWithTemplate          || Tpl.default;
+const fetchDetailsAndMerge = Detail.fetchDetailsAndMerge     || Detail.default;
+const extractArtikelNr     = Artikel.extractArtikelNr        || Artikel.default;
+const exportToExcel        = Excel.exportToExcel             || Excel.default;
 
 let writeSnapshot = null;
 let makeTaskId   = null;
@@ -60,8 +60,8 @@ Yunivera CLI - 输入 URL 抓取目录并导出 Excel
   -h, --help                显示帮助
 
 示例:
-  npm run cli -- \\
-    --url "https://snocks.com/collections/socken" \\
+  npm run cli -- \
+    --url "https://snocks.com/collections/socken" \
     -l 60 -o result.xlsx --outdir ./output -c 4 --snapshot
 `.trim();
   console.log(msg);
@@ -79,29 +79,21 @@ for (let i = 0; i < argv.length; i++) {
   if (a === '--help' || a === '-h')         { printHelp(); process.exit(0); }
 }
 
-if (urls.length === 0) {
-  printHelp();
-  process.exit(0);
-}
-
+if (urls.length === 0) { printHelp(); process.exit(0); }
 if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
 
 // 快照封装
 if (!taskId) {
-  if (makeTaskId) {
-    taskId = makeTaskId('yunivera');
-  } else {
+  if (makeTaskId) taskId = makeTaskId('yunivera');
+  else {
     const t = new Date();
     taskId = `yunivera_${t.getFullYear()}${String(t.getMonth()+1).padStart(2,'0')}${String(t.getDate()).padStart(2,'0')}${String(t.getHours()).padStart(2,'0')}${String(t.getMinutes()).padStart(2,'0')}${String(t.getSeconds()).padStart(2,'0')}`;
   }
 }
 async function debugSnapshot(stage, payload, append = false) {
   if (!enableSnapshot || !writeSnapshot) return;
-  try {
-    await writeSnapshot(taskId, stage, payload, append);
-  } catch (e) {
-    logger.warn(`snapshot(${stage}) 失败: ${e?.message || e}`);
-  }
+  try { await writeSnapshot(taskId, stage, payload, append); }
+  catch (e) { logger.warn(`snapshot(${stage}) 失败: ${e?.message || e}`); }
 }
 
 // ------------------------- 核心流程 -------------------------
@@ -155,7 +147,7 @@ async function runOne(url) {
     await debugSnapshot('after-details', { url, type, count: rows.length, sample: rows.slice(0, 3) }, true);
   }
 
-  // 4) 统一做 Artikel-Nr/EAN/SKU 智能提取（只填补空位）
+  // 4) 统一做 ID 智能提取（只填补空位）
   rows = rows.map(r => {
     const id = extractArtikelNr({
       title:  r.title || '',
@@ -172,7 +164,7 @@ async function runOne(url) {
     };
   });
 
-  // 5) 导出 Excel（写到固定 outDir/outName）
+  // 5) 导出 Excel
   const host     = (() => { try { return (new urlMod.URL(url)).hostname; } catch { return 'unknown-host'; } })();
   const safeHost = host.replace(/[^\w.-]/g, '_');
   const outPath  = path.join(outDir, `${safeHost}__${outName}`);
@@ -217,12 +209,8 @@ async function sendSummaryMail({ taskId, results }) {
   }
 
   let nodemailer;
-  try {
-    nodemailer = (await import('nodemailer')).default;
-  } catch {
-    logger.warn('邮件未发送：未安装 nodemailer（已安全跳过）');
-    return;
-  }
+  try { nodemailer = (await import('nodemailer')).default; }
+  catch { logger.warn('邮件未发送：未安装 nodemailer（已安全跳过）'); return; }
 
   const okList   = results.filter(r => r.ok).map(r => r.value);
   const failList = results.filter(r => !r.ok);
@@ -281,12 +269,8 @@ async function sendSummaryMail({ taskId, results }) {
   logger.info(`批次完成：成功 ${ok}，失败 ${fail}`);
   if (fail) logger.warn('失败条目：' + results.filter(r => !r.ok).map(r => r.error.url).join(', '));
 
-  // 可选：发送汇总邮件
-  try {
-    await sendSummaryMail({ taskId, results });
-  } catch (e) {
-    logger.warn(`发送汇总邮件失败：${e?.message || e}`);
-  }
+  try { await sendSummaryMail({ taskId, results }); }
+  catch (e) { logger.warn(`发送汇总邮件失败：${e?.message || e}`); }
 
   process.exit(0);
 })();
