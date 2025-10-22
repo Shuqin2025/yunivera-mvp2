@@ -7,19 +7,19 @@
 //   - shouldFetch(items, ...)    // 判断是否值得触发补抓
 //   - normalizeUrl(base, href)   // 统一 URL 规范化（绝对化）
 //
-// 依赖：backend/lib/http.js；modules/artikelExtractor.js
+// 依赖：backend/lib/http.js；modules/artikelExtractor.js（仅用其提取方法）
 
-const { load } = require('cheerio');
-const pLimit = require('p-limit');
-const http = require('../http');
-const artikel = require('./artikelExtractor');
+import { load } from 'cheerio';
+import pLimit from 'p-limit';
+import http from '../http.js';
+import * as artikel from './artikelExtractor.js';
 
 // ---------- 小工具 ----------
 const txt = (s) => (s || '').replace(/\s+/g, ' ').trim();
 const first = (...vals) => vals.find(v => !!txt(v));
 
 /** 将相对/脏 URL 统一绝对化、清洗 query/空格等 */
-function normalizeUrl(base, href) {
+export function normalizeUrl(base, href) {
   const raw = txt(href);
   if (!raw) return '';
 
@@ -34,7 +34,8 @@ function normalizeUrl(base, href) {
   } catch {
     // 忽略解析失败
   }
-  return raw; // 实在不行原样返回，后续 fetchOne 会兜底
+  // 实在不行原样返回，后续 fetchOne 会兜底
+  return raw;
 }
 
 function pickTitle($) {
@@ -102,7 +103,7 @@ function pickDescription($) {
 function heuristicsSku($) {
   // 1) 结构化 & 标签
   const metaSku = $('meta[itemprop="sku"]').attr('content') || $('meta[name="sku"]').attr('content');
-  if (metaSku && artikel.extract(metaSku)) return txt(metaSku);
+  if (metaSku && artikel.extract?.(metaSku)) return txt(metaSku);
 
   const labelLike = [
     '*:contains("Artikel-Nr")',
@@ -116,20 +117,20 @@ function heuristicsSku($) {
     const node = $(sel).first();
     if (!node.length) continue;
     const t = txt(node.text());
-    const fromLabel = artikel.extract(t);
+    const fromLabel = artikel.extract?.(t);
     if (fromLabel) return fromLabel;
   }
 
   // 2) 页面全文兜底
   const page = txt($('body').text());
-  const fromPage = artikel.extract(page);
+  const fromPage = artikel.extract?.(page);
   if (fromPage) return fromPage;
 
   return '';
 }
 
 // ---------- 策略：是否值得触发补抓 ----------
-function shouldFetch(items, { key = 'sku', threshold = 0.5 } = {}) {
+export function shouldFetch(items, { key = 'sku', threshold = 0.5 } = {}) {
   if (!Array.isArray(items) || !items.length) return false;
   const missing = items.filter(x => !x || !txt(x[key])).length;
   return missing / items.length >= threshold;
@@ -152,11 +153,14 @@ async function fetchOne(url, { timeout = 15000 } = {}) {
 }
 
 // ---------- 批量：只返回详情字段，不合并 ----------
-async function fetchDetails(links = [], {
-  base,            // 可传入目录页 URL，便于把相对链接变绝对
-  concurrency = 6,
-  timeout = 15000
-} = {}) {
+export async function fetchDetails(
+  links = [],
+  {
+    base,            // 可传入目录页 URL，便于把相对链接变绝对
+    concurrency = 6,
+    timeout = 15000
+  } = {}
+) {
   if (!Array.isArray(links) || !links.length) return [];
 
   // 先统一规范化 URL；若第一条是绝对链接，则优先用它的 origin 当 base
@@ -180,12 +184,15 @@ async function fetchDetails(links = [], {
 }
 
 // ---------- 兼容：传 items 进来，原地合并（用于老调用方） ----------
-async function fetch(items = [], {
-  base,                // 传目录页 URL
-  concurrency = 6,
-  timeout = 15000,
-  merge = (item, extra) => Object.assign(item, extra),
-} = {}) {
+export async function fetch(
+  items = [],
+  {
+    base,                // 传目录页 URL
+    concurrency = 6,
+    timeout = 15000,
+    merge = (item, extra) => Object.assign(item, extra),
+  } = {}
+) {
   if (!Array.isArray(items) || !items.length) return items;
 
   const links = items.map(x => x.link || x.url).filter(Boolean);
@@ -211,4 +218,5 @@ async function fetch(items = [], {
   return items;
 }
 
-module.exports = { fetch, fetchDetails, shouldFetch, normalizeUrl };
+// 兼容别名：一些旧代码可能使用这个名字
+export const fetchDetailsAndMerge = fetch;
