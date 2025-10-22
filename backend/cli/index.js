@@ -16,22 +16,24 @@ import { exportToExcel } from '../lib/modules/excelExporter.js';
 
 // 兼容性的快照导入（如果模块里是 writeSnapshot/makeTaskId，就包装成 debugSnapshot）
 let writeSnapshot = null;
-let makeTaskId = null;
+let makeTaskId   = null;
 try {
-  const m = await import('../lib/modules/debugSnapshot.js');
+  const m = await import('../lib/debugSnapshot.js');
   writeSnapshot = m.writeSnapshot || null;
-  makeTaskId   = m.makeTaskId   || null;
-} catch { /* 可选模块，忽略 */ }
+  makeTaskId    = m.makeTaskId    || null;
+} catch {
+  // 可选模块，不存在就忽略
+}
 
 // ------------------------- CLI 参数 -------------------------
 const argv = process.argv.slice(2);
 const urls = [];
-let limit        = 50;
-let outName      = config.export?.defaultXlsxName || 'catalog.xlsx';
-let outDir       = config.export?.outDir || 'output';
+let limit         = 50;
+let outName       = (config.export?.defaultXlsxName) || 'catalog.xlsx';
+let outDir        = (config.export?.outDir)          || 'output';
 let enableSnapshot = false;
-let concurrency  = config.concurrency?.parse || 3;
-let taskId       = null;
+let concurrency   = (config.concurrency?.parse)      || 3;
+let taskId        = null;
 
 function printHelp() {
   const msg = `
@@ -40,7 +42,7 @@ Yunivera CLI - 输入 URL 抓取目录并导出 Excel
 用法:
   npm run cli -- [参数...]
 
-必选/常用参数:
+常用参数:
   -u, --url <URL>           目标分类页，可多次指定
   -l, --limit <N>           抓取条数上限（默认 50）
   -o, --xlsx <name.xlsx>    导出文件名（默认 ${outName}）
@@ -51,9 +53,9 @@ Yunivera CLI - 输入 URL 抓取目录并导出 Excel
   -h, --help                显示帮助
 
 示例:
-  npm run cli -- \
-    --url "https://snocks.com/collections/socken" \
-    --url "https://themes.woocommerce.com/storefront/shop/" \
+  npm run cli -- \\
+    --url "https://snocks.com/collections/socken" \\
+    --url "https://themes.woocommerce.com/storefront/shop/" \\
     -l 60 -o result.xlsx --outdir ./output -c 4 --snapshot
 `.trim();
   console.log(msg);
@@ -61,14 +63,14 @@ Yunivera CLI - 输入 URL 抓取目录并导出 Excel
 
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
-  if (a === '--url' || a === '-u')           { urls.push(argv[++i]); continue; }
-  if (a === '--limit' || a === '-l')         { limit = parseInt(argv[++i] || '50', 10); continue; }
-  if (a === '--xlsx' || a === '-o')          { outName = argv[++i] || outName; continue; }
-  if (a === '--outdir')                      { outDir = argv[++i] || outDir; continue; }
-  if (a === '--snapshot' || a === '-s')      { enableSnapshot = true; continue; }
-  if (a === '--concurrency' || a === '-c')   { concurrency = Math.max(1, parseInt(argv[++i] || `${concurrency}`, 10)); continue; }
-  if (a === '--task')                        { taskId = argv[++i] || null; continue; }
-  if (a === '--help' || a === '-h')          { printHelp(); process.exit(0); }
+  if (a === '--url' || a === '-u')          { urls.push(argv[++i]); continue; }
+  if (a === '--limit' || a === '-l')        { limit = parseInt(argv[++i] || '50', 10); continue; }
+  if (a === '--xlsx' || a === '-o')         { outName = argv[++i] || outName; continue; }
+  if (a === '--outdir')                     { outDir = argv[++i] || outDir; continue; }
+  if (a === '--snapshot' || a === '-s')     { enableSnapshot = true; continue; }
+  if (a === '--concurrency' || a === '-c')  { concurrency = Math.max(1, parseInt(argv[++i] || `${concurrency}`, 10)); continue; }
+  if (a === '--task')                       { taskId = argv[++i] || null; continue; }
+  if (a === '--help' || a === '-h')         { printHelp(); process.exit(0); }
 }
 
 if (urls.length === 0) {
@@ -104,10 +106,10 @@ async function runOne(url) {
   const det = await withRetry(
     () => detectStructure(url),
     {
-      tries:   config.request?.retry ?? 3,
-      delayMs: config.request?.retryDelayMs ?? 800,
-      jitterMs: config.request?.retryJitterMs ?? 400,
-      onRetry: ({ attempt, backoff, err }) =>
+      tries:    config.request?.retry        ?? 3,
+      delayMs:  config.request?.retryDelayMs ?? 800,
+      jitterMs: config.request?.retryJitterMs?? 400,
+      onRetry:  ({ attempt, backoff, err }) =>
         logger.warn(`detect 重试 #${attempt} in ${backoff}ms: ${err?.message || err}`),
     }
   );
@@ -118,10 +120,10 @@ async function runOne(url) {
   let rows = await withRetry(
     () => parseWithTemplate(url, { limit }),
     {
-      tries:   config.request?.retry ?? 3,
-      delayMs: config.request?.retryDelayMs ?? 800,
-      jitterMs: config.request?.retryJitterMs ?? 400,
-      onRetry: ({ attempt, backoff }) =>
+      tries:    config.request?.retry        ?? 3,
+      delayMs:  config.request?.retryDelayMs ?? 800,
+      jitterMs: config.request?.retryJitterMs?? 400,
+      onRetry:  ({ attempt, backoff }) =>
         logger.warn(`parse 重试 #${attempt} in ${backoff}ms`),
     }
   );
@@ -150,11 +152,11 @@ async function runOne(url) {
   // 4) 统一做 Artikel-Nr/EAN/SKU 智能提取（只填补空位）
   rows = rows.map(r => {
     const id = extractArtikelNr({
-      title: r.title || '',
-      desc:  r.desc  || '',
+      title:  r.title || '',
+      desc:   r.desc  || '',
       rawText: '',
-      sku:   r.sku   || '',
-      ean:   r.ean   || '',
+      sku:    r.sku   || '',
+      ean:    r.ean   || '',
     });
     return {
       ...r,
@@ -165,8 +167,8 @@ async function runOne(url) {
   });
 
   // 5) 导出 Excel
-  const host = (() => { try { return (new urlMod.URL(url)).hostname; } catch { return 'unknown-host'; } })();
-  const safeHost = host.replace(/[^\w.-]/g, '_');
+  const host    = (() => { try { return (new urlMod.URL(url)).hostname; } catch { return 'unknown-host'; } })();
+  const safeHost= host.replace(/[^\w.-]/g, '_');
   const outPath = path.join(outDir, `${safeHost}__${outName}`);
   await exportToExcel(rows, { file: outPath });
 
@@ -174,7 +176,7 @@ async function runOne(url) {
   return { url, count: rows.length, out: outPath };
 }
 
-// ------------------------- 简易并发任务池（无需依赖） -------------------------
+// ------------------------- 简易并发任务池 -------------------------
 async function runPool(items, worker, poolSize) {
   const results = new Array(items.length);
   let next = 0;
@@ -186,7 +188,7 @@ async function runPool(items, worker, poolSize) {
         const i = next++;
         active++;
         Promise.resolve(worker(items[i], i))
-          .then((r) => { results[i] = { ok: true, value: r }; })
+          .then((r) => { results[i] = { ok: true,  value: r }; })
           .catch((e) => { results[i] = { ok: false, error: e }; })
           .finally(() => {
             active--;
