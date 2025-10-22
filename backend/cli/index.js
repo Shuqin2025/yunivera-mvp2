@@ -20,18 +20,18 @@ let makeTaskId = null;
 try {
   const m = await import('../lib/modules/debugSnapshot.js');
   writeSnapshot = m.writeSnapshot || null;
-  makeTaskId = m.makeTaskId || null;
+  makeTaskId   = m.makeTaskId   || null;
 } catch { /* 可选模块，忽略 */ }
 
 // ------------------------- CLI 参数 -------------------------
 const argv = process.argv.slice(2);
 const urls = [];
-let limit = 50;
-let outName = config.export?.defaultXlsxName || 'catalog.xlsx';
-let outDir = config.export?.outDir || 'output';
+let limit        = 50;
+let outName      = config.export?.defaultXlsxName || 'catalog.xlsx';
+let outDir       = config.export?.outDir || 'output';
 let enableSnapshot = false;
-let concurrency = config.concurrency?.parse || 3;
-let taskId = null;
+let concurrency  = config.concurrency?.parse || 3;
+let taskId       = null;
 
 function printHelp() {
   const msg = `
@@ -51,9 +51,9 @@ Yunivera CLI - 输入 URL 抓取目录并导出 Excel
   -h, --help                显示帮助
 
 示例:
-  npm run cli -- \\
-    --url "https://snocks.com/collections/socken" \\
-    --url "https://themes.woocommerce.com/storefront/shop/" \\
+  npm run cli -- \
+    --url "https://snocks.com/collections/socken" \
+    --url "https://themes.woocommerce.com/storefront/shop/" \
     -l 60 -o result.xlsx --outdir ./output -c 4 --snapshot
 `.trim();
   console.log(msg);
@@ -61,14 +61,14 @@ Yunivera CLI - 输入 URL 抓取目录并导出 Excel
 
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
-  if (a === '--url' || a === '-u') { urls.push(argv[++i]); continue; }
-  if (a === '--limit' || a === '-l') { limit = parseInt(argv[++i] || '50', 10); continue; }
-  if (a === '--xlsx' || a === '-o') { outName = argv[++i] || outName; continue; }
-  if (a === '--outdir') { outDir = argv[++i] || outDir; continue; }
-  if (a === '--snapshot' || a === '-s') { enableSnapshot = true; continue; }
-  if (a === '--concurrency' || a === '-c') { concurrency = Math.max(1, parseInt(argv[++i] || `${concurrency}`, 10)); continue; }
-  if (a === '--task') { taskId = argv[++i] || null; continue; }
-  if (a === '--help' || a === '-h') { printHelp(); process.exit(0); }
+  if (a === '--url' || a === '-u')           { urls.push(argv[++i]); continue; }
+  if (a === '--limit' || a === '-l')         { limit = parseInt(argv[++i] || '50', 10); continue; }
+  if (a === '--xlsx' || a === '-o')          { outName = argv[++i] || outName; continue; }
+  if (a === '--outdir')                      { outDir = argv[++i] || outDir; continue; }
+  if (a === '--snapshot' || a === '-s')      { enableSnapshot = true; continue; }
+  if (a === '--concurrency' || a === '-c')   { concurrency = Math.max(1, parseInt(argv[++i] || `${concurrency}`, 10)); continue; }
+  if (a === '--task')                        { taskId = argv[++i] || null; continue; }
+  if (a === '--help' || a === '-h')          { printHelp(); process.exit(0); }
 }
 
 if (urls.length === 0) {
@@ -104,7 +104,7 @@ async function runOne(url) {
   const det = await withRetry(
     () => detectStructure(url),
     {
-      tries: config.request?.retry ?? 3,
+      tries:   config.request?.retry ?? 3,
       delayMs: config.request?.retryDelayMs ?? 800,
       jitterMs: config.request?.retryJitterMs ?? 400,
       onRetry: ({ attempt, backoff, err }) =>
@@ -118,7 +118,7 @@ async function runOne(url) {
   let rows = await withRetry(
     () => parseWithTemplate(url, { limit }),
     {
-      tries: config.request?.retry ?? 3,
+      tries:   config.request?.retry ?? 3,
       delayMs: config.request?.retryDelayMs ?? 800,
       jitterMs: config.request?.retryJitterMs ?? 400,
       onRetry: ({ attempt, backoff }) =>
@@ -151,15 +151,15 @@ async function runOne(url) {
   rows = rows.map(r => {
     const id = extractArtikelNr({
       title: r.title || '',
-      desc: r.desc || '',
+      desc:  r.desc  || '',
       rawText: '',
-      sku: r.sku || '',
-      ean: r.ean || '',
+      sku:   r.sku   || '',
+      ean:   r.ean   || '',
     });
     return {
       ...r,
-      sku: r.sku || id.sku || '',
-      ean: r.ean || id.ean || '',
+      sku:   r.sku   || id.sku   || '',
+      ean:   r.ean   || id.ean   || '',
       model: r.model || id.model || '',
     };
   });
@@ -220,7 +220,7 @@ async function runPool(items, worker, poolSize) {
     concurrency
   );
 
-  const ok = results.filter(r => r.ok).length;
+  const ok   = results.filter(r => r.ok).length;
   const fail = results.length - ok;
   logger.info(`批次完成：成功 ${ok}，失败 ${fail}`);
   if (fail) logger.warn('失败条目：' + results.filter(r => !r.ok).map(r => r.url).join(', '));
