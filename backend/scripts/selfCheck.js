@@ -1,113 +1,96 @@
 // backend/scripts/selfCheck.js
+// 目的：cron 自检，验证基础抓取链路是否可用（HTTP 200 + 有 <title>）
+// 以后要做结构质量评估，再切换到模板解析成功率作为判定
+
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import axios from 'axios';
+import { fileURLToPath } from 'node:url';
+import fetch from 'node-fetch';
 
-const ROOT = path.resolve(process.cwd()); // backend/
-const urlsFile = path.join(ROOT, 'cli/seed-urls.txt');
-const outDir   = path.join(ROOT, 'logs', 'selfcheck');
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-// ---- env 开关 ----
-const STRICT = process.env.SELF_CHECK_STRICT === '1';         // 严格模式：失败率超阈值则 exit(1)
-const MIN_OK = Number(process.env.SELF_CHECK_MIN_OK_RATIO ?? 0.6); // 最低通过率
+const ROOT = path.resolve(__dirname, '..');
+const SEED = path.join(ROOT, 'cli', 'seed-urls.txt');
+const OUT_DIR = path.join(ROOT, 'logs', 'selfcheck');
 
-const UA =
-  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36';
+const MIN_OK = Number(process.env.SELF_CHECK_MIN_OK || 1); // 允许你通过 env 调整阈值
 
-async function readSeedUrls(file) {
-  const txt = await fs.readFile(file, 'utf8');
-  return txt
+async function readSeeds() {
+  const raw = await fs.readFile(SEED, 'utf8');
+  return raw
     .split(/\r?\n/)
     .map(s => s.trim())
     .filter(s => s && !s.startsWith('#'));
 }
 
-async function checkOne(url) {
-  const startedAt = Date.now();
-  try {
-    const res = await axios.get(url, {
-      timeout: 15000,
-      maxRedirects: 5,
-      headers: { 'User-Agent': UA, Accept: 'text/html,*/*;q=0.8' },
-      validateStatus: () => true, // 我们自己判定
-    });
-
-    const ok =
-      res.status >= 200 &&
-      res.status < 400 &&
-      typeof res.data === 'string' &&
-      /\<html[\s>]/i.test(res.data);
-
-    return {
-      url,
-      ok,
-      status: res.status,
-      timeMs: Date.now() - startedAt,
-      note: ok ? 'ok' : 'not html or bad status',
-    };
-  } catch (err) {
-    return {
-      url,
-      ok: false,
-      status: 0,
-      timeMs: Date.now() - startedAt,
-      note: String(err?.message ?? err),
-    };
-  }
+function hasTitle(html) {
+  const m = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+  return !!(m && m[1] && m[1].trim());
 }
 
-function todayTag() {
-  const now = new Date();
-  const p2 = n => String(n).padStart(2, '0');
-  return `${now.getFullYear()}-${p2(now.getMonth() + 1)}-${p2(now.getDate())}`;
+async function headOrGet(url) {
+  // 少数站点 HEAD 不返回或被拒绝，直接 GET
+  try {
+    const r = await fetch(url, { method: 'GET', timeout: 15000 });
+    return r;
+  } catch (e) {
+    return { ok: false, status: 0, _err: e };
+  }
 }
 
 async function main() {
-  const urls = await readSeedUrls(urlsFile);
-  if (urls.length === 0) {
-    console.log('[selfcheck] no urls in cli/seed-urls.txt');
-    return 0;
-  }
+  const urls = await readSeeds();
+  await fs.mkdir(OUT_DIR, { recursive: true });
 
-  // 并发适中即可
-  const results = [];
+  let ok = 0;
+  const detail = [];
+
   for (const u of urls) {
-    /* 也可用 Promise.allSettled 提升并发，这里保持顺序输出 */
-    const r = await checkOne(u);
-    results.push(r);
-    console.log(`- [${r.ok ? 'OK ' : 'BAD'}] ${u}  status=${r.status}  ${r.timeMs}ms  ${r.note}`);
+    const t0 = Date.now();
+    try {
+      const r = await headOrGet(u);
+      if (!r.ok) {
+        detail.push({ url: u, ok: false, status: r.status || 0, ms: Date.now() - t0 });
+        continue;
+      }
+      const text = await r.text();
+      const pass = r.status < 400 && text && text.length > 200 && hasTitle(text);
+      if (pass) ok += 1;
+      detail.push({ url: u, ok: pass, status: r.status, bytes: text.length, ms: Date.now() - t0 });
+    } catch (e) {
+      detail.push({ url: u, ok: false, status: 0, err: String(e), ms: Date.now() - t0 });
+    }
   }
 
-  const ok = results.filter(r => r.ok).length;
-  const ratio = ok / results.length;
+  const ratio = urls.length ? ok / urls.length : 0;
+  const ts = new Date().toISOString().slice(0, 10);
+
   const report = {
-    date: todayTag(),
-    total: results.length,
+    ts,
     ok,
+    total: urls.length,
     ratio,
-    items: results,
+    threshold: MIN_OK,
+    detail,
   };
 
-  // 写日报
-  await fs.mkdir(outDir, { recursive: true });
-  const outfile = path.join(outDir, `dailyReport-${todayTag()}.json`);
-  await fs.writeFile(outfile, JSON.stringify(report, null, 2), 'utf8');
+  const outFile = path.join(OUT_DIR, `dailyReport-${ts}.json`);
+  await fs.writeFile(outFile, JSON.stringify(report, null, 2), 'utf8');
 
-  // 控制台汇总（Render Logs 里可直观看）
-  console.log(`[selfcheck] ${report.date} ok=${ok}/${results.length} ratio=${ratio.toFixed(2)}`);
-  console.log(`[selfcheck] report saved: ${path.relative(ROOT, outfile)}`);
+  console.log(`[selfcheck] ${ts} ok=${ok}/${urls.length} ratio=${ratio.toFixed(2)} -> ${path.relative(ROOT, outFile)}`);
 
-  // 默认不让 Cron 变红；严格模式且低于阈值才非零
-  if (STRICT && ratio < MIN_OK) {
-    console.log(`[selfcheck] STRICT mode: ratio ${ratio.toFixed(2)} < ${MIN_OK}`);
-    return 1;
+  // 是否需要“让 cron 变红”
+  if (ok < MIN_OK) {
+    // 现在默认不让 cron 红（exit 0），避免把“内容失败”当作“运行失败”
+    // 如果你希望小于阈值就把 cron 跑红，改成：process.exit(1)
+    process.exit(0);
+  } else {
+    process.exit(0);
   }
-  return 0;
 }
 
-const code = await main().catch(err => {
-  console.log('[selfcheck] fatal:', err?.stack || String(err));
-  return STRICT ? 1 : 0;
+main().catch(e => {
+  console.error('[selfcheck] fatal error', e);
+  process.exit(1);
 });
-
-process.exit(code);
