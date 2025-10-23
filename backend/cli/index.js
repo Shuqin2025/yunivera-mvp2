@@ -9,33 +9,35 @@ import { logger } from '../lib/logger.js';
 import { withRetry } from '../lib/retryHandler.js';
 import { ProgressBar } from '../lib/progressBar.js';
 
+// --- 目录结构识别 / 模板解析 ---
 import * as Structure from '../lib/structureDetector.js';
-import * as templateParser from '../lib/templateParser.js';
-// 兼容：既支持 named export，也支持 default export / default 里挂方法
-const parseWithTemplate = templateParser.parseWithTemplate
-  || templateParser.default?.parseWithTemplate
-  || templateParser.default
-  || templateParser.parse;
+import * as Template   from '../lib/templateParser.js';
 
-// 这三个模块的导出在各分支里不完全一致：可能是命名导出，也可能是 default
-import * as Detail from '../lib/modules/detailFetcher.js';
-import * as Artikel from '../lib/modules/artikelExtractor.js';
-import * as Excel from '../lib/modules/excelExporter.js';
+// --- 详情抓取 / 货号提取 / 导出 ---
+import * as Detail   from '../lib/modules/detailFetcher.js';
+import * as Artikel  from '../lib/modules/artikelExtractor.js';
+import * as Excel    from '../lib/modules/excelExporter.js';
 
-// 统一做兼容映射（只声明一次，避免重复声明）
-const detectStructure      = Structure.detectStructure      || Structure.default;
-const parseWithTemplate    = Tpl.parseWithTemplate          || Tpl.default;
-const fetchDetailsAndMerge = Detail.fetchDetailsAndMerge     || Detail.default;
-const extractArtikelNr     = Artikel.extractArtikelNr        || Artikel.default;
-const exportToExcel        = Excel.exportToExcel             || Excel.default;
-
+// --- 快照（可选）---
 let writeSnapshot = null;
-let makeTaskId   = null;
+let makeTaskId    = null;
 try {
   const m = await import('../lib/debugSnapshot.js');
   writeSnapshot = m.writeSnapshot || null;
   makeTaskId    = m.makeTaskId    || null;
-} catch {}
+} catch { /* ignore */ }
+
+// ✅ 新增（诊断编排相关 import）
+import { runStage } from '../modules/diagnostics/orchestrator.js';
+import { register as registerDebugSnapshot } from '../modules/diagnostics/debugSnapshot.js';
+import { register as registerAutoInspector } from '../modules/diagnostics/autoLogInspector.js';
+
+// --- 统一“兼容映射”（命名导出 / default 混用时也能工作）---
+const detectStructure      = Structure.detectStructure   || Structure.default;
+const parseWithTemplateRaw = Template.parseWithTemplate  || Template.default?.parseWithTemplate || Template.default || Template.parse;
+const fetchDetailsAndMerge = Detail.fetchDetailsAndMerge || Detail.default;
+const extractArtikelNr     = Artikel.extractArtikelNr    || Artikel.default;
+const exportToExcel        = Excel.exportToExcel         || Excel.default;
 
 // ------------------------- CLI 参数 -------------------------
 const argv = process.argv.slice(2);
@@ -87,7 +89,7 @@ for (let i = 0; i < argv.length; i++) {
 if (urls.length === 0) { printHelp(); process.exit(0); }
 if (!fs.existsSync(outDir)) fs.mkdirSync(outDir, { recursive: true });
 
-// 快照封装
+// 任务ID生成 & 快照封装
 if (!taskId) {
   if (makeTaskId) taskId = makeTaskId('yunivera');
   else {
@@ -95,13 +97,23 @@ if (!taskId) {
     taskId = `yunivera_${t.getFullYear()}${String(t.getMonth()+1).padStart(2,'0')}${String(t.getDate()).padStart(2,'0')}${String(t.getHours()).padStart(2,'0')}${String(t.getMinutes()).padStart(2,'0')}${String(t.getSeconds()).padStart(2,'0')}`;
   }
 }
-async function debugSnapshot(stage, payload, append = false) {
+async function dbgSnapshot(stage, payload, append = false) {
   if (!enableSnapshot || !writeSnapshot) return;
   try { await writeSnapshot(taskId, stage, payload, append); }
   catch (e) { logger.warn(`snapshot(${stage}) 失败: ${e?.message || e}`); }
 }
 
+// ✅ 注册诊断模块（主流程启动前）
+try {
+  registerDebugSnapshot?.();   // 内部会向 orchestrator/onStage 自注册
+  registerAutoInspector?.();
+} catch (e) {
+  logger.warn(`diagnostics register skipped: ${e?.message || e}`);
+}
+
 // ------------------------- 核心流程 -------------------------
+const parseWithTemplate = async (url, opts) => parseWithTemplateRaw(url, opts);
+
 async function runOne(url) {
   logger.info(`开始处理: ${url}`);
 
@@ -131,7 +143,7 @@ async function runOne(url) {
     }
   );
 
-  await debugSnapshot('after-parse', {
+  await dbgSnapshot('after-parse', {
     url, type,
     count: rows.length,
     sample: rows.slice(0, 3),
@@ -149,7 +161,7 @@ async function runOne(url) {
     logger.info(`触发详情页补抓…（${rows.length} 记录）`);
     const bar = new ProgressBar(rows.length, 'details');
     rows = await fetchDetailsAndMerge(rows, { onProgress: () => bar.tick() });
-    await debugSnapshot('after-details', { url, type, count: rows.length, sample: rows.slice(0, 3) }, true);
+    await dbgSnapshot('after-details', { url, type, count: rows.length, sample: rows.slice(0, 3) }, true);
   }
 
   // 4) 统一做 ID 智能提取（只填补空位）
@@ -160,6 +172,7 @@ async function runOne(url) {
       rawText: '',
       sku:    r.sku   || '',
       ean:    r.ean   || '',
+      model:  r.model || '',
     });
     return {
       ...r,
@@ -253,15 +266,41 @@ async function sendSummaryMail({ taskId, results }) {
   logger.info(`任务ID: ${taskId}`);
   const bar = new ProgressBar(urls.length, 'batch');
 
+  // ✅ 批量开始
+  try { runStage('start', { urls, taskId: 'batch-' + Date.now() }); } catch {}
+
   const results = await runPool(
     urls,
     async (u) => {
       try {
         const r = await runOne(u);
+
+        // ✅ 单条完成（成功）
+        try {
+          runStage('afterParse', {
+            url: u,
+            ok: true,
+            // 预留字段，方便未来在解析器里塞 meta/parse/html
+            parse: r?.parse ?? null,
+            meta:  r?.meta  ?? null,
+            html:  r?.html  ?? null,
+          });
+        } catch {}
+
         bar.tick();
         return { ...r, ok: true };
       } catch (err) {
         logger.error(`❌ 失败: ${u} → ${err?.message || err}`);
+
+        // ✅ 单条完成（失败）
+        try {
+          runStage('afterParse', {
+            url: u,
+            ok: false,
+            error: err?.message || String(err),
+          });
+        } catch {}
+
         bar.tick();
         return { ok: false, error: { url: u, message: err?.message || String(err) } };
       }
@@ -274,8 +313,21 @@ async function sendSummaryMail({ taskId, results }) {
   logger.info(`批次完成：成功 ${ok}，失败 ${fail}`);
   if (fail) logger.warn('失败条目：' + results.filter(r => !r.ok).map(r => r.error.url).join(', '));
 
+  // ✅ 批次抓取完
+  try { runStage('afterCrawl', { total: results.length, ok, fail }); } catch {}
+
   try { await sendSummaryMail({ taskId, results }); }
   catch (e) { logger.warn(`发送汇总邮件失败：${e?.message || e}`); }
+
+  // ✅ 全部收尾
+  try {
+    runStage('finished', {
+      outFile: outName,
+      total: results.length,
+      ok,
+      fail,
+    });
+  } catch {}
 
   process.exit(0);
 })();
