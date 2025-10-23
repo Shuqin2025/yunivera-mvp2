@@ -1,3 +1,2 @@
-https://snocks.com/collections/socken
-https://www.servershop24.de/server/fujitsu/
-# 需要时继续加新行即可
+https://example.com/
+https://httpbin.org/html
