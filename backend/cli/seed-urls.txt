@@ -1,2 +1,4 @@
-https://example.com/
-https://httpbin.org/html
+https://www.s-impuls-shop.de/catalog/computer
+https://www.memoryking.de/tv-hifi/tvsat-zubehoer/
+https://www.beamer-discount.de/konferenzraum-c-836.html
+# ↑ 三个稳定目录页；可继续追加
