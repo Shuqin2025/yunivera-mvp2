@@ -1,147 +1,171 @@
 // backend/modules/diagnostics/orchestrator.js
-// 编排器：统一的阶段事件 & 心跳 & 结构化诊断日志（JSONL）
+// 统一诊断编排：阶段事件 -> 监听器；心跳；指标聚合；落盘
 
 import fs from 'node:fs';
-import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { logger } from '../../lib/logger.js';
 
-const LOG_DIR = process.env.DIAG_LOG_DIR || path.join(process.cwd(), 'logs', 'diagnostics');
-const HEARTBEAT_MS = Number(process.env.DIAG_HEARTBEAT_MS ?? 5 * 60 * 1000); // 5min
-const JSONL_FILE = () => path.join(LOG_DIR, `diag-${new Date().toISOString().slice(0, 10)}.jsonl`);
-const HB_FILE    = () => path.join(LOG_DIR, `heartbeat-${new Date().toISOString().slice(0, 10)}.log`);
-
-const subs = new Set();           // 订阅者（register/onStage）
-let hbTimer = null;               // 心跳定时器
-let started = false;              // 是否启动过心跳
-let batchId = null;               // 最近一次批次 ID
-const metrics = {                 // 轻量运行指标
-  batches: 0,
-  urlsOk: 0,
-  urlsFail: 0,
-  last: {
-    startAt: null,
-    finishAt: null,
-    ok: 0,
-    fail: 0,
-  }
+const ENV = {
+  HEARTBEAT_SEC: Number(process.env.DIAG_HEARTBEAT_SEC || 300), // 5min
+  ENABLE_FILE:   (process.env.DIAG_ENABLE_FILE || '1') === '1',
+  SAVE_DIR:      process.env.DIAG_SAVE_DIR || './logs/diagnostics',
+  // 0~1 之间的小数，控制落盘采样率（避免日志风暴）；默认 1（全部落盘）
+  SAMPLING:      Math.min(1, Math.max(0, Number(process.env.DIAG_SAMPLING || 1))),
 };
 
-// 确保目录存在
-async function ensureDir(p) {
-  try { await fsp.mkdir(p, { recursive: true }); } catch {}
-}
+// ----------------------------- 事件总线 -----------------------------
+/** Map<stage, Set<listener(payload)>> */
+const listeners = new Map();
+/** 近重复事件防抖：Map<key, lastTs> */
+const recent = new Map();
+/** 指标：按阶段统计条数、近一次耗时、累计耗时 */
+const metrics = {
+  counts: new Map(), // stage -> n
+  durations: new Map(), // stage -> { last: number, total: number }
+};
+/** 任务上下文（在 runStage('start', {taskId}) 时刷新） */
+let taskCtx = {
+  taskId: null,
+  batchId: null,
+  startedAt: null,
+};
+let heartbeatTimer = null;
 
-// 追加一行 JSONL
-async function appendJsonl(file, obj) {
+// ------------------------ 工具：目录/落盘 ------------------------
+function ensureDir(p) {
+  try { fs.mkdirSync(p, { recursive: true }); } catch {}
+}
+function maybeSample() {
+  if (ENV.SAMPLING >= 1) return true;
+  return Math.random() < ENV.SAMPLING;
+}
+function saveJSON(rel, data) {
+  if (!ENV.ENABLE_FILE) return;
+  if (!maybeSample()) return;
+  const dir = path.join(ENV.SAVE_DIR, rel);
+  ensureDir(dir);
+  const file = path.join(dir, `${new Date().toISOString().slice(0,10)}.jsonl`);
   try {
-    await ensureDir(path.dirname(file));
-    await fsp.appendFile(file, JSON.stringify(obj) + '\n');
+    fs.appendFileSync(file, JSON.stringify(data) + '\n');
   } catch (e) {
-    logger.warn(`[orchestrator] appendJsonl failed: ${e?.message || e}`);
+    logger.warn(`[orchestrator] write ${file} failed: ${e?.message || e}`);
   }
 }
 
-// 追加文本（心跳）
-async function appendText(file, line) {
-  try {
-    await ensureDir(path.dirname(file));
-    await fsp.appendFile(file, line + '\n', 'utf8');
-  } catch (e) {
-    logger.warn(`[orchestrator] appendText failed: ${e?.message || e}`);
-  }
+// ------------------------ 对外：注册/触发 ------------------------
+export function onStage(stage, fn) {
+  if (!listeners.has(stage)) listeners.set(stage, new Set());
+  listeners.get(stage).add(fn);
+  return () => listeners.get(stage)?.delete(fn);
 }
 
-// --------- 心跳 ----------
-function startHeartbeat() {
-  if (started || HEARTBEAT_MS <= 0) return;
-  hbTimer = setInterval(() => {
-    const line = `[HEARTBEAT] ${new Date().toISOString()} batch=${batchId ?? '-'} ok=${metrics.last.ok} fail=${metrics.last.fail}`;
-    logger.info(line);
-    appendText(HB_FILE(), line).catch(() => {});
-  }, HEARTBEAT_MS).unref?.();
-  started = true;
-  logger.info(`[orchestrator] heartbeat started: every ${HEARTBEAT_MS}ms`);
-}
-function stopHeartbeat() {
-  if (hbTimer) {
-    clearInterval(hbTimer);
-    hbTimer = null;
-  }
-  started = false;
-}
+/**
+ * 触发阶段
+ * @param {string} stage  e.g. 'start' | 'afterParse' | 'afterCrawl' | 'finished'
+ * @param {object} payload 任意上下文
+ * @param {object} [opts]  { debounceMs?: number, key?: string }
+ */
+export async function runStage(stage, payload = {}, opts = {}) {
+  const now = Date.now();
+  const debounceMs = Number(opts.debounceMs ?? 1500);
+  const key = opts.key || `${stage}:${payload?.url || ''}:${payload?.taskId || taskCtx.taskId || ''}`;
 
-// --------- 对外：订阅/触发 ----------
-/** 订阅阶段事件（回调签名： (stage, context) => void|Promise<void> ） */
-export function onStage(fn) {
-  if (typeof fn === 'function') subs.add(fn);
-  return () => subs.delete(fn);
-}
-/** 兼容老名字 */
-export const register = onStage;
-
-/** 触发阶段事件，并做结构化落盘与指标聚合 */
-export async function runStage(stage, context = {}) {
-  // 轻量聚合
-  try {
-    if (stage === 'start') {
-      metrics.batches += 1;
-      metrics.last = { startAt: Date.now(), finishAt: null, ok: 0, fail: 0 };
-      batchId = context?.taskId || context?.batchId || `batch_${Date.now()}`;
-      startHeartbeat();
-    }
-    if (stage === 'afterParse') {
-      if (context?.ok) {
-        metrics.urlsOk += 1;
-        metrics.last.ok += 1;
-      } else if (context?.ok === false) {
-        metrics.urlsFail += 1;
-        metrics.last.fail += 1;
-      }
-    }
-    if (stage === 'finished') {
-      metrics.last.finishAt = Date.now();
-      // 心跳不强制停止，让它在下一轮 start 前继续维持；若你希望结束就停，可开启下一行
-      // stopHeartbeat();
-    }
-  } catch (e) {
-    // 指标聚合失败不阻断
+  // 任务语义：记录 taskId/batchId/开始时间
+  if (stage === 'start') {
+    taskCtx = {
+      taskId:  payload?.taskId || taskCtx.taskId || `task_${now}`,
+      batchId: payload?.batchId || `batch_${now}`,
+      startedAt: new Date().toISOString(),
+    };
+    startHeartbeat();
   }
 
-  // 结构化落盘
-  const payload = {
-    ts: new Date().toISOString(),
+  // 去重/防抖
+  const last = recent.get(key) || 0;
+  if (now - last < debounceMs) return;
+  recent.set(key, now);
+
+  // 指标：次数+耗时
+  metrics.counts.set(stage, (metrics.counts.get(stage) || 0) + 1);
+  if (!metrics.durations.has(stage)) metrics.durations.set(stage, { last: 0, total: 0 });
+  const d = metrics.durations.get(stage);
+  d.last = now - last; // 近似值；对于第一次会比较大，但对趋势无伤
+  d.total += d.last;
+
+  const event = {
     stage,
-    batchId,
-    context
+    ts: new Date().toISOString(),
+    taskId: taskCtx.taskId,
+    batchId: taskCtx.batchId,
+    ...payload,
   };
-  appendJsonl(JSONL_FILE(), payload).catch(() => {});
 
-  // 通知订阅者
-  for (const fn of subs) {
-    try { await fn(stage, context); }
+  logger.info(`[stage] ${stage} ${payload?.url ? `url=${payload.url}` : ''} ${payload?.ok===false ? '❌' : '✅'}`.trim());
+  saveJSON('stages', event);
+
+  // 逐个监听器执行（串行以便日志有序；若需并行可 Promise.all）
+  const fns = [...(listeners.get(stage) || [])];
+  for (const fn of fns) {
+    try { await fn(event); }
     catch (e) {
-      logger.warn(`[orchestrator] subscriber error @${stage}: ${e?.message || e}`);
+      logger.warn(`[orchestrator] listener error @${stage}: ${e?.message || e}`);
+      // 也落盘一份错误
+      saveJSON('errors', { stage, ts: event.ts, msg: e?.message || String(e) });
     }
+  }
+
+  if (stage === 'finished') {
+    stopHeartbeat();
+    flushMetrics();
   }
 }
 
-// --------- 辅助：导出只读指标、手动 flush ----------
-export function getMetrics() {
-  return JSON.parse(JSON.stringify(metrics));
-}
-export async function flush() {
-  // 目前 JSONL 在 append 时已落盘，这里预留接口以便未来扩展（比如队列积压批量写）
-  return true;
+// 给调试模块的“快速注册”使用
+export function register(cb) {
+  try { cb?.({ onStage, runStage }); }
+  catch (e) { logger.warn(`[orchestrator] register failed: ${e?.message || e}`); }
 }
 
-// 进程退出清理
-for (const sig of ['SIGINT', 'SIGTERM', 'beforeExit', 'exit']) {
-  process.on(sig, async () => {
-    try { await flush(); } catch {}
-    stopHeartbeat();
-  });
+// ------------------------ 心跳 & 指标落盘 ------------------------
+function startHeartbeat() {
+  if (heartbeatTimer || ENV.HEARTBEAT_SEC <= 0) return;
+  heartbeatTimer = setInterval(() => {
+    const beat = {
+      ts: new Date().toISOString(),
+      taskId: taskCtx.taskId,
+      batchId: taskCtx.batchId,
+      memMB: Math.round((process.memoryUsage?.rss?.() || process.memoryUsage().rss) / 1024 / 1024),
+      uptimeSec: Math.round(process.uptime()),
+    };
+    logger.info(`[HEARTBEAT] ${beat.ts} task=${beat.taskId} rss=${beat.memMB}MB up=${beat.uptimeSec}s`);
+    saveJSON('heartbeat', beat);
+  }, ENV.HEARTBEAT_SEC * 1000);
 }
 
-// 首次引入就按需启动心跳（直到第一次 runStage('start') 才会记录 batchId）
-startHeartbeat();
+function stopHeartbeat() {
+  if (heartbeatTimer) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
+}
+
+function flushMetrics() {
+  const out = {
+    ts: new Date().toISOString(),
+    taskId: taskCtx.taskId,
+    batchId: taskCtx.batchId,
+    startedAt: taskCtx.startedAt,
+    counts: Object.fromEntries(metrics.counts),
+    durations: Object.fromEntries(
+      [...metrics.durations.entries()].map(([k, v]) => [k, { last: v.last, total: v.total }])
+    ),
+  };
+  logger.info(`[metrics] ${JSON.stringify(out.counts)}`);
+  saveJSON('metrics', out);
+
+  // 清理，避免内存持续增长
+  metrics.counts.clear();
+  metrics.durations.clear();
+  recent.clear();
+}
+
