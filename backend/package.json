@@ -11,6 +11,18 @@
     "daily": "node ./cli/index.js --urls ./cli/seed-urls.txt --snapshot && node ./modules/diagnostics/autoLogInspector.js --since 1d",
     "daily:fast": "node ./cli/index.js --urls ./cli/seed-urls.txt -c 3 -l 30 --snapshot && node ./modules/diagnostics/autoLogInspector.js --since 1d",
     "selfcheck": "node ./scripts/selfCheck.js",
+    "scripts": {
+  "dev": "node server.js",
+  "start": "node server.js",
+  "postinstall": "npx playwright install --with-deps chromium || echo 'playwright optional'",
+  "cli": "node ./cli/index.js",
+  "inspect": "node ./modules/diagnostics/autoLogInspector.js",
+  "daily": "node ./cli/index.js --urls ./cli/seed-urls.txt --snapshot && node ./modules/diagnostics/autoLogInspector.js --since 1d",
+  "daily:fast": "node ./cli/index.js --urls ./cli/seed-urls.txt -c 3 -l 30 --snapshot && node ./modules/diagnostics/autoLogInspector.js --since 1d",
+  "selfcheck": "node ./scripts/selfCheck.js",
+  "parsehealth": "node ./scripts/parseHealth.js",
+  "test": "node --test ./tests --test-reporter=spec"
+}
     "test": "node --test ./tests --test-reporter=spec"
   },
   "engines": {
