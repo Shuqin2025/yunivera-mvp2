@@ -10,7 +10,12 @@ import { withRetry } from '../lib/retryHandler.js';
 import { ProgressBar } from '../lib/progressBar.js';
 
 import * as Structure from '../lib/structureDetector.js';
-import * as Tpl from '../lib/templateParser.js';
+import * as templateParser from '../lib/templateParser.js';
+// 兼容：既支持 named export，也支持 default export / default 里挂方法
+const parseWithTemplate = templateParser.parseWithTemplate
+  || templateParser.default?.parseWithTemplate
+  || templateParser.default
+  || templateParser.parse;
 
 // 这三个模块的导出在各分支里不完全一致：可能是命名导出，也可能是 default
 import * as Detail from '../lib/modules/detailFetcher.js';
