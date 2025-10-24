@@ -6,6 +6,7 @@ import * as cheerio from "cheerio";
 import fs from 'node:fs';
 import path from 'node:path';
 import compat from './routes/compat.js';
+import detectRouter from './routes/detect.js'; 
 
 // 新增：引入自定义 logger（仅用于 http 访问日志）
 import { logger } from './lib/logger.js';
@@ -46,6 +47,7 @@ app.use((req, res, next) => {
 
 // 兼容路由：让 /v1/* 和 /v1/api/* 都走同一套新路由
 app.use(['/v1', '/v1/api'], compat);
+app.use(['/v1', '/v1/api'], detectRouter);
 // 统一 health 路由（多前缀）
 app.get(['/v1/health', '/health', '/api/health', '/'], (_req, res) => {
   res.json({ ok: true, service: "mvp2-backend", ts: Date.now() });
@@ -247,46 +249,6 @@ function looksLikeMagento($, html) {
 // === structure detect helpers (END) =====================================
 
 // === /v1/api/detect =====================================================
-app.get("/v1/api/detect", async (req, res) => {
-  try {
-    const url = String(req.query.url || "").trim();
-    if (!url) return res.status(400).json({ ok:false, error:"missing url" });
-
-    const r = await axios.get(url, {
-      timeout: 20000,
-      headers: {
-        "User-Agent": UA,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      },
-      validateStatus: s => s >= 200 && s < 400,
-    });
-
-    const html = String(r.data || "");
-    const $ = cheerio.load(html);
-
-    let type = "Unknown";
-    let confidence = 0.5;
-    let signals = [];
-
-    if (looksLikeShopify($, html)) {
-      type = "Shopify"; confidence = 0.8;
-      signals = ["cdn\\.shopify\\.com","shopify-section","window\\.Shopify","Shopify\\.theme"];
-    } else if (looksLikeShopware($, html)) {
-      type = "Shopware"; confidence = 0.8;
-      signals = ["shopware","product--box","data-controller=product-listing","meta generator Shopware"];
-    } else if (looksLikeWoo($, html)) {
-      type = "WooCommerce"; confidence = 0.75;
-      signals = ["woocommerce","wp-content","ul.products li.product","body.woocommerce"];
-    } else if (looksLikeMagento($, html)) {
-      type = "Magento"; confidence = 0.75;
-      signals = ["Magento","data-mage-init","script text/x-magento-init","pagebuilder"];
-    }
-
-    return res.json({ ok:true, url, type, confidence, signals });
-  } catch (e) {
-    return res.json({ ok:false, error: e.message || String(e) });
-  }
-});
 
 app.get("/v1/api/image", async (req, res) => {
   const url = String(req.query.url || "").trim();
@@ -1280,33 +1242,4 @@ async function parseUniversalCatalog(
 /* ──────────────────────────── listen ──────────────────────────── */
 const PORT = process.env.PORT || 3000;
 
-app.get('/api/detect', async (req, res) => {
-  try {
-    const url = req.query.url;
-    if (!url) return res.status(400).json({ ok: false, error: 'missing url' });
-
-   // Reuse existing HTML fetch util if present, otherwise use fetch
-let html = '';
-if (typeof fetchHtml === 'function') {
-  html = await fetchHtml(url);
-} else {
-  const fetch = global.fetch || (await import('node-fetch')).default;
-  const resp = await fetch(url, { headers: { 'user-agent': 'Mozilla/5.0 YuniveraBot' } });
-  html = await resp.text();
-}
-
-    // Use the single detector to avoid referencing undefined helpers
-    const result = detectStructure(html);
-    if (result && typeof result === 'object') {
-      return res.json({ ok: true, url, type: result.type, confidence: result.confidence ?? 0.6, signals: result.signals || [] });
-    }
-    // Backward compatible: if detectStructure returns a string
-    if (typeof result === 'string') {
-      return res.json({ ok: true, url, type: result, confidence: 0.6, signals: [] });
-    }
-    return res.json({ ok: true, url, type: 'Unknown', confidence: 0.2, signals: [] });
-  } catch (err) {
-    res.status(500).json({ ok: false, error: err.message || String(err) });
-  }
-});
 app.listen(PORT, () => console.log(`[mvp2-backend] listening on :${PORT}`));
