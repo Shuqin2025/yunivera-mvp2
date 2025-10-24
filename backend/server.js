@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import compat from './routes/compat.js';
 import detectRouter from './routes/detect.js'; 
+import catalogRouter from './routes/catalog.js';
 
 // 新增：引入自定义 logger（仅用于 http 访问日志）
 import { logger } from './lib/logger.js';
@@ -48,6 +49,7 @@ app.use((req, res, next) => {
 // 兼容路由：让 /v1/* 和 /v1/api/* 都走同一套新路由
 app.use(['/v1', '/v1/api'], compat);
 app.use(['/v1', '/v1/api'], detectRouter);
+app.use(['/v1', '/v1/api'], catalogRouter);
 // 统一 health 路由（多前缀）
 app.get(['/v1/health', '/health', '/api/health', '/'], (_req, res) => {
   res.json({ ok: true, service: "mvp2-backend", ts: Date.now() });
