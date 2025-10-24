@@ -1,41 +1,53 @@
 param(
-  [string]$Gateway = "https://yunivera-gateway.onrender.com",
-  [string]$Url     = "https://www.s-impuls-shop.de/catalog/mobile",
-  [int]   $Limit   = 20
+  [Parameter(Mandatory=$true)][string]$Url,
+  [int]$Limit = 20,
+  [string]$Gw = "https://yunivera-gateway.onrender.com",
+  [switch]$Debug
 )
 
-function Invoke-Detect {
-  param([string]$Gateway,[string]$Url)
-  $enc = [Uri]::EscapeDataString($Url)
-  $t0 = Get-Date
+# 组装 Query
+$qs = "url=$([uri]::EscapeDataString($Url))&limit=$Limit" + ($(if($Debug){ "&debug=1"}) )
+
+$u1 = "$Gw/v1/api/catalog?$qs"
+$u2 = "$Gw/v1/catalog?$qs"
+
+function Hit([string]$u) {
   try {
-    $det = Invoke-RestMethod -Uri "$Gateway/v1/detect?url=$enc" -ErrorAction Stop
-    $ms  = [math]::Round((Get-Date) .Subtract($t0).TotalMilliseconds)
-    Write-Host "== DETECT ($ms ms) ==" -ForegroundColor Cyan
-    $det | ConvertTo-Json -Depth 10
+    return Invoke-RestMethod -Method Get -Uri $u -TimeoutSec 60
   } catch {
-    Write-Host "DETECT error: $($_.Exception.Message)" -ForegroundColor Red
+    return $null
   }
 }
 
-function Invoke-Catalog {
-  param([string]$Gateway,[string]$Url,[int]$Limit)
-  $enc = [Uri]::EscapeDataString($Url)
-  $t0 = Get-Date
-  try {
-    $cat = Invoke-RestMethod -Uri "$Gateway/v1/api/catalog?url=$enc&limit=$Limit" -Method GET -ErrorAction Stop
-    $ms  = [math]::Round((Get-Date) .Subtract($t0).TotalMilliseconds)
-    $n   = @($cat.items).Count
-    Write-Host "`n== CATALOG ($ms ms) items:$n ==" -ForegroundColor Cyan
-    if ($n -gt 0) {
-      $cat.items[0..([Math]::Min(2,$n-1))] | ConvertTo-Json -Depth 10
-    } else {
-      Write-Host "(no items returned)"
-    }
-  } catch {
-    Write-Host "CATALOG error: $($_.Exception.Message)" -ForegroundColor Red
-  }
+Write-Host "GET $u1"
+$r = Hit $u1
+if (-not $r) {
+  Write-Host "fallback => $u2"
+  $r = Hit $u2
 }
 
-Invoke-Detect  -Gateway $Gateway -Url $Url
-Invoke-Catalog -Gateway $Gateway -Url $Url -Limit $Limit
+if (-not $r) {
+  Write-Error "请求失败（/v1/api/catalog 与 /v1/catalog 均不可用）"
+  exit 1
+}
+
+# 汇总输出
+$j = [pscustomobject]@{
+  ok     = $r.ok
+  url    = $r.url
+  http   = ($r.http, $r.debug.http_status | ? {$_})[0]
+  items  = @($r.items, $r.products | ? {$_})[0]
+}
+$cnt   = ($j.items | Measure-Object).Count
+$first = ($j.items | Select-Object -First 3 | ForEach-Object { $_.title })
+
+Write-Host ""
+Write-Host ("ok       : {0}" -f $j.ok)
+Write-Host ("http     : {0}" -f $j.http)
+Write-Host ("items    : {0}" -f $cnt)
+Write-Host ("first3   : {0}" -f ($first -join " | "))
+
+if ($Debug) {
+  "`n== raw debug =="
+  $r.debug | Format-List | Out-String
+}
