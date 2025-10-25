@@ -1,43 +1,71 @@
 param(
-  [Parameter(Mandatory = $true)][string]$Url,
+  [Parameter(Mandatory = $true)]
+  [string]$Url,
+
   [int]$Limit = 20,
-  [string]$Gateway = "https://yunivera-gateway.onrender.com",
-  [switch]$Debug
+
+  # 网关根地址，可按需覆盖
+  [string]$Gw = "https://yunivera-gateway.onrender.com",
+
+  # 同时展示 /v1/detect 的识别信息
+  [switch]$ShowDetect
 )
 
-function Invoke-Catalog([string]$ep) {
-  $enc = [uri]::EscapeDataString($Url)
-  $uri = "$Gateway$ep?url=$enc&limit=$Limit"
+function Invoke-Json {
+  param([string]$Uri, [int]$TimeoutSec = 60)
   try {
-    if ($Debug) { Write-Host "[try] $uri" -ForegroundColor DarkGray }
-    # Invoke-RestMethod 会自动 JSON 反序列化，别再 ConvertFrom-Json 了
-    $r = Invoke-RestMethod -Uri $uri -TimeoutSec 60
-
-    # 兼容老字段 items / 新字段 products
-    $items = if ($r.products) { $r.products } else { $r.items }
-
-    if ($r.ok -and $items -and $items.Count -gt 0) {
-      # 打印前三条
-      $items | Select-Object @{n='adapter';e={$r.adapter}}, title, link, price -First 3 | Format-Table -AutoSize
-      Write-Host "count: $($items.Count)  endpoint: $ep" -ForegroundColor Green
-      return @{ ok = $true; endpoint = $ep; count = $items.Count }
-    } else {
-      if ($r.error) { Write-Host "[$ep] ok:$($r.ok) error: $($r.error)" -ForegroundColor Yellow }
-      else { Write-Host "[$ep] ok:$($r.ok) items: $($items.Count)" -ForegroundColor Yellow }
-      return @{ ok = $false; endpoint = $ep }
-    }
+    $resp = Invoke-RestMethod -Uri $Uri -TimeoutSec $TimeoutSec
+    if ($null -ne $resp) { return $resp }
+  } catch {
+    Write-Host ("{0} ← {1}" -f $Uri, $_.Exception.Message) -ForegroundColor DarkGray
   }
-  catch {
-    Write-Host "[$ep] $_" -ForegroundColor Red
-    return @{ ok = $false; endpoint = $ep }
-  }
+  return $null
 }
 
-# 顺序尝试：先 /v1/catalog 再 /v1/api/catalog
-$tryEndpoints = @("/v1/catalog", "/v1/api/catalog")
+# ---- 组装两个候选端点，自动回退 ----
+$enc = [uri]::EscapeDataString($Url)
+$tryEndpoints = @(
+  "$Gw/v1/catalog?url=$enc&limit=$Limit",
+  "$Gw/v1/api/catalog?url=$enc&limit=$Limit"
+)
+
+$result = $null
+$hit    = ""
+
 foreach ($ep in $tryEndpoints) {
-  $res = Invoke-Catalog $ep
-  if ($res.ok) { return }
+  $hit = $ep
+  $result = Invoke-Json -Uri $ep
+  if ($result) { break }
 }
 
-Write-Host "Both endpoints failed." -ForegroundColor Red
+# 可选：顺带看一下 /v1/detect 的元信息（不影响主流程）
+if ($ShowDetect -or -not $result) {
+  $det = Invoke-Json -Uri "$Gw/v1/detect?url=$([uri]::EscapeDataString($Url))"
+  if ($det) {
+    Write-Host "`n[detect]" -ForegroundColor Cyan
+    $det | Format-List
+  }
+}
+
+if (-not $result) {
+  Write-Host "`nBoth endpoints failed." -ForegroundColor Red
+  exit 2
+}
+
+# ---- 摘要输出 ----
+Write-Host "`nendpoint: $hit" -ForegroundColor Cyan
+$adapter = $result.adapter
+$count   = if ($result.PSObject.Properties.Name -contains 'count') { $result.count } else { ($result.items | Measure-Object).Count }
+$urlOut  = if ($result.PSObject.Properties.Name -contains 'url') { $result.url } else { $Url }
+$http    = if ($result.PSObject.Properties.Name -contains 'http') { $result.http } else { 200 }
+$okFlag  = if ($result.PSObject.Properties.Name -contains 'ok') { $result.ok } else { $true }
+
+Write-Host ("ok: {0}  http: {1}  adapter: {2}  count: {3}  url: {4}" -f $okFlag,$http,($adapter??'-'),$count,$urlOut) -ForegroundColor Green
+
+# 兼容字段：products / items
+$items = if ($result.PSObject.Properties.Name -contains 'products') { $result.products } else { $result.items }
+if ($items) {
+  $items | Select-Object -First 3 title, link, price | Format-Table -AutoSize
+}
+
+return $result
