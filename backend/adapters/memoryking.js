@@ -1,16 +1,14 @@
 /**
- * memoryking.js — Stable Adapter with Shopware-delegate (v6.0)
- * 说明：
- *  - 优先尝试使用通用 Shopware 解析器（lib/parsers/shopwareParser.js）
- *  - 如不可用或返回空，则回落到本站点专用的稳定实现（你原来的版本）
+ * memoryking.js — Stable Adapter with Shopware-delegate (v6.1)
+ * - 优先尝试通用 Shopware 解析器
+ * - 否则回落到本站点专用稳定实现
  */
 
 import * as cheerio from "cheerio";
 import { fetchHtml } from "../lib/http.js";
 
-/* -------------------------------------------
- * 可选：供自动选择适配器时使用（不需要也不影响）
- * -----------------------------------------*/
+/* ---------------- 工具 ---------------- */
+
 export const test = (url) => {
   try {
     const host = new URL(url).hostname.toLowerCase();
@@ -20,12 +18,9 @@ export const test = (url) => {
   }
 };
 
-/* ---------------- 工具 ---------------- */
-
 const looksLikePruef = (v) => {
   if (!v) return false;
   const s = String(v).trim();
-  // 站内常见 Prüfziffer：纯数字 8 位起，或 48 开头的 8~10 位
   return (/^\d{8,}$/.test(s) || /^48\d{6,10}$/.test(s));
 };
 
@@ -48,7 +43,7 @@ function bestFromImgNode($, $img, origin) {
   const bag = new Set();
   const push = (v) => { if (v) bag.add(absolutize(v, origin)); };
 
-  // ✅ 懒加载字段全覆盖
+  // 懒加载字段覆盖
   push($img.attr("data-src"));
   splitSrcset($img.attr("data-srcset")).forEach(push);
   push($img.attr("data-fallbacksrc"));
@@ -81,12 +76,11 @@ function scrapeImgsFromHtml(html, origin) {
   return [...out].map(u => absolutize(u, origin));
 }
 
-// ✅ 兼容 lib/http.js：取字符串 HTML
+// 兼容 lib/http.js：取字符串 HTML
 async function getHtml(url, opts = {}) {
   const res = await fetchHtml(url, opts);
   if (typeof res === "string") return res;
   if (res && typeof res.html === "string") return res.html;
-  // 兼容 res.buffer（极端情况）
   if (res && res.buffer && typeof res.buffer.toString === "function") {
     try { return res.buffer.toString("utf8"); } catch {}
   }
@@ -98,23 +92,20 @@ async function getHtml(url, opts = {}) {
 const LABEL_RE = /(artikel\s*[-–—]?\s*nr|artikelnummer|art\.\s*[-–—]?\s*nr|sku|mpn|modell|model|herstellernummer)/i;
 
 function extractSkuFromDetail($, $root, rawHtml = "") {
-  // li.base-info--entry.entry--sku
   const liTxt = $root.find("li.base-info--entry.entry--sku").first().text().trim();
   let m = liTxt.match(/Artikel\s*[-–—]?\s*Nr\.?\s*[:#]?\s*([A-Za-z0-9._\-\/]+)/i);
   if (m && m[1] && !looksLikePruef(m[1])) return m[1].trim();
 
-  // A) 强匹配：遍历文本节点，跳过含 Prüfziffer/Hersteller 的节点
   let strong = "";
   $root.find("*").each((_i, el) => {
     const txt = ($(el).text() || "").replace(/\s+/g, " ").trim();
     if (!txt) return;
-    if (/Pr[üu]fziffer|Hersteller\b/i.test(txt)) return; // 跳过干扰行
+    if (/Pr[üu]fziffer|Hersteller\b/i.test(txt)) return;
     let t = txt.match(/(?:Artikel\s*[-–—]?\s*Nr|Artikelnummer|Art\.\s*[-–—]?\s*Nr)\.?\s*[:#]?\s*([A-Za-z0-9._\-\/]+)/i);
     if (t && t[1] && !looksLikePruef(t[1])) { strong = t[1].trim(); return false; }
   });
   if (strong) return strong;
 
-  // B) JSON-LD
   let struct = "";
   $('script[type="application/ld+json"]').each((_i, el) => {
     try {
@@ -135,7 +126,6 @@ function extractSkuFromDetail($, $root, rawHtml = "") {
   });
   if (struct) return struct;
 
-  // C) <dl>/<table>
   let byStruct = "";
   $root.find("dl").each((_, dl) => {
     $(dl).find("dt").each((_i2, dt) => {
@@ -157,7 +147,6 @@ function extractSkuFromDetail($, $root, rawHtml = "") {
   });
   if (byStruct) return byStruct;
 
-  // D) 文本兜底（屏蔽 Prüfziffer）
   const scope = ($root.text() || "") + " " + (rawHtml || "");
   const RE_LIST = [
     /(?:Artikel\s*[-–—]?\s*Nr|Artikelnummer|Art\.\s*[-–—]?\s*Nr)\.?\s*[:#]?\s*([A-Z0-9._\-\/]+)/i,
@@ -215,7 +204,6 @@ function readListBox($, $box, origin) {
     $box.find(".product--title, .product--info a, a[title]").first().text().trim() ||
     $box.find("a").first().attr("title") || "";
 
-  // 详情链接
   const allAs = $box.find("a[href]").toArray()
     .map(a => ($(a).attr("href") || "").trim()).filter(Boolean);
   const prefer = sel => $box.find(sel).toArray()
@@ -234,7 +222,6 @@ function readListBox($, $box, origin) {
 
   const url = absolutize(href, origin);
 
-  // 图片
   let img = bestFromImgNode($, $box.find("img").first(), origin);
   if (!img) {
     const html = $box.html() || "";
@@ -242,12 +229,10 @@ function readListBox($, $box, origin) {
     if (extra.length) img = extra[0];
   }
 
-  // 价格
   const price =
     $box.find('.price--default, .product--price, .price--content, .price--unit, [itemprop="price"]')
       .first().text().replace(/\s+/g, " ").trim() || "";
 
-  // SKU 占位（严格排除 Prüfziffer；真正值由详情覆盖）
   const probe = (v) => (v && !looksLikePruef(v) ? String(v).trim() : "");
   let sku =
     probe($box.attr("data-ordernumber")) ||
@@ -310,19 +295,17 @@ async function withRetry(fn, times = 3, delayMs = 360) {
 async function tryParseViaShopware(input, limitDefault, debugDefault) {
   try {
     const mod = await import("../lib/parsers/shopwareParser.js");
-    // 兼容 default 或具名导出
     const parseShopware =
       (mod && (mod.default || mod.parse || mod.parseShopware)) || null;
 
     if (!parseShopware) return null;
 
-    // 标注 memoryking 的站点特性，便于模板做细节处理
     const opts = {
       site: "memoryking",
       limit: limitDefault,
       debug: debugDefault,
       imageHints: ["data-src", "data-srcset", "data-fallbacksrc", "srcset", "src"],
-      preferPruefAsFallback: true, // 若无 Artikel-Nr 时，允许 Prüfziffer 兜底
+      preferPruefAsFallback: true,
       detailSelectors: [".product--details", ".product--detail", "#content", "body"],
       listSelectors: [
         ".listing--container .product--box",
@@ -338,7 +321,6 @@ async function tryParseViaShopware(input, limitDefault, debugDefault) {
 
     return null;
   } catch {
-    // 没有模板文件或导入失败时静默回落
     return null;
   }
 }
@@ -347,7 +329,6 @@ async function tryParseViaShopware(input, limitDefault, debugDefault) {
  * B) 回落：本站点专用稳定实现（原版本）
  * -----------------------------------------*/
 async function parseMemorykingFallback(input, limitDefault = 50, debugDefault = false) {
-  // 入参
   let $, pageUrl = "", rawHtml = "", limit = limitDefault, debug = debugDefault;
   if (input && typeof input === "object" && (input.$ || input.rawHtml || input.url || input.limit !== undefined || input.debug !== undefined)) {
     $       = input.$ || input;
@@ -356,7 +337,7 @@ async function parseMemorykingFallback(input, limitDefault = 50, debugDefault = 
     if (input.limit !== undefined) limit = input.limit;
     if (input.debug !== undefined) debug = input.debug;
   } else {
-    $ = input; // 兼容只传 $
+    $ = input;
   }
 
   const origin = (() => {
@@ -397,7 +378,7 @@ async function parseMemorykingFallback(input, limitDefault = 50, debugDefault = 
     });
   }
 
-  // B. 单条详情（直接返回一条，SKU 同样做应急回退）
+  // B. 详情页（直接返回一条）
   if (items.length === 0 && isDetail) {
     const $detail = $(".product--details, .product--detail, #content, body");
     const title =
@@ -422,13 +403,13 @@ async function parseMemorykingFallback(input, limitDefault = 50, debugDefault = 
         .text().replace(/\s+/g, " ").trim() || "";
 
     let sku = extractSkuFromDetail($, $detail, rawHtml);
-    if (!sku) sku = extractPruefFromDetail($, $detail, rawHtml); // 应急回退
+    if (!sku) sku = extractPruefFromDetail($, $detail, rawHtml);
 
     const row = { sku, title, url, img, price, currency: "", moq: "" };
     if (row.title || row.url || row.img) return [row];
   }
 
-  // C. 统一进入详情页覆写 SKU（并发 3）
+  // C. 详情页覆写 SKU（并发 3）
   const headers = {
     "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
     "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -454,7 +435,7 @@ async function parseMemorykingFallback(input, limitDefault = 50, debugDefault = 
     const $root = $$(".product--details, .product--detail, #content, body");
 
     let sku = extractSkuFromDetail($$, $root, html);
-    if (!sku) sku = extractPruefFromDetail($$, $root, html); // 最终兜底（不留空）
+    if (!sku) sku = extractPruefFromDetail($$, $root, html);
     if (sku) row.sku = sku.trim();
 
     if (!row.price) {
@@ -477,8 +458,11 @@ async function parseMemorykingFallback(input, limitDefault = 50, debugDefault = 
 /* -------------------------------------------
  * 入口：先走 Shopware 模板 → 再回落
  * -----------------------------------------*/
-export default async function parse(input, limit = 50, debug = false) {
+export async function parse(input, limit = 50, debug = false) {
   const viaShopware = await tryParseViaShopware(input, limit, debug);
   if (Array.isArray(viaShopware) && viaShopware.length) return viaShopware;
   return await parseMemorykingFallback(input, limit, debug);
 }
+
+// 默认导出对象，兼容 memoryking.parse(...) 的调用
+export default { test, parse };
