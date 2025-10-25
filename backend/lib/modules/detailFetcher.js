@@ -2,13 +2,11 @@
 // 通用「详情页补抓」：SKU / 价格 / 标题 / 主图 / 描述
 //
 // 导出：
-//   - fetch(items, opts)         // 传入 [{link|url, sku?...}]，返回补齐后的 items（原地合并）。
-//   - fetchDetails(links, opts)  // 传入 [url...]，返回 [{ url, sku, title, price, image, description }]
-//   - shouldFetch(items, ...)    // 判断是否值得触发补抓
-//   - normalizeUrl(base, href)   // 统一 URL 规范化（绝对化）
+//   - fetch(items, opts)
+//   - fetchDetails(links, opts)
+//   - shouldFetch(items, ...)
+//   - normalizeUrl(base, href)
 //
-// 依赖：backend/lib/http.js；modules/artikelExtractor.js（仅用其提取方法）
-
 import { load } from 'cheerio';
 import pLimit from 'p-limit';
 import http from '../http.js';
@@ -18,23 +16,14 @@ import * as artikel from './artikelExtractor.js';
 const txt = (s) => (s || '').replace(/\s+/g, ' ').trim();
 const first = (...vals) => vals.find(v => !!txt(v));
 
-/** 将相对/脏 URL 统一绝对化、清洗 query/空格等 */
 export function normalizeUrl(base, href) {
   const raw = txt(href);
   if (!raw) return '';
-
-  // mailto/tel 等直接丢弃
   if (/^(mailto:|tel:|javascript:)/i.test(raw)) return '';
-
   try {
-    // 已是绝对路径
     if (/^https?:\/\//i.test(raw)) return new URL(raw).toString();
-    // 相对路径需要 base
     if (base) return new URL(raw, base).toString();
-  } catch {
-    // 忽略解析失败
-  }
-  // 实在不行原样返回，后续 fetchOne 会兜底
+  } catch {}
   return raw;
 }
 
@@ -50,14 +39,11 @@ function pickTitle($) {
 function pickImage($, baseUrl) {
   const og = $('meta[property="og:image"]').attr('content');
   if (og) return normalizeUrl(baseUrl, og);
-
   const imgEl =
     $('img[itemprop="image"]').first()[0] ||
     $('img.product-image, .product__media img, .gallery img, img[data-zoom-image]').first()[0] ||
     $('img').first()[0];
-
   if (!imgEl) return '';
-
   const $img = $(imgEl);
   const raw =
     $img.attr('data-src') ||
@@ -65,29 +51,21 @@ function pickImage($, baseUrl) {
     ($img.attr('srcset') || '').split(/\s+/)[0] ||
     $img.attr('src') ||
     '';
-
   return normalizeUrl(baseUrl, raw);
 }
 
 function pickPrice($) {
-  // 结构化优先
   const p1 = $('meta[itemprop="price"]').attr('content');
   if (p1) return txt(p1);
-
-  // 常见选择器
   const priceSel = [
     '.price--content', '.price--default', '.product-price', '.price', '[itemprop="price"]',
     '.product__price', '.price__current', '.product-price__price'
   ].join(', ');
-
   const raw = $(priceSel).first().text();
   if (raw) return txt(raw);
-
-  // 兜底：页面文本找货币
   const body = $('body').text();
   const m = body.match(/([0-9]+[.,][0-9]{2})\s?(€|EUR|CHF|USD|¥|RMB)/i);
   if (m) return `${m[1]} ${m[2]}`;
-
   return '';
 }
 
@@ -101,17 +79,11 @@ function pickDescription($) {
 }
 
 function heuristicsSku($) {
-  // 1) 结构化 & 标签
   const metaSku = $('meta[itemprop="sku"]').attr('content') || $('meta[name="sku"]').attr('content');
   if (metaSku && artikel.extract?.(metaSku)) return txt(metaSku);
-
   const labelLike = [
-    '*:contains("Artikel-Nr")',
-    '*:contains("Artikelnummer")',
-    '*:contains("SKU")',
-    '*:contains("Bestellnummer")',
-    '*:contains("Part Number")',
-    '*[itemprop="sku"]'
+    '*:contains("Artikel-Nr")','*:contains("Artikelnummer")','*:contains("SKU")',
+    '*:contains("Bestellnummer")','*:contains("Part Number")','*[itemprop="sku"]'
   ];
   for (const sel of labelLike) {
     const node = $(sel).first();
@@ -120,86 +92,61 @@ function heuristicsSku($) {
     const fromLabel = artikel.extract?.(t);
     if (fromLabel) return fromLabel;
   }
-
-  // 2) 页面全文兜底
   const page = txt($('body').text());
   const fromPage = artikel.extract?.(page);
   if (fromPage) return fromPage;
-
   return '';
 }
 
-// ---------- 策略：是否值得触发补抓 ----------
 export function shouldFetch(items, { key = 'sku', threshold = 0.5 } = {}) {
   if (!Array.isArray(items) || !items.length) return false;
   const missing = items.filter(x => !x || !txt(x[key])).length;
   return missing / items.length >= threshold;
 }
 
-// ---------- 核心：抓取单个详情页并解析 ----------
-async function fetchOne(url, { timeout = 15000 } = {}) {
-  const html = await http.get(url, { timeout });
+// ---------- 抓取单个详情页并解析 ----------
+async function fetchOne(url, { timeout = 15000, fetchHtml } = {}) {
+  const html = fetchHtml
+    ? await fetchHtml(url, { timeout })
+    : await http.get(url, { timeout });
   const $ = load(html);
-
   const title = txt(pickTitle($));
   const price = txt(pickPrice($));
   const image = txt(pickImage($, url));
   const description = txt(pickDescription($));
-
-  // SKU：先结构化/标签+正则，再兜底
   const sku = txt(heuristicsSku($));
-
   return { url, sku, title, price, image, description };
 }
 
-// ---------- 批量：只返回详情字段，不合并 ----------
+// ---------- 批量：只返回详情字段 ----------
 export async function fetchDetails(
   links = [],
-  {
-    base,            // 可传入目录页 URL，便于把相对链接变绝对
-    concurrency = 6,
-    timeout = 15000
-  } = {}
+  { base, concurrency = 6, timeout = 15000, fetchHtml } = {}
 ) {
   if (!Array.isArray(links) || !links.length) return [];
-
-  // 先统一规范化 URL；若第一条是绝对链接，则优先用它的 origin 当 base
   let inferredBase = base;
   const firstAbs = links.find(href => /^https?:\/\//i.test(String(href || '')));
   if (!inferredBase && firstAbs) {
     try { inferredBase = new URL(firstAbs).origin; } catch {}
   }
-
-  const normalized = links
-    .map(href => normalizeUrl(inferredBase, href))
-    .filter(Boolean);
-
+  const normalized = links.map(href => normalizeUrl(inferredBase, href)).filter(Boolean);
   const limit = pLimit(concurrency);
   const jobs = normalized.map(url => limit(async () => {
-    try { return await fetchOne(url, { timeout }); }
+    try { return await fetchOne(url, { timeout, fetchHtml }); }
     catch { return { url, sku: '', title: '', price: '', image: '', description: '' }; }
   }));
-
   return Promise.all(jobs);
 }
 
-// ---------- 兼容：传 items 进来，原地合并（用于老调用方） ----------
+// ---------- 兼容：传 items 进来，原地合并 ----------
 export async function fetch(
   items = [],
-  {
-    base,                // 传目录页 URL
-    concurrency = 6,
-    timeout = 15000,
-    merge = (item, extra) => Object.assign(item, extra),
-  } = {}
+  { base, concurrency = 6, timeout = 15000, fetchHtml, merge = (item, extra) => Object.assign(item, extra) } = {}
 ) {
   if (!Array.isArray(items) || !items.length) return items;
-
   const links = items.map(x => x.link || x.url).filter(Boolean);
-  const res = await fetchDetails(links, { base, concurrency, timeout });
+  const res = await fetchDetails(links, { base, concurrency, timeout, fetchHtml });
   const byUrl = new Map(res.map(r => [r.url, r]));
-
-  // 合并：仅补空白；SKU 如果原值缺失/可疑则覆盖
   for (const it of items) {
     const u = normalizeUrl(base, it.link || it.url);
     const r = byUrl.get(u);
@@ -211,12 +158,11 @@ export async function fetch(
       price: it.price || r.price,
       image: it.image || r.image,
       description: it.description || r.description,
-      url: u, // 顺便把规范化后的 URL 写回
+      url: u,
       link: undefined
     });
   }
   return items;
 }
 
-// 兼容别名：一些旧代码可能使用这个名字
 export const fetchDetailsAndMerge = fetch;
