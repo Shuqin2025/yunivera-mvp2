@@ -1,5 +1,5 @@
 // backend/routes/catalog.js
-// 统一目录解析：GET/POST /v1/api/catalog/parse
+// 统一目录解析：GET/POST /v1/api/catalog(/parse)
 // - axios(arraybuffer) + jschardet + iconv-lite 自动探测与解码（gb* → gb18030）
 // - 命中站点适配器（sinotronic / memoryking / templateParser / universal），否则走通用兜底
 // - debug=1 时回传完整调试信息
@@ -51,8 +51,6 @@ async function __snap(tag, data) {
   try { if (typeof snapshot === 'function') { await snapshot(tag, data || {}); } }
   catch { /* no-op */ }
 }
-
-
 
 /* ---------------------- Playwright（可选依赖，动态加载） --------------------- */
 let chromium = null;
@@ -182,7 +180,14 @@ async function fetchHtml(url, wantDebug) {
 
   const buf = Buffer.from(res.data);
   const guess = (jschardet.detect(buf)?.encoding || "").toLowerCase();
-  const useEnc = !guess || guess === "ascii" ? "utf-8" : guess.includes("gb") ? "gb18030" : iconv.encodingExists(guess) ? guess : "utf-8";
+  const useEnc =
+    !guess || guess === "ascii"
+      ? "utf-8"
+      : guess.includes("gb")
+      ? "gb18030"
+      : iconv.encodingExists(guess)
+      ? guess
+      : "utf-8";
 
   const html = iconv.decode(buf, useEnc);
 
@@ -418,15 +423,18 @@ async function runExtract(url, html, { limit = 50, debug = false, hintType = "" 
 }
 
 /* ----------------------------------- 路由 ---------------------------------- */
-router.all("/parse", async (req, res) => {
+// 把原来的 /parse 逻辑封装成一个可复用的处理器
+const parseHandler = async (req, res) => {
+  // 在 catch 中也要能访问到 hintType，所以先声明
+  let hintType = "";
   try {
     const isGet = req.method === "GET";
     const qp = isGet ? req.query : req.body || {};
-    __dbgR('parse.start', { url: req?.body?.url || req?.query?.url });
-    const DEBUG = process.env.DEBUG === '1' || process.env.DEBUG === 'true';
+    __dbgR("parse.start", { url: req?.body?.url || req?.query?.url });
+    const DEBUG = process.env.DEBUG === "1" || process.env.DEBUG === "true";
 
     const url = String(qp.url || "").trim();
-    // ★ 新增：入口最小化日志
+    // ★ 最小化日志
     logger.debug(`[route/catalog.parse] url=${url} size=${qp.size ?? ""}`);
 
     if (!url) return res.status(400).json({ ok: false, error: "missing url" });
@@ -440,12 +448,14 @@ router.all("/parse", async (req, res) => {
     const wantDebug = ["1", "true", "yes", "on"].includes(String(rawDebug ?? "").toLowerCase());
 
     // ★ 解析前端 hint（t/type）
-    let hintType = (qp.t || qp.type || "").toString();
+    hintType = (qp.t || qp.type || "").toString();
 
     // ★ 浏览器渲染开关
-    const useBrowser = ["1", "true", "yes", "on"].includes(String(qp.useBrowser || qp.browser || "").toLowerCase());
+    const useBrowser = ["1", "true", "yes", "on"].includes(
+      String(qp.useBrowser || qp.browser || "").toLowerCase()
+    );
     await __snap("parse:enter", { url, limit, t: qp.t });
-    DEBUG && console.log('[struct]', 'parse:start', { url, hintType, useBrowser });
+    DEBUG && console.log("[struct]", "parse:start", { url, hintType, useBrowser });
 
     let items = [];
     let adapter_used = "";
@@ -462,9 +472,9 @@ router.all("/parse", async (req, res) => {
       });
       try {
         const r = await getParseCatalog()(page, url, hintType || "");
-        const browProducts = (r && Array.isArray(r.products)) ? r.products : [];
+        const browProducts = r && Array.isArray(r.products) ? r.products : [];
         if (browProducts.length) {
-          // 统一结构（与后续保持一致字段）
+          // 统一结构
           items = browProducts.map((p) => ({
             sku: p.sku || "",
             title: p.title || p.name || "",
@@ -485,33 +495,34 @@ router.all("/parse", async (req, res) => {
 
     /* -------------------- 路线 B：Cheerio（默认） -------------------- */
     if (!items.length) {
-      
-const strat = decideFetchStrategy({ url, hintType });
-const fetched = await fetchHtmlAdaptive({ url, strategy: strat });
-const { html: htmlFromAdaptive, status, used } = fetched || {};
-html = htmlFromAdaptive;
-if (!html) {
-  throw Object.assign(new Error("crawlPages: fetchHtml is required"), {
-    code: "FETCH_EMPTY",
-    status,
-    used,
-  });
-}
-try {
-  const preClass = classify(url, html);
-  if (!hintType && preClass && preClass.adapterHint) {
-    hintType = preClass.platform;
-  }
-  try { await snapshot("pre-classify", { url, preClass }); } catch {}
-} catch {}
-
-    
+      const strat = decideFetchStrategy({ url, hintType });
+      const fetched = await fetchHtmlAdaptive({ url, strategy: strat });
+      const { html: htmlFromAdaptive, status, used } = fetched || {};
+      html = htmlFromAdaptive;
+      if (!html) {
+        throw Object.assign(new Error("crawlPages: fetchHtml is required"), {
+          code: "FETCH_EMPTY",
+          status,
+          used,
+        });
+      }
+      try {
+        const preClass = classify(url, html);
+        if (!hintType && preClass && preClass.adapterHint) {
+          hintType = preClass.platform;
+        }
+        try { await snapshot("pre-classify", { url, preClass }); } catch {}
+      } catch {}
 
       const ret = await runExtract(url, html, { limit, debug: wantDebug, hintType });
       items = ret.items || [];
       adapter_used = ret.adapter_used || "auto";
       debugPart = ret.debugPart;
-      await __snap("parse:adapter", { adapter: adapter_used, platform: (hintType || undefined), type: (debugPart && (debugPart.type || debugPart.platform || debugPart.adapter)) || undefined });
+      await __snap("parse:adapter", {
+        adapter: adapter_used,
+        platform: hintType || undefined,
+        type: (debugPart && (debugPart.type || debugPart.platform || debugPart.adapter)) || undefined,
+      });
     }
 
     /* -------------------- 可选：前 N 张图转 base64 -------------------- */
@@ -552,7 +563,17 @@ try {
     try {
       if (DEBUG) {
         const sample = (products && products[0] && (products[0].url || products[0].link)) || null;
-        console.log('[route]', 'adapter=', adapter_used, 'count=', Array.isArray(products) ? products.length : -1, 'url=', url, 'sample=', sample);
+        console.log(
+          "[route]",
+          "adapter=",
+          adapter_used,
+          "count=",
+          Array.isArray(products) ? products.length : -1,
+          "url=",
+          url,
+          "sample=",
+          sample
+        );
       }
     } catch (_) {}
     // ===== /DEBUG =====
@@ -560,9 +581,9 @@ try {
     const resp = {
       ok: true,
       url,
-      count: count,
+      count,
       products, // 前端直接使用 products
-      items, // 兼容旧字段
+      items,    // 兼容旧字段
       adapter: adapter_used, // 给前端 toast 显示“来源：xxx”
     };
 
@@ -578,21 +599,39 @@ try {
 
     if (wantMetrics) resp.fieldsRate = fieldsRate;
 
-    // ★ 新增：出口最小化日志
-    logger.debug(`[route/catalog.parse] done url=${url} adapter=${resp?.adapter} count=${resp?.products?.length ?? 0}`);
+    // ★ 出口最小化日志
+    logger.debug(
+      `[route/catalog.parse] done url=${url} adapter=${resp?.adapter} count=${resp?.products?.length ?? 0}`
+    );
 
-    __dbgR('parse.done', { url: req?.body?.url || req?.query?.url, adapter: resp?.adapter, count: resp?.products?.length });
+    __dbgR("parse.done", {
+      url: req?.body?.url || req?.query?.url,
+      adapter: resp?.adapter,
+      count: resp?.products?.length,
+    });
     if ((resp?.products?.length || 0) === 0) {
-      __dbgR('parse.empty', { url: req?.body?.url || req?.query?.url, note: 'NoProductFound after adapter run' });
+      __dbgR("parse.empty", {
+        url: req?.body?.url || req?.query?.url,
+        note: "NoProductFound after adapter run",
+      });
     }
     return res.json(resp);
   } catch (err) {
-    // ★ 新增：异常日志
-    logger.error(`[route/catalog.parse] ERROR url=${req?.body?.url || req?.query?.url} -> ${err?.message || err}`);
+    // ★ 异常日志
+    logger.error(
+      `[route/catalog.parse] ERROR url=${req?.body?.url || req?.query?.url} -> ${err?.message || err}`
+    );
     try { await errorCollector.note(err, { route: "catalog.parse", url: req?.body?.url || req?.query?.url, hintType }); } catch {}
     try { await __snap("parse:error", { url: req?.body?.url || req?.query?.url, error: err?.message || String(err) }); } catch {}
     return res.status(200).json({ ok: false, error: String(err?.message || err) });
   }
-});
+};
+
+// 原始路径（保留）
+router.all("/parse", parseHandler);
+
+// ★★★ 新增：别名路由（与 /parse 完全等价）★★★
+router.all("/catalog", parseHandler);       // /v1/catalog
+router.all("/api/catalog", parseHandler);   // /v1/api/catalog
 
 export default router;
