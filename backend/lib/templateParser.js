@@ -78,7 +78,6 @@ const GENERIC_LINK_BAD = new RegExp(
 );
 
 // —— 极简兜底（最后一道保险）——
-// 尽量从“看起来像商品卡片/可点击图片/标题”的节点里收集链接
 function fallbackParse($, url, limit = 50) {
   const items = [];
   const seen = new Set();
@@ -163,7 +162,8 @@ export async function parse(html, url, opts = {}) {
   const {
     limit = 50,
     typeHint = '',
-    detail = {}
+    detail = {},
+    fetchHtml,          // <── 重要：把路由层兜底下来的 fetchHtml 接住
   } = opts;
 
   const enableDetail = detail.enable !== false;
@@ -172,7 +172,7 @@ export async function parse(html, url, opts = {}) {
 
   const $ = load(html);
 
-  // 1) 检测结构 & 平台（用于选择解析路径 + 记录调试信息）
+  // 1) 检测结构 & 平台
   let structure = { type: '', platform: '' };
   try {
     if (typeof detectStructure === "function") {
@@ -189,22 +189,22 @@ export async function parse(html, url, opts = {}) {
   }
   __dbgT('choose-adapter.in', { url, platform: structure?.platform, hints: structure });
 
-  // 【新增】在真正挑选适配器之前打一条 pickAdapter 预日志
-  logger?.debug?.(`[template] pickAdapter url=${url} -> (pre) platform=${platformFromDetect || '-'} type=${type || '-'}`);
+  logger?.debug?.(
+    `[template] pickAdapter url=${url} -> (pre) platform=${platformFromDetect || '-'} type=${type || '-'}`
+  );
 
-  // 2) 选择解析器：平台 → generic-links → 极简兜底
+  // 2) 选择解析器
   let adapterName = '';
   let items = [];
 
-  // 2.1 平台解析（优先）
+  // 2.1 平台解析
   const chosenAdapter = platformFromDetect && map[platformFromDetect];
   if (chosenAdapter && typeof chosenAdapter.parse === 'function') {
     items = withFallback(chosenAdapter.parse, $, url, limit, platformFromDetect);
     adapterName = platformFromDetect;
   }
 
-  // 2.2 平台解析拿不到结果：尝试 generic-links（更“懂”目录页里的深层商品锚点）
-  //    - 如果 detector 判断是 catalog，优先试 generic-links
+  // 2.2 generic-links
   if (!items.length || type === 'catalog' || !adapterName) {
     const reason =
       !items.length && adapterName ? 'no-products'
@@ -224,7 +224,7 @@ export async function parse(html, url, opts = {}) {
     }
   }
 
-  // 2.3 仍无结果：极简兜底
+  // 2.3 极简兜底
   if (!items.length) {
     items = fallbackParse($, url, limit);
     if (!adapterName) adapterName = 'fallback';
@@ -233,7 +233,6 @@ export async function parse(html, url, opts = {}) {
   }
 
   __dbgT('choose-adapter.out', { url, adapter: adapterName || 'generic-links' });
-  // 【新增】最终确定适配器后打一条日志
   logger?.debug?.(
     `[template] pickAdapter url=${url} -> ${adapterName || 'fallback'} struct=${safeJson(structure)}`
   );
@@ -268,10 +267,12 @@ export async function parse(html, url, opts = {}) {
     if (need.length) {
       try {
         if (details && typeof details.fetchDetails === "function") {
+          // >>> 修改点：把 fetchHtml 透传给 detailFetcher
           const enriched = await details.fetchDetails(
             need.map(x => x.link),
-            { concurrency, timeout: 15000 }
+            { concurrency, timeout: 15000, fetchHtml }
           );
+
           const byUrl = new Map(unified.map(x => [x.link, x]));
           for (const r of enriched || []) {
             const t = byUrl.get(r.url);
@@ -302,8 +303,6 @@ export async function parse(html, url, opts = {}) {
 
 /* -------------------------------------------------------------------------- */
 /*                  Puppeteer 路线：parseCatalog(page, url, …)                */
-/*   进入页面=等待 networkidle0 + 轻滚动触发懒加载 + 等待产品线索                */
-/*   evaluate 真正读取渲染后 DOM；失败时可选择截屏；再做去噪与去重              */
 /* -------------------------------------------------------------------------- */
 
 const PRODUCT_HINTS = [
@@ -320,44 +319,36 @@ const WAIT_SELECTOR = PRODUCT_HINTS.join(', ');
  */
 export async function parseCatalog(page, url, adapterHint) {
   const t0 = Date.now();
-  logger?.info?.(`[parseCatalog] ▶️ open ${url} (hint=${adapterHint || '-'})`);
+  logger?.info?.(`[parseCatalog]▶️ open ${url} (hint=${adapterHint || '-'})`);
 
-  // 1) 进入页面 + 等待网络空闲（networkidle0）+ 一点点时间给懒加载
   try {
     await page.goto(url, { waitUntil: 'networkidle0', timeout: 60_000 });
   } catch (_) {}
   await page.waitForTimeout(800);
 
-  // 等候产品线索出现；若失败继续走 fallback（不要直接 throw）
   let found = await page.$(WAIT_SELECTOR);
   if (!found) {
-    // 轻度滚动触发懒加载
     await autoScroll(page, 1200);
     await page.waitForTimeout(600);
     found = await page.$(WAIT_SELECTOR);
   }
 
-  // 2) evaluate 真正读取“渲染后的 DOM”
   const result = await page.evaluate((HINTS) => {
     const sel = HINTS.join(', ');
     const cards = Array.from(document.querySelectorAll(sel));
 
-    // 如果还没抓到产品卡，降级用“深层 a[href]”兜底（避开 Logo / 顶导航）
     const deepAnchors = (cards.length ? [] : Array.from(
       document.querySelectorAll('main a[href], .content a[href], .page a[href]')
     )).filter(a => {
       const href = (a.getAttribute('href') || '').toLowerCase();
       const txt = (a.textContent || '').trim().toLowerCase();
-      // 排除登录/隐私/关于等明显非产品
       if (/login|anmelden|agb|datenschutz|kontakt|impressum|support|widerruf/i.test(href + ' ' + txt)) return false;
-      // 仅保留看起来像商品/分类的链接
       return /product|prod|artikel|item|sku|\/p\/|\/dp\/|\/shop\//i.test(href) || /\b(kabel|socken|dell|server|audio)\b/i.test(txt);
-    }).slice(0, 120); // 限制数量，防炸
+    }).slice(0, 120);
 
     const nodes = cards.length ? cards : deepAnchors;
 
     const products = nodes.map((n) => {
-      // 兼容 <a> 或 <div.card>
       const root = n.tagName === 'A' ? n : (n.closest('a') || n);
       const find = (s) => root.querySelector(s);
 
@@ -381,7 +372,6 @@ export async function parseCatalog(page, url, adapterHint) {
     return { products, hintUsed: cards.length ? 'cards' : 'deepAnchors' };
   }, PRODUCT_HINTS);
 
-  // 3) 调试快照（按需打开）
   if (process.env.DEBUG_SNAPSHOT === '1') {
     try {
       await page.screenshot({ path: `debug_${Date.now()}.png`, fullPage: true });
@@ -389,14 +379,12 @@ export async function parseCatalog(page, url, adapterHint) {
     logger?.info?.(`[parseCatalog] snapshot saved. hint=${result.hintUsed} count=${result.products.length}`);
   }
 
-  // 去掉明显的“整站页块” & 空标题“item”重复项
   const filtered = dedupeAndFilter(result.products);
 
   logger?.info?.(
     `[parseCatalog] ✅ parsed=${filtered.length} (raw=${result.products.length}, hint=${result.hintUsed}, ${Date.now()-t0}ms)`
   );
 
-  // 始终返回统一结构
   return {
     ok: true,
     count: filtered.length,
@@ -412,12 +400,9 @@ function dedupeAndFilter(items) {
     if (!p || !p.url) continue;
     const both = (String(p.url) + ' ' + String(p.title || '')).toLowerCase();
     if (bad.test(both)) continue;
-
-    // 去掉 title === "item" 且 URL 重复的
     const key = (p.url.split('#')[0] || '') + '::' + (p.title || '');
     if (seen.has(key)) continue;
     seen.add(key);
-
     out.push(p);
   }
   return out.slice(0, 200);
