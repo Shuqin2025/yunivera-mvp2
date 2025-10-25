@@ -182,9 +182,6 @@ function isSiteLink(link = "", title = "") {
   return false;
 }
 
-/* ------------------------------ 抓取并解码 HTML ----------------------------- */
-// ↑ fetchHtml 已在上面定义（供 ensureFetchHtml 回退使用）
-
 /* ------------------------------- 通用兜底抽取 ------------------------------ */
 function genericExtract($, baseUrl, { limit = 50, debug = false } = {}) {
   const tried = { container: [], item: [] };
@@ -263,7 +260,7 @@ function chooseAdapter({ url, $, html, hintType, host }) {
     }
     if (t === "memoryking") return "memoryking";
   }
-  if (/(^|\.)memoryking\.de$/i.test(host)) return "memoryking";
+  if (/(^|\. )memoryking\.de$/i.test(host)) return "memoryking";
 
   const det = detectStructure(html || $);
   if (det && det.type) {
@@ -496,10 +493,8 @@ const parseHandler = async (req, res) => {
     const wantSnapshot = ["1", "true", "yes", "on"].includes(String(qp.snapshot || qp.debug || "").toLowerCase());
 
     try {
-      if (DEBUG) {
-        const sample = (products && products[0] && (products[0].url || products[0].link)) || null;
-        console.log("[route]", "adapter=", adapter_used, "count=", Array.isArray(products) ? products.length : -1, "url=", url, "sample=", sample);
-      }
+      const sample = (products && products[0] && (products[0].url || products[0].link)) || null;
+      logger.debug("[route]", "adapter=", adapter_used, "count=", Array.isArray(products) ? products.length : -1, "url=", url, "sample=", sample);
     } catch (_) {}
 
     const resp = {
