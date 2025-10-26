@@ -1,6 +1,6 @@
 // backend/routes/catalog.js
 // 统一目录解析：GET/POST /v1/catalog /v1/api/catalog (/parse)
-// - axios(arraybuffer) + jschardet + iconv-lite 自动探测与解码（gb* → gb18030）
+// - axios(arraybuffer) + jschardet + iconv-lite 自动探测与解码
 // - 命中站点适配器（sinotronic / memoryking / templateParser / universal），否则走通用兜底
 // - debug=1 时回传完整调试信息
 // - useBrowser=1 时优先用 Playwright + templateParser.parseCatalog 抓“渲染后 DOM”
@@ -10,38 +10,32 @@ import axios from "axios";
 import * as cheerio from "cheerio";
 import jschardet from "jschardet";
 import iconv from "iconv-lite";
-import fs from "node:fs";         // （保留：有些子模块可能依赖 fs/path）
+import fs from "node:fs";
 import path from "node:path";
 
-// 站点适配器（专用）
 import sinotronic from "../adapters/sinotronic.js";
-import memoryking from "../adapters/memoryking.js"; // 导出形态：{ test?, parse($,url,...)? } / 或 parse()
+import memoryking from "../adapters/memoryking.js";
 
 // 模板解析中枢 + 通用适配器
 import { detectStructure } from "../lib/structureDetector.js";
-import templateParser from "../lib/templateParser.js"; // 可能是函数，也可能是 { parse, parseCatalog }
-import universal from "../adapters/universal.js";      // 默认导出：async ({url,limit,debug}) => [...]
+import templateParser from "../lib/templateParser.js";
+import universal from "../adapters/universal.js";
 
-// 路由级日志
 import logger from "../lib/logger.js";
-
-// 调试：阶段快照（可选）
 import snapshot from "../lib/debugSnapshot.js";
 
-// 自适应抓取 & 模板聚合 & 错误收集
 import { decideFetchStrategy, fetchHtml as fetchHtmlAdaptive } from "../modules/adaptiveCrawler.js";
 import { classify } from "../modules/templateCluster.js";
 import * as errorCollector from "../modules/errorCollector.js";
 
-/* ----------------------------------------------------------------------------
-   抓取 HTML：带自动回退
-   ------------------------------------------------------------------------- */
+// --------------------------------------------------
+// fetchHtml helpers
+// --------------------------------------------------
 
 const UA_DESKTOP =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
 
-// 基础版抓取（直接用 axios + 自动编码探测）
-async function fetchHtml(url, wantDebug) {
+async function fetchHtmlBasic(url, wantDebug) {
   const res = await axios.get(url, {
     responseType: "arraybuffer",
     timeout: 20000,
@@ -72,9 +66,8 @@ async function fetchHtml(url, wantDebug) {
   return { html, status: res.status, detected_encoding: useEnc, debugFetch };
 }
 
-// 高级版抓取：先试 adaptiveCrawler（可能用浏览器 / 特殊 headers）→ 失败才回落到上面
+// 高级：先 adaptiveCrawler -> fallback axios/iconv
 async function ensureFetchHtml(url, wantDebug, hintType = "") {
-  // 1) 先尝试 adaptiveCrawler
   try {
     const strat = decideFetchStrategy({ url, hintType });
     const fetched = await fetchHtmlAdaptive({ url, strategy: strat });
@@ -87,20 +80,16 @@ async function ensureFetchHtml(url, wantDebug, hintType = "") {
       };
     }
   } catch {
-    // ignore，继续走回退
+    /* ignore */
   }
 
-  // 2) 回落到本地 axios+iconv 路线
-  const r = await fetchHtml(url, wantDebug);
+  const r = await fetchHtmlBasic(url, wantDebug);
   return { html: r.html, debugFetch: r.debugFetch };
 }
 
-// Router 实例
-const router = Router();
-
-/* ----------------------------------------------------------------------------
-   小型 debug/snapshot helpers
-   ------------------------------------------------------------------------- */
+// --------------------------------------------------
+// helpers / dbg
+// --------------------------------------------------
 
 const __dbgR = (tag, data) => {
   try {
@@ -108,9 +97,7 @@ const __dbgR = (tag, data) => {
       const msg = typeof data === "string" ? data : JSON.stringify(data);
       console.log(`[route] ${tag} ${msg}`);
     }
-  } catch {
-    /* no-op */
-  }
+  } catch {}
 };
 
 async function __snap(tag, data) {
@@ -118,25 +105,21 @@ async function __snap(tag, data) {
     if (typeof snapshot === "function") {
       await snapshot(tag, data || {});
     }
-  } catch {
-    /* no-op */
-  }
+  } catch {}
 }
 
-/* ----------------------------------------------------------------------------
-   （可选）Playwright 动态渲染
-   ------------------------------------------------------------------------- */
+// --------------------------------------------------
+// optional Playwright
+// --------------------------------------------------
 
 let chromium = null;
 try {
   ({ chromium } = await import("playwright"));
-} catch {
-  // 如果没装 Playwright，也不阻塞 Cheerio 路线
-}
+} catch {}
 
-/* ----------------------------------------------------------------------------
-   metrics / 质量统计
-   ------------------------------------------------------------------------- */
+// --------------------------------------------------
+// metrics helper
+// --------------------------------------------------
 
 function computeFieldsRate(list) {
   const keys = ["title", "url", "img", "price", "sku", "desc"];
@@ -150,9 +133,9 @@ function computeFieldsRate(list) {
   return out;
 }
 
-/* ----------------------------------------------------------------------------
-   通用 fallback 选择器（genericExtract）
-   ------------------------------------------------------------------------- */
+// --------------------------------------------------
+// generic fallback extractor
+// --------------------------------------------------
 
 const CONTAINER_FALLBACK = [
   "#productlist",
@@ -175,7 +158,6 @@ const ITEM_FALLBACK = [
   "li",
 ];
 
-// 需要过滤掉站点自己导航/客服/登录链接这些垃圾项
 const PATH_SKIP_PATTERNS = [
   /(^|\/)(hilfe|support|kontakt|impressum|agb|datenschutz|widerruf|versand|zahlung|news|blog)(\/|$)/i,
   /(^|\/)(login|logout|register|anmelden|abmelden|konto|account|mein-konto|profile)(\/|$)/i,
@@ -198,7 +180,7 @@ const SKIP_WORDS = [
 
 function isSiteLink(link = "", title = "") {
   try {
-    const u = new URL(link, "http://_/");
+    const u = new URL(link, "http://_/"); // dummy base
     const p = (u.pathname || "").toLowerCase();
     if (PATH_SKIP_PATTERNS.some((re) => re.test(p))) return true;
     if (SKIP_WORDS.some((w) => p.includes(w))) return true;
@@ -212,7 +194,7 @@ function isSiteLink(link = "", title = "") {
 function genericExtract($, baseUrl, { limit = 50, debug = false } = {}) {
   const tried = { container: [], item: [] };
 
-  // 1) 找到可能的商品容器
+  // 1) container
   let $container = $(), usedContainer = "";
   for (const sel of CONTAINER_FALLBACK) {
     tried.container.push(sel);
@@ -228,11 +210,11 @@ function genericExtract($, baseUrl, { limit = 50, debug = false } = {}) {
     usedContainer = "body";
   }
 
-  // 2) 从容器中抓条目（没抓到就全局兜底）
+  // 2) items
   let $items = $(), itemSelectorUsed = "";
   for (const sel of ITEM_FALLBACK) {
     let list = sel.startsWith("#") ? $(sel) : $container.find(sel);
-    if (!list.length) list = $(sel); // 全局兜底
+    if (!list.length) list = $(sel);
     tried.item.push(sel);
     if (list.length) {
       $items = list;
@@ -279,7 +261,6 @@ function genericExtract($, baseUrl, { limit = 50, debug = false } = {}) {
     title = title.replace(/\s+/g, " ").trim();
     if (!title && !img && !link) return;
 
-    // 过滤站点导航等无关链接
     if (isSiteLink(link, title)) return;
 
     items.push({
@@ -305,9 +286,9 @@ function genericExtract($, baseUrl, { limit = 50, debug = false } = {}) {
   return { items, debugPart };
 }
 
-/* ----------------------------------------------------------------------------
-   适配器挑选逻辑
-   ------------------------------------------------------------------------- */
+// --------------------------------------------------
+// adapter decision helpers
+// --------------------------------------------------
 
 function chooseAdapter({ url, $, html, hintType, host }) {
   if (hintType) {
@@ -338,20 +319,16 @@ function chooseAdapter({ url, $, html, hintType, host }) {
   return "generic";
 }
 
-// 把 templateParser 的多种导出形式统一成 async(...) => [items]
+// unify templateParser export styles
 function callTemplateParse(html, url, opts) {
   try {
     if (templateParser && typeof templateParser.parse === "function") {
-      // 新版模板：templateParser.parse($, url, opts)
       return templateParser.parse(loadHtml(html), url, opts);
     }
     if (typeof templateParser === "function") {
-      // 老版模板：templateParser({ html, url, ...opts })
       return templateParser({ html, url, ...(opts || {}) });
     }
-  } catch {
-    /* ignore */
-  }
+  } catch {}
   return Promise.resolve([]);
 }
 
@@ -365,9 +342,30 @@ function loadHtml(html) {
   return cheerio.load(html, { decodeEntities: false });
 }
 
-/* ----------------------------------------------------------------------------
-   主提取逻辑（Cheerio 路线下）
-   ------------------------------------------------------------------------- */
+// 封装 universal，优先尝试“喂现成 html”
+// 如果 universal 这个版本支持 (url, html, opts)，我们用它；
+// 如果不支持，我们就直接跳过它，防止它自己触发 crawlPages。
+async function callUniversalWithHtml(url, html, { limit, debug }) {
+  try {
+    // 猜 1：universal({ url, html, limit, debug })
+    const u1 = await universal({ url, html, limit, debug });
+    if (u1 && (Array.isArray(u1) || u1.items || u1.products)) return u1;
+  } catch {}
+  try {
+    // 猜 2：universal(url, html, { limit, debug })
+    const u2 = await universal(url, html, { limit, debug });
+    if (u2 && (Array.isArray(u2) || u2.items || u2.products)) return u2;
+  } catch {}
+
+  // 最后尝试老签名 universal({ url, limit, debug })
+  // 但我们担心它会继续 crawlPages -> fetchHtml is required
+  // 所以为了安全，这里就不再 fallback 老签名了，直接返回空
+  return null;
+}
+
+// --------------------------------------------------
+// main extraction for cheerio-route
+// --------------------------------------------------
 
 async function runExtract(url, html, { limit = 50, debug = false, hintType = "" } = {}) {
   const $ = cheerio.load(html, { decodeEntities: false });
@@ -376,7 +374,7 @@ async function runExtract(url, html, { limit = 50, debug = false, hintType = "" 
   let items = [];
   let debugPart;
 
-  // 0) sinotronic 专用
+  // 0) sinotronic
   if (sinotronic.test && sinotronic.test(url)) {
     const out = sinotronic.parse($, url, { limit, debug });
     items = out.items || [];
@@ -384,36 +382,27 @@ async function runExtract(url, html, { limit = 50, debug = false, hintType = "" 
     used = "sinotronic-e";
   }
 
-  // 1) 根据域名/结构猜测适配器
+  // 1) choose adapter
   if (!items.length) {
     const host = (() => {
-      try {
-        return new URL(url).host;
-      } catch {
-        return "";
-      }
+      try { return new URL(url).host; } catch { return ""; }
     })();
     const which = chooseAdapter({ url, $, html, hintType, host });
 
     if (which === "memoryking") {
       const out = memoryking.parse($, url, { limit, debug });
-      let mmItems = Array.isArray(out)
-        ? out
-        : out.items || out.products || [];
+      let mmItems = Array.isArray(out) ? out : out.items || out.products || [];
       if (debug && !debugPart) debugPart = out?.debugPart;
 
       if (!mmItems || mmItems.length === 0) {
-        // memoryking 失败 → 尝试模板
+        // fallback template
         const tOut = await callTemplateParse(html, url, { limit, debug });
-        mmItems = Array.isArray(tOut)
-          ? tOut
-          : tOut?.items || tOut?.products || [];
+        mmItems = Array.isArray(tOut) ? tOut : tOut?.items || tOut?.products || [];
+
         if (!mmItems || mmItems.length === 0) {
-          // 模板也空 → universal 兜底
-          const u = await universal({ url, limit, debug });
-          mmItems = Array.isArray(u)
-            ? u
-            : u?.items || u?.products || [];
+          // fallback universal (safe wrapper)
+          const u = await callUniversalWithHtml(url, html, { limit, debug });
+          mmItems = Array.isArray(u) ? u : u?.items || u?.products || [];
           used = "universal-fallback";
         } else {
           used = "template-fallback";
@@ -422,47 +411,43 @@ async function runExtract(url, html, { limit = 50, debug = false, hintType = "" 
         used = "memoryking";
       }
       items = mmItems || [];
-    } else if (which === "template") {
-      // Shopware/Woo/Magento 等标准电商
+    }
+    else if (which === "template") {
       const tOut = await callTemplateParse(html, url, { limit, debug });
-      items = Array.isArray(tOut)
-        ? tOut
-        : tOut?.items || tOut?.products || [];
+      items = Array.isArray(tOut) ? tOut : tOut?.items || tOut?.products || [];
       used = "template";
 
       if (!items || items.length === 0) {
-        const u = await universal({ url, limit, debug });
-        items = Array.isArray(u)
-          ? u
-          : u?.items || u?.products || [];
-        used = "universal-fallback";
+        const u = await callUniversalWithHtml(url, html, { limit, debug });
+        const cand = Array.isArray(u) ? u : u?.items || u?.products || [];
+        if (cand && cand.length) {
+          items = cand;
+          used = "universal-fallback";
+        }
       }
-    } else if (which === "generic") {
-      // generic 先试模板
+    }
+    else if (which === "generic") {
+      // try template anyway
       const tOut = await callTemplateParse(html, url, { limit, debug });
-      let tmp = Array.isArray(tOut)
-        ? tOut
-        : tOut?.items || tOut?.products || [];
+      let tmp = Array.isArray(tOut) ? tOut : tOut?.items || tOut?.products || [];
       if (tmp && tmp.length) {
         items = tmp;
         used = "template-try";
       }
-    }
 
-    if (!items.length) {
-      // 还没抓到 → 尝试 universal 抓站
-      const u = await universal({ url, limit, debug });
-      items = Array.isArray(u)
-        ? u
-        : u?.items || u?.products || [];
-      if (items && items.length) {
-        used =
-          used === "generic" ? "universal" : (used || "universal");
+      // still empty, try universal (safe)
+      if (!items.length) {
+        const u = await callUniversalWithHtml(url, html, { limit, debug });
+        const cand = Array.isArray(u) ? u : u?.items || u?.products || [];
+        if (cand && cand.length) {
+          items = cand;
+          used = "universal";
+        }
       }
     }
   }
 
-  // 2) 都没命中 → generic fallback
+  // 2) genericExtract fallback
   if (!items.length) {
     const out = genericExtract($, url, { limit, debug });
     items = out.items || [];
@@ -473,9 +458,11 @@ async function runExtract(url, html, { limit = 50, debug = false, hintType = "" 
   return { items, adapter_used: used, debugPart };
 }
 
-/* ----------------------------------------------------------------------------
-   统一 handler（GET/POST /parse, /catalog, /api/catalog）
-   ------------------------------------------------------------------------- */
+// --------------------------------------------------
+// parseHandler (GET/POST)
+// --------------------------------------------------
+
+const router = Router();
 
 const parseHandler = async (req, res) => {
   let hintType = "";
@@ -490,47 +477,32 @@ const parseHandler = async (req, res) => {
       process.env.DEBUG === "true";
 
     const url = String(qp.url || "").trim();
-    logger.debug(
-      `[route/catalog.parse] url=${url} size=${qp.size ?? ""}`
-    );
+    logger.debug(`[route/catalog.parse] url=${url} size=${qp.size ?? ""}`);
     if (!url) {
-      return res
-        .status(400)
-        .json({ ok: false, error: "missing url" });
+      return res.status(400).json({ ok: false, error: "missing url" });
     }
 
-    const limit = Math.max(
-      1,
-      parseInt(qp.limit ?? 50, 10) || 50
-    );
+    const limit = Math.max(1, parseInt(qp.limit ?? 50, 10) || 50);
 
     const imgMode = String(qp.img || "").toLowerCase(); // "base64" | ""
-    const imgCount = Math.max(
-      0,
-      parseInt(qp.imgCount ?? 0, 10) || 0
-    );
+    const imgCount = Math.max(0, parseInt(qp.imgCount ?? 0, 10) || 0);
 
-    const rawDebug =
-      qp.debug ?? qp.debug1 ?? qp.debug_1;
+    const rawDebug = qp.debug ?? qp.debug1 ?? qp.debug_1;
     const wantDebug = ["1", "true", "yes", "on"].includes(
       String(rawDebug ?? "").toLowerCase()
     );
 
-    // 前端 hint（t/type）
+    // 前端 hint
     hintType = (qp.t || qp.type || "").toString();
 
-    // 浏览器渲染（Playwright）开关
+    // 浏览器渲染
     const useBrowser = ["1", "true", "yes", "on"].includes(
       String(qp.useBrowser || qp.browser || "").toLowerCase()
     );
 
     await __snap("parse:enter", { url, limit, t: qp.t });
     DEBUG_ENV &&
-      console.log("[struct]", "parse:start", {
-        url,
-        hintType,
-        useBrowser,
-      });
+      console.log("[struct]", "parse:start", { url, hintType, useBrowser });
 
     let items = [];
     let adapter_used = "";
@@ -538,7 +510,7 @@ const parseHandler = async (req, res) => {
     let debugFetch = undefined;
     let debugPart = undefined;
 
-    /* ---- 路线 A：浏览器渲染 (Playwright + templateParser.parseCatalog) ---- */
+    // ---- 路线 A：Playwright DOM 特殊解析
     if (useBrowser && chromium && getParseCatalog()) {
       const browser = await chromium.launch({ headless: true });
       const page = await browser.newPage({
@@ -552,18 +524,15 @@ const parseHandler = async (req, res) => {
           r && Array.isArray(r.products) ? r.products : [];
         if (browProducts.length) {
           items = browProducts.map((p) => ({
-            sku: p.sku || "",
+            sku:   p.sku || "",
             title: p.title || p.name || "",
-            url: p.url || p.link || "",
-            link: p.link || p.url || "",
-            img:
-              p.image ||
-              p.img ||
-              (Array.isArray(p.imgs) ? p.imgs[0] : ""),
+            url:   p.url || p.link || "",
+            link:  p.link || p.url || "",
+            img:   p.image || p.img || (Array.isArray(p.imgs) ? p.imgs[0] : ""),
             price: p.price || "",
             currency: p.currency || "",
-            moq: p.moq || p.minQty || "",
-            desc: p.desc || p.description || "",
+            moq:   p.moq || p.minQty || "",
+            desc:  p.desc || p.description || "",
           }));
           adapter_used = hintType || "browser-dom";
         }
@@ -571,23 +540,17 @@ const parseHandler = async (req, res) => {
         /* ignore browser errors */
       }
 
-      try {
-        await page.close();
-      } catch {}
-      try {
-        await browser.close();
-      } catch {}
+      try { await page.close(); } catch {}
+      try { await browser.close(); } catch {}
     }
 
-    /* ---- 路线 B：Cheerio (默认) ---- */
+    // ---- 路线 B：Cheerio 默认
     if (!items.length) {
-      // 保证拿到 html（自带回退）
       const ensured = await ensureFetchHtml(url, wantDebug, hintType);
       html = ensured.html;
       debugFetch = ensured.debugFetch;
 
       if (!html) {
-        // 依然拿不到 HTML（极少数网络异常）
         throw Object.assign(
           new Error("crawlPages: fetchHtml is required"),
           { code: "FETCH_EMPTY" }
@@ -597,15 +560,10 @@ const parseHandler = async (req, res) => {
       try {
         const preClass = classify(url, html);
         if (!hintType && preClass && preClass.adapterHint) {
-          // 例如 Shopware / Magento 等
           hintType = preClass.platform;
         }
-        try {
-          await snapshot("pre-classify", { url, preClass });
-        } catch {}
-      } catch {
-        /* ignore classify failure */
-      }
+        try { await snapshot("pre-classify", { url, preClass }); } catch {}
+      } catch {}
 
       const ret = await runExtract(url, html, {
         limit,
@@ -628,29 +586,24 @@ const parseHandler = async (req, res) => {
       });
     }
 
-    /* ---- 可选：前 N 张图转 base64 ---- */
+    // ---- 图片转 base64（可选）
     if (imgMode === "base64" && items.length && imgCount > 0) {
       const N = Math.min(imgCount, items.length);
       await Promise.all(
         items.slice(0, N).map(async (it) => {
           if (!it.img) return;
           try {
-            const r = await axios.get(it.img, {
-              responseType: "arraybuffer",
-            });
-            const ext = (it.img.split(".").pop() || "jpg")
-              .toLowerCase();
+            const r = await axios.get(it.img, { responseType: "arraybuffer" });
+            const ext = (it.img.split(".").pop() || "jpg").toLowerCase();
             it.img = `data:image/${ext};base64,${Buffer.from(
               r.data
             ).toString("base64")}`;
-          } catch {
-            /* ignore single image error */
-          }
+          } catch {}
         })
       );
     }
 
-    /* ---- 统一输出结构（兼容旧前端） ---- */
+    // ---- 输出结构
     const products = (items || []).map((it) => ({
       sku: it.sku || it.code || "",
       title: it.title || it.desc || "",
@@ -663,7 +616,6 @@ const parseHandler = async (req, res) => {
       desc: it.desc || "",
     }));
 
-    // metrics & snapshots
     const count = products.length;
     const fieldsRate = computeFieldsRate(products || []);
     const wantMetrics = ["1", "true", "yes", "on"].includes(
@@ -690,16 +642,14 @@ const parseHandler = async (req, res) => {
         "sample=",
         sample
       );
-    } catch {
-      /* ignore logging issues */
-    }
+    } catch {}
 
     const resp = {
       ok: true,
       url,
       count,
       products,
-      items, // 原始内容（兼容老脚本）
+      items,
       adapter: adapter_used,
     };
 
@@ -709,9 +659,7 @@ const parseHandler = async (req, res) => {
         ...(debugPart || {}),
         adapter_used,
         hintType,
-        useBrowser: !!(
-          useBrowser && chromium && getParseCatalog()
-        ),
+        useBrowser: !!(useBrowser && chromium && getParseCatalog()),
       };
     }
     if (wantMetrics) {
@@ -753,23 +701,17 @@ const parseHandler = async (req, res) => {
       });
     } catch {}
 
-    // 注意：保持 { ok:false, error:"..." } 200返回，兼容现有前端
     return res
       .status(200)
       .json({ ok: false, error: String(err?.message || err) });
   }
 };
 
-/* ----------------------------------------------------------------------------
-   挂路由
-   ------------------------------------------------------------------------- */
-
-// 旧入口（历史兼容）
+// 旧入口兼容
 router.all("/parse", parseHandler);
 
-// 新入口（真正给前端/网关用的）
+// 新入口
 router.all("/catalog", parseHandler);        // /v1/catalog
 router.all("/api/catalog", parseHandler);    // /v1/api/catalog
 
 export default router;
-
