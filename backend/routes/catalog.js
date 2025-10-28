@@ -595,21 +595,36 @@ const parseHandler = async (req, res) => {
         );
       }
 
-      // ============== NEW STEP 1: 结构判别 (LIST / DETAIL / OTHER) ==============
-      // detectStructure 需要我们传 html 或 $; 目前版本里它返回类似：
-      // { type: "list" | "detail" | "other", scoreList, scoreDetail, ... }
-      let pageType = "other";
-      try {
-        const det = detectStructure(html);
-        if (det && det.type) pageType = det.type.toLowerCase();
-      } catch {
-        /* fallback "other" */
+         // ============== NEW STEP 1: 结构判别 (LIST / DETAIL / OTHER) ==============
+    // 关键修正：必须把 url 也传给 detectStructure，
+    // 否则它拿不到真实地址，无法触发 deep catalog -> "list" 的强制分支
+    let pageType = "other";
+    let structDebug = null;
+    try {
+      const det = await detectStructure(url, html, hintType || "");
+
+      if (det && det.type) {
+        pageType = String(det.type || "").toLowerCase();
       }
 
-      // Snapshot结构类型，便于后续训练/调参
-      try {
-        await snapshot("structureDetector", { url, pageType });
-      } catch {}
+      // 我们把 det 整体保留下来，后面 snapshot 也存进去，便于回放训练
+      structDebug = det || null;
+    } catch (e) {
+      console.warn(
+        "[catalog] detectStructure error:",
+        e?.message || e
+      );
+      // fallback "other"
+    }
+
+    // Snapshot结构类型 + 判定细节，便于后续训练 / 调参 / 回放
+    try {
+      await snapshot("structureDetector", {
+        url,
+        pageType,
+        structDebug,
+      });
+    } catch {}
 
       // 如果页面是超大垃圾页（站点地图/门户全览），直接拒抓，减少污染
       if (html.length > MAX_TEXT_LEN || pageType === "other") {
