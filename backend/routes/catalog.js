@@ -29,6 +29,7 @@ import * as errorCollector from "../modules/errorCollector.js";
 
 // === 🔥 新增：智能 root 定位 + 目录解析器 ===
 import detectRoot from "../lib/smartRootLocator.js";
+// genericLinksParser 是 CommonJS 模块，不能用默认导入
 import * as genericLinksParserNS from "../lib/parsers/genericLinksParser.js";
 
 // === 页面防跑偏阈值（避免整站/站点地图类页面） ===
