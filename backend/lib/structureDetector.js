@@ -508,38 +508,42 @@ export async function detectStructure(url, html, adapterHint = "") {
     }
   }
 
-  // 2.5) deep catalog 判定（FORCED LIST, ultra aggressive）
-  const deepHit = isDeepCatalogUrl(url);
-  console.info?.(`[struct-debug] isDeepCatalogUrl(${url})=${deepHit} depth-check-forced`);
-  if (deepHit) {
-    const payload = debugReturnNormalized(
-      "list",
-      platform,
-      "Deep catalog URL forced as list (aggressive mode)",
-      {
-        url,
-        cardCount,
-        productAnchorCount,
-        hasPrice,
-        hasCart,
-        deepCatalog: true
-      },
-      hint
-    );
+  // 2.5) deep catalog 判定（现在：直接强制视为 LIST，不再依赖 deepHit）
+// 我们先读取 deepHit 只是为了日志，还会继续强推成 list
+const deepHit = isDeepCatalogUrl(url);
+console.info?.(
+  `[struct-debug] FORCE-LIST mode url=${url} isDeepCatalogUrl=${deepHit} (ignoring detail)`
+);
 
-    try {
-      const decidedAdapter = platform || hint || "";
-      __logDebug(
-        `[struct] url=${url} decided=type=${payload.type},platform=${decidedAdapter || "-"} (forced-list)`
-      );
-    } catch {}
+// 直接把当前页面视为"list"
+const payload = debugReturnNormalized(
+  "list",
+  platform,
+  "Forced as list (ultra aggressive mode)",
+  {
+    url,
+    cardCount,
+    productAnchorCount,
+    hasPrice,
+    hasCart,
+    deepCatalog: true
+  },
+  hint
+);
 
-    console.info?.(
-      `[struct] type=${payload.type} platform=${platform || "-"} adapterHint=${hint || "-"} forced-list`
-    );
+try {
+  const decidedAdapter = platform || hint || "";
+  __logDebug(
+    `[struct] url=${url} decided=type=${payload.type},platform=${decidedAdapter || "-"} (FORCED LIST global)`
+  );
+} catch {}
 
-    return payload;
-  }
+console.info?.(
+  `[struct] type=${payload.type} platform=${platform || "-"} adapterHint=${hint || "-"} forced-list-global`
+);
+
+// 立刻返回，不给后面的 detail/list 逻辑机会
+return payload;
 
   // 3) 一般 list 判定
   if (cardCount >= 6 || productAnchorCount >= 12) {
