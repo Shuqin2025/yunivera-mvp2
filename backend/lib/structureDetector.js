@@ -1,6 +1,8 @@
 // backend/lib/structureDetector.js
-// 修正版：统一输出 type = "list" | "detail" | "other"
-// 这样 catalog.js 能正确分流，而不会再把真实目录页跳成 "skipped-non-list"
+// 强化版：
+// 1. 新增 deep catalog URL 识别 => 更大胆地判定为 "list"
+// 2. 扩大 cardCount 的候选选择器，包含更多 B2B/Shopware 风格商品块
+// 3. 在 deep catalog 情况下，即便没有价格/购物按钮，也当作 list
 
 import * as cheerio from "cheerio";
 const { load } = cheerio;
@@ -156,7 +158,7 @@ function detectPlatform($, html) {
   )
     return "Shopware";
 
-  // ADDITIONAL signs:
+  // 进一步特征: Woo / Shopware / Magento deep sniff
   const isWooByCss =
     /\bwoocommerce\b/i.test($("body").attr("class") || "") ||
     $(".woocommerce").length > 0 ||
@@ -290,6 +292,17 @@ function hasJsonLdProduct($) {
   return yes;
 }
 
+// NEW: 判断 url 是否像深层品类页 /catalog/<cat>/<subcat>
+function isDeepCatalogUrl(url = "") {
+  try {
+    const u = new URL(url);
+    const parts = u.pathname.split("/").filter(Boolean); // ["catalog","computer","usb-kabel-2-0"]
+    return parts[0] === "catalog" && parts.length >= 3;
+  } catch {
+    return false;
+  }
+}
+
 // 统一返回格式：type = "list" | "detail" | "other"
 function debugReturnNormalized(normType, platform, reason, extra = {}, adapterHint = "") {
   const payload = {
@@ -379,7 +392,6 @@ export async function detectStructure(url, html, adapterHint = "") {
       hint
     );
     try {
-      const f = __platformFlags($, html || "");
       const decidedAdapter = platform || hint || "";
       __logDebug(
         `[struct] url=${url} decided=type=${payload.type},platform=${decidedAdapter || "-"}`
@@ -398,13 +410,30 @@ export async function detectStructure(url, html, adapterHint = "") {
     if (looksLikeProductHref(href)) productAnchorCount++;
   });
 
-  // “商品卡片式块” 计数
+  // 扩大：更多可能表示“商品卡片”的容器
   const cardCount = count(
     $,
     `
-      .product, .product-card, .product-item, .productbox, .product-box,
-      .product-list-item, .product-list, .product-grid, .products-grid,
-      .listing--container, ul.products li,
+      .product,
+      .product-card,
+      .product-item,
+      .productbox,
+      .product-box,
+      .product--box,
+      .product--list-item,
+      .product-list-item,
+      .product-list,
+      .product-grid,
+      .products-grid,
+      .listing--container,
+      .article-box,
+      .artbox,
+      .art-box,
+      .art-item,
+      .product-wrapper,
+      .product-tile,
+      .product-tile-wrapper,
+      ul.products li,
       [class*="product-card"],
       [class*="product_item"],
       [data-product-id],
@@ -417,11 +446,11 @@ export async function detectStructure(url, html, adapterHint = "") {
   const hasCartTokens = textIncludesAny(bodyText, CART_TOKENS);
   const hasPriceWide = PRICE_REGEX.test(bodyText);
   const hasCartWide = CART_REGEX.test(bodyText);
+
   const hasPrice = hasPriceTokens || hasPriceWide;
   const hasCart = hasCartTokens || hasCartWide;
 
   // 2) detail 判定（单品页）
-  //    逻辑：卡片很少，但有价/购信息，且可能只有一个 SKU 的展示
   if (
     (cardCount <= 3 && (hasPrice || hasCart)) ||
     (productAnchorCount < 6 && hasPrice && hasCart)
@@ -448,15 +477,36 @@ export async function detectStructure(url, html, adapterHint = "") {
     }
   }
 
-  // 3) list 判定（目录/分类页）
-  //    我们把“很多卡片 or 很多疑似商品链接”直接当 list
-  //    这是我们需要的，避免误判成 other → skipped-non-list
+  // 2.5) deep catalog 判定（NEW）
+  // 如果 url 是 /catalog/<cat>/<subcat> 这种深度，并且页面里至少看到了多个商品块
+  // 即使暂时没明显价格/购物按钮，也当它是 list
+  if (isDeepCatalogUrl(url) && cardCount >= 3) {
+    const payload = debugReturnNormalized(
+      "list",
+      platform,
+      "Deep catalog URL + repeated product cards (price optional)",
+      { url, cardCount, productAnchorCount, hasPrice, hasCart, deepCatalog: true },
+      hint
+    );
+    try {
+      const decidedAdapter = platform || hint || "";
+      __logDebug(
+        `[struct] url=${url} decided=type=${payload.type},platform=${decidedAdapter || "-"}`
+      );
+    } catch {}
+    console.info?.(
+      `[struct] type=${payload.type} platform=${platform || "-"} adapterHint=${hint || "-"}`
+    );
+    return payload;
+  }
+
+  // 3) 一般 list 判定（大量卡片 or 大量疑似商品链接）
   if (cardCount >= 6 || productAnchorCount >= 12) {
     let decision = "list";
     let reason = "Many cards/anchors";
 
-    // 降级：如果完全看不到价格/购买词，而且链接多半像导航/帮助
-    if (!hasPrice && !hasCart) {
+    // 保护：极端导航/mega-menu 页面（很多链接但其实不是产品）
+    if (!hasPrice && !hasCart && !isDeepCatalogUrl(url)) {
       const firstLinks = $("a[href]")
         .slice(0, 80)
         .toArray()
@@ -472,7 +522,6 @@ export async function detectStructure(url, html, adapterHint = "") {
       );
 
       if (badRatio > 0.4 && !looksLikeCatalogPath) {
-        // 页面像“站点导航大页”而不是卖货目录
         decision = "other";
         reason =
           "Catalog downgraded: no price/cart & too many site-links (possible homepage/mega menu)";
@@ -486,7 +535,7 @@ export async function detectStructure(url, html, adapterHint = "") {
       decision,
       platform,
       reason,
-      { url, cardCount, productAnchorCount, hasPrice, hasCart },
+      { url, cardCount, productAnchorCount, hasPrice, hasCart, deepCatalog: false },
       hint
     );
     try {
@@ -501,12 +550,12 @@ export async function detectStructure(url, html, adapterHint = "") {
     return payload;
   }
 
-  // 4) 其他：主页/信息页/导航页
+  // 4) fallback => other
   const payload = debugReturnNormalized(
     "other",
     platform,
     "Low commerce signals",
-    { url, cardCount, productAnchorCount, hasPrice, hasCart },
+    { url, cardCount, productAnchorCount, hasPrice, hasCart, deepCatalog: false },
     hint
   );
   try {
