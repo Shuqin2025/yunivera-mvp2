@@ -29,8 +29,7 @@ import * as errorCollector from "../modules/errorCollector.js";
 
 // === 🔥 新增：智能 root 定位 + 目录解析器 ===
 import detectRoot from "../lib/smartRootLocator.js";
-// genericLinksParser 是 CommonJS 模块，不能用默认导入
-import * as genericLinksParserNS from "../lib/parsers/genericLinksParser.js";
+import genericLinksParser from "../lib/parsers/genericLinksParser.js";
 
 // === 页面防跑偏阈值（避免整站/站点地图类页面） ===
 const MAX_TEXT_LEN = 200000; // 超过视为噪音页，直接拒抓（参谋长建议）
@@ -446,7 +445,7 @@ async function runExtractListPage({ url, html, limit = 50, debug = false, hintTy
     const $rootOnly = cheerio.load(rootHtml || "", { decodeEntities: false });
 
     // 5. 让 genericLinksParser 只在这个 root 片段下尝试提取产品卡片
-    const parsedFromRoot = await genericLinksParserNS.default({
+    const parsedFromRoot = await genericLinksParser({
   $: $rootOnly,
   url,
   scope: "rootOnly",
