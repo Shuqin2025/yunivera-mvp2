@@ -477,28 +477,43 @@ export async function detectStructure(url, html, adapterHint = "") {
     }
   }
 
-  // 2.5) deep catalog 判定（NEW）
-  // 如果 url 是 /catalog/<cat>/<subcat> 这种深度，并且页面里至少看到了多个商品块
-  // 即使暂时没明显价格/购物按钮，也当它是 list
-  if (isDeepCatalogUrl(url) && cardCount >= 3) {
-    const payload = debugReturnNormalized(
-      "list",
-      platform,
-      "Deep catalog URL + repeated product cards (price optional)",
-      { url, cardCount, productAnchorCount, hasPrice, hasCart, deepCatalog: true },
-      hint
+  // 2.5) deep catalog 判定（UPDATED — 强制进入 list）
+// 只要 url 符合 /catalog/<cat>/<subcat> 这种深层类目结构，
+// 我们就直接把它当成列表页 "list"。
+// 不再要求 cardCount >= 3。
+// 目的：哪怕页面还没显式输出商品卡片（比如懒加载/还在分类中层），
+// 我们也要强行让 catalog.js 走 runExtractListPage()，
+// 这样我们就能收集 rootLocator / probes / products[] 线索，
+// 让系统学习这个站的真实货架结构。
+if (isDeepCatalogUrl(url)) {
+  const payload = debugReturnNormalized(
+    "list",
+    platform,
+    "Deep catalog URL forced as list (aggressive mode)",
+    {
+      url,
+      cardCount,
+      productAnchorCount,
+      hasPrice,
+      hasCart,
+      deepCatalog: true
+    },
+    hint
+  );
+
+  try {
+    const decidedAdapter = platform || hint || "";
+    __logDebug(
+      `[struct] url=${url} decided=type=${payload.type},platform=${decidedAdapter || "-"} (forced-list)`
     );
-    try {
-      const decidedAdapter = platform || hint || "";
-      __logDebug(
-        `[struct] url=${url} decided=type=${payload.type},platform=${decidedAdapter || "-"}`
-      );
-    } catch {}
-    console.info?.(
-      `[struct] type=${payload.type} platform=${platform || "-"} adapterHint=${hint || "-"}`
-    );
-    return payload;
-  }
+  } catch {}
+
+  console.info?.(
+    `[struct] type=${payload.type} platform=${platform || "-"} adapterHint=${hint || "-"} forced-list`
+  );
+
+  return payload;
+}
 
   // 3) 一般 list 判定（大量卡片 or 大量疑似商品链接）
   if (cardCount >= 6 || productAnchorCount >= 12) {
