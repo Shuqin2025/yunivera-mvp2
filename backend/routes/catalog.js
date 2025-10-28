@@ -426,35 +426,38 @@ async function runExtractListPage({ url, html, limit = 50, debug = false, hintTy
       }
     }
   }
-
   // 如果这些专用/模板解析器都没拿到结果 ⇒ 进入我们的新策略：
-  // smartRootLocator + genericLinksParser (root-scoped)
+  // detectRoot + genericLinksParser (root-scoped)
   if (!items.length) {
-    // 1. 用 smartRootLocator 找“真正的产品容器 root”
-    const rootReport = await smartRootLocator(html, {
-      url,
-      enableVisualLog: true,
-      saveReport: true,
-    });
+    // 1. 用 detectRoot() 在整页 $full 上定位“最可能的商品列表主容器”
+    // detectRoot 来自 ../lib/smartRootLocator.js
+    // 它返回例如：
+    // { selector: ".product-grid", confidence: 0.78, reason: "...", probes: [...] }
+    const rootInfo = await detectRoot({ $: $full });
 
-    // rootReport.snippet 是该容器的部分文本摘要。
-    // 我们为了做结构化解析，需要实际 DOM 片段。增强版 smartRootLocator
-    // 在真实项目里应返回 rootHtml / rootSelector。
-    // 这里我们优先尝试 rootReport.rootHtml，如果未来加上。
-    const rootHtml = rootReport.rootHtml || rootReport.snippet || "";
+    // 2. 根据 rootInfo.selector 在整页 DOM 里找到对应节点
+    const $rootNode = $full(rootInfo.selector).first();
 
-    // 2. 用 cheerio 只加载 root 区块，而不是整页
-    const $rootOnly = cheerio.load(rootHtml, { decodeEntities: false });
+    // 3. 只截取这个容器自身的 HTML 片段
+    const rootHtml = $rootNode.length ? $rootNode.html() : "";
 
-    // 3. genericLinksParser 现在接受 { $, url, mode: 'root' }
+    // 4. 用 cheerio 只加载该区块，而不是整页
+    const $rootOnly = cheerio.load(rootHtml || "", { decodeEntities: false });
+
+    // 5. 让 genericLinksParser 只在这个 root 片段下尝试提取产品卡片
     const parsedFromRoot = await genericLinksParser({
       $: $rootOnly,
       url,
       scope: "rootOnly",
     });
 
-    if (parsedFromRoot && parsedFromRoot.products && parsedFromRoot.products.length) {
-      items = parsedFromRoot.products.map(p => ({
+    // 6. 如果 parser 有产出，把它们映射成统一 items 结构
+    if (
+      parsedFromRoot &&
+      parsedFromRoot.products &&
+      parsedFromRoot.products.length
+    ) {
+      items = parsedFromRoot.products.map((p) => ({
         sku: p.sku || p.title || "",
         title: p.title || "",
         url: p.url || p.link || "",
@@ -466,14 +469,17 @@ async function runExtractListPage({ url, html, limit = 50, debug = false, hintTy
         desc: p.desc || "",
       }));
 
+      // 标记我们是走哪条分支拿到结果的
       used = (parsedFromRoot.adapter || "") + "+rootScope";
+
+      // debugPart 里补入 rootInfo，方便训练/诊断
       debugPart = {
         ...(debugPart || {}),
         rootLocator: {
-          depth: rootReport.depth,
-          score: rootReport.score,
-          snippet: rootReport.snippet,
-          top3: rootReport.top3Candidates,
+          selector: rootInfo.selector,
+          confidence: rootInfo.confidence,
+          reason: rootInfo.reason,
+          probes: rootInfo.probes,
         },
       };
     }
