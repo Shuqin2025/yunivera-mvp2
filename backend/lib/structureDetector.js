@@ -1,8 +1,8 @@
 // backend/lib/structureDetector.js
-// 强化版：
-// 1. 新增 deep catalog URL 识别 => 更大胆地判定为 "list"
-// 2. 扩大 cardCount 的候选选择器，包含更多 B2B/Shopware 风格商品块
-// 3. 在 deep catalog 情况下，即便没有价格/购物按钮，也当作 list
+// 强化版 (aggressive):
+// 1. deep catalog URL 判定彻底放宽 + debug 日志
+// 2. 只要判定为 deep catalog => 直接强制当成 "list"
+// 3. 其余逻辑保持不变
 
 import * as cheerio from "cheerio";
 const { load } = cheerio;
@@ -158,7 +158,7 @@ function detectPlatform($, html) {
   )
     return "Shopware";
 
-  // 进一步特征: Woo / Shopware / Magento deep sniff
+  // 进一步特征
   const isWooByCss =
     /\bwoocommerce\b/i.test($("body").attr("class") || "") ||
     $(".woocommerce").length > 0 ||
@@ -292,12 +292,45 @@ function hasJsonLdProduct($) {
   return yes;
 }
 
-// NEW: 判断 url 是否像深层品类页 /catalog/<cat>/<subcat>
-function isDeepCatalogUrl(url = "") {
+// NEW: 更激进的深层类目URL判定
+// 我们不仅接受 /catalog/.../...
+// 也接受 /produkte/... , /category/... , /collections/... , /shop/... 等常见电商类目路径
+// 规则：
+//   - URL 必须包含这些关键词之一
+//   - 路径段深度 >= 4 (例如 /catalog/computer/usb-kabel-2-0 -> ["catalog","computer","usb-kabel-2-0"] 深度3，域后+catalog本身+子类=至少3~4段整体）
+//   - 只要满足就认为它是“类目下钻页”，极可能是货架/子货架
+function isDeepCatalogUrl(rawUrl = "") {
   try {
-    const u = new URL(url);
-    const parts = u.pathname.split("/").filter(Boolean); // ["catalog","computer","usb-kabel-2-0"]
-    return parts[0] === "catalog" && parts.length >= 3;
+    const u = new URL(rawUrl);
+    const lower = u.pathname.toLowerCase();
+
+    const catalogKeywords = [
+      "/catalog/",
+      "/katalog/",
+      "/produkte/",
+      "/product-catalog/",
+      "/category/",
+      "/categories/",
+      "/collection/",
+      "/collections/",
+      "/shop/",
+      "/waren/",
+      "/produkt/"
+    ];
+
+    const keywordHit = catalogKeywords.some((kw) => lower.includes(kw));
+
+    // 粗暴估一个“深度”：/a/b/c -> ["a","b","c"] = 3
+    const parts = u.pathname.split("/").filter(Boolean);
+    const depth = parts.length;
+
+    // 我们设门槛为 depth >= 3
+    // 例: /catalog/computer/usb-kabel-2-0  -> ["catalog","computer","usb-kabel-2-0"] = 3 ✅
+    // 例: /shop/cables/usb -> ["shop","cables","usb"] = 3 ✅
+    if (keywordHit && depth >= 3) {
+      return true;
+    }
+    return false;
   } catch {
     return false;
   }
@@ -306,7 +339,7 @@ function isDeepCatalogUrl(url = "") {
 // 统一返回格式：type = "list" | "detail" | "other"
 function debugReturnNormalized(normType, platform, reason, extra = {}, adapterHint = "") {
   const payload = {
-    type: normType, // !!! 关键：只会是 list / detail / other
+    type: normType,
     platform: platform || "",
     name: normType,
     debug: {
@@ -324,7 +357,7 @@ function debugReturnNormalized(normType, platform, reason, extra = {}, adapterHi
   return payload;
 }
 
-// platform flags for debug only
+// 平台 flags for debug only
 function __platformFlags($, html) {
   try {
     const text = (html || $("html").html() || "").toLowerCase();
@@ -381,7 +414,7 @@ export async function detectStructure(url, html, adapterHint = "") {
   const bodyText = $("body").text() || "";
   const hint = adapterHint || process.env.ADAPTER_HINT || "";
 
-  // 0) JSON-LD 强信号：大概率是商品详情页
+  // 0) JSON-LD 强信号 => detail
   const jsonldProduct = hasJsonLdProduct($);
   if (jsonldProduct) {
     const payload = debugReturnNormalized(
@@ -403,14 +436,13 @@ export async function detectStructure(url, html, adapterHint = "") {
     return payload;
   }
 
-  // 1) 基础信号统计
+  // 1) 统计信号
   let productAnchorCount = 0;
   $("a[href]").each((_, a) => {
     const href = $(a).attr("href") || "";
     if (looksLikeProductHref(href)) productAnchorCount++;
   });
 
-  // 扩大：更多可能表示“商品卡片”的容器
   const cardCount = count(
     $,
     `
@@ -441,7 +473,6 @@ export async function detectStructure(url, html, adapterHint = "") {
     `
   );
 
-  // 商业信号：价格/购买关键词
   const hasPriceTokens = textIncludesAny(bodyText, PRICE_TOKENS);
   const hasCartTokens = textIncludesAny(bodyText, CART_TOKENS);
   const hasPriceWide = PRICE_REGEX.test(bodyText);
@@ -450,7 +481,7 @@ export async function detectStructure(url, html, adapterHint = "") {
   const hasPrice = hasPriceTokens || hasPriceWide;
   const hasCart = hasCartTokens || hasCartWide;
 
-  // 2) detail 判定（单品页）
+  // 2) detail 判定
   if (
     (cardCount <= 3 && (hasPrice || hasCart)) ||
     (productAnchorCount < 6 && hasPrice && hasCart)
@@ -477,50 +508,45 @@ export async function detectStructure(url, html, adapterHint = "") {
     }
   }
 
-  // 2.5) deep catalog 判定（UPDATED — 强制进入 list）
-// 只要 url 符合 /catalog/<cat>/<subcat> 这种深层类目结构，
-// 我们就直接把它当成列表页 "list"。
-// 不再要求 cardCount >= 3。
-// 目的：哪怕页面还没显式输出商品卡片（比如懒加载/还在分类中层），
-// 我们也要强行让 catalog.js 走 runExtractListPage()，
-// 这样我们就能收集 rootLocator / probes / products[] 线索，
-// 让系统学习这个站的真实货架结构。
-if (isDeepCatalogUrl(url)) {
-  const payload = debugReturnNormalized(
-    "list",
-    platform,
-    "Deep catalog URL forced as list (aggressive mode)",
-    {
-      url,
-      cardCount,
-      productAnchorCount,
-      hasPrice,
-      hasCart,
-      deepCatalog: true
-    },
-    hint
-  );
-
-  try {
-    const decidedAdapter = platform || hint || "";
-    __logDebug(
-      `[struct] url=${url} decided=type=${payload.type},platform=${decidedAdapter || "-"} (forced-list)`
+  // 2.5) deep catalog 判定（FORCED LIST, ultra aggressive）
+  const deepHit = isDeepCatalogUrl(url);
+  console.info?.(`[struct-debug] isDeepCatalogUrl(${url})=${deepHit} depth-check-forced`);
+  if (deepHit) {
+    const payload = debugReturnNormalized(
+      "list",
+      platform,
+      "Deep catalog URL forced as list (aggressive mode)",
+      {
+        url,
+        cardCount,
+        productAnchorCount,
+        hasPrice,
+        hasCart,
+        deepCatalog: true
+      },
+      hint
     );
-  } catch {}
 
-  console.info?.(
-    `[struct] type=${payload.type} platform=${platform || "-"} adapterHint=${hint || "-"} forced-list`
-  );
+    try {
+      const decidedAdapter = platform || hint || "";
+      __logDebug(
+        `[struct] url=${url} decided=type=${payload.type},platform=${decidedAdapter || "-"} (forced-list)`
+      );
+    } catch {}
 
-  return payload;
-}
+    console.info?.(
+      `[struct] type=${payload.type} platform=${platform || "-"} adapterHint=${hint || "-"} forced-list`
+    );
 
-  // 3) 一般 list 判定（大量卡片 or 大量疑似商品链接）
+    return payload;
+  }
+
+  // 3) 一般 list 判定
   if (cardCount >= 6 || productAnchorCount >= 12) {
     let decision = "list";
     let reason = "Many cards/anchors";
 
-    // 保护：极端导航/mega-menu 页面（很多链接但其实不是产品）
+    // 防止把 mega menu 当商品列表
     if (!hasPrice && !hasCart && !isDeepCatalogUrl(url)) {
       const firstLinks = $("a[href]")
         .slice(0, 80)
