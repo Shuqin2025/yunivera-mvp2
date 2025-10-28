@@ -28,7 +28,7 @@ import { classify } from "../modules/templateCluster.js";
 import * as errorCollector from "../modules/errorCollector.js";
 
 // === 🔥 新增：智能 root 定位 + 目录解析器 ===
-import { smartRootLocator } from "../modules/core/smartRootLocator.js"; // <-- 路径按你项目放置
+import detectRoot from "../lib/smartRootLocator.js";
 import genericLinksParser from "../lib/parsers/genericLinksParser.js";  // 我们也会改造这个文件
 
 // === 页面防跑偏阈值（避免整站/站点地图类页面） ===
