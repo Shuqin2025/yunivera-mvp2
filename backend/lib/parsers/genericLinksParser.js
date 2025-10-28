@@ -1,26 +1,30 @@
-// backend/lib/parsers/genericLinksParser.js
-// 通用“目录页 -> 产品链接”解析器（带深层 a[href] 兜底）
-// 返回结构与现有前端期望保持一致：{ ok, adapter: "generic-links", url, count, products }
+// backend/lib/parsers/genericLinksParser.js (REVISED)
+//
+// 变化点：
+//  - 支持 rootScope 模式（只解析 smartRootLocator 提供的主容器 DOM）
+//  - 保留原始 Heuristics / deepAnchorFallback
+//  - 输出格式不变，仍然给 catalog 那边用
+//
+// 注意：此文件目前仍是 CommonJS 风格（require/module.exports），
+// 因为你现有项目里这个文件就是 require 风格。
+// 如果你计划把后端整体迁到 ESM，需要同步调整 import/export。
 
 const { URL } = require("url");
 
-// --- DEBUG: safe dbg import (append-only, CJS friendly) ----------------------
+// --- DEBUG helper ---------------------------------------------------
 let dbg = (...args) => {
   const on = process.env.DEBUG === '1' || process.env.DEBUG === 'true' || !!process.env.DEBUG;
   if (on) { try { console.log(...args); } catch {} }
 };
 try {
-  // 与 ESM 导出的 ../logger.js 兼容：require 成功则复用其中的 dbg
   const maybe = require('../logger.js');
   if (maybe && typeof maybe.dbg === 'function') dbg = maybe.dbg;
-} catch { /* fallback to local dbg */ }
-// ---------------------------------------------------------------------------
+} catch { /* ignore */ }
+// --------------------------------------------------------------------
 
-// --- 可调参数 ---------------------------------------------------------------
-const MAX_RESULTS = 200;           // 最多回传多少条
-const MIN_PRIMARY_HITS = 6;        // 主选择器命中少于此数则触发 deepAnchorFallback
-const NEAR_PRICE_DISTANCE = 160;   // 在同一卡片内查找价格的最大字符距离
-// ---------------------------------------------------------------------------
+const MAX_RESULTS = 200;
+const MIN_PRIMARY_HITS = 6;
+const NEAR_PRICE_DISTANCE = 160;
 
 const JUNK_KEYWORDS = [
   "login","anmelden","account","register","signup","password","passwort",
@@ -37,17 +41,15 @@ const PRODUCTY_HINTS = [
   "/detail","/details","/kaufen","/buy","/add-to-cart"
 ];
 
-// 常见产品容器（先在这些区块里找）
 const PRIMARY_AREAS = [
-  "main",".main","#main","#content",".content",".container",
+  // 主容器提示。rootScope 模式下这些选择器仍然有用，
+  // 因为有些站点在每个产品卡片内还有一层包裹。
   ".product-grid",".products",".product-list",".listing",".catalog",".category",
-  "[data-product-id]","[data-product]","[data-qa='product']"
+  "[data-product-id]","[data-product]","[data-qa='product']",
+  ".main",".container",".content","#main","#content","main"
 ];
 
-// 价格识别（支持欧式小数与多货币）
 const PRICE_RE = /(?:^|[^\d])(?:(?:€|CHF|PLN|zł|zł\.?|₺|£|\$)\s*)?\d{1,3}(?:[.\s]\d{3})*(?:[,\.\s]\d{2})\s*(?:€|CHF|PLN|zł|zł\.?|₺|£|\$)?/i;
-
-// 一些导航词，命中则降低评分/剔除
 const NAV_WORDS = ["home","start","audio","video","strom","multimedia","b-run","solar","computer"];
 
 function getLogger(ctx) {
@@ -82,17 +84,14 @@ function cleanTitle(txt) {
   if (!txt) return "";
   let t = txt.replace(/\s+/g, " ").trim();
 
-  // 去掉导航/动作词
   t = t.replace(/\b(add to cart|in den warenkorb|jetzt kaufen|buy now)\b/ig, "");
   t = t.replace(/\b(home|start|audio|video|strom|multimedia|b-run|solar)\b/ig, " ").replace(/\s+/g, " ").trim();
 
-  // 去掉过长/过短
   if (t.length > 140) t = t.slice(0, 140).trim();
   return t;
 }
 
 function pickImg($el) {
-  // 取 img 的 data-src/src/srcset
   const $img = $el.find("img").first();
   if ($img.length) {
     const srcset = $img.attr("srcset") || $img.attr("data-srcset");
@@ -106,7 +105,6 @@ function pickImg($el) {
 }
 
 function nearText($, $el) {
-  // 卡片内拿到尽可能多的可见文本（用于找价格）
   const txt = $el.text().replace(/\s+/g, " ").trim();
   return txt.slice(0, NEAR_PRICE_DISTANCE);
 }
@@ -119,13 +117,10 @@ function scoreHref(href, text) {
   if (PRODUCTY_HINTS.some(h => sHref.includes(h))) score += 3;
   if (PRICE_RE.test(sTxt)) score += 2;
 
-  // 导航词扣分
   if (includesAny(sTxt, NAV_WORDS)) score -= 2;
 
-  // 详情页路径常见模式
   if (/(?:\/p\/|\/pd\/|\/detail|\/details|\/produkt|\/product)/.test(sHref)) score += 2;
 
-  // 文件/锚点扣分
   if (isAssetHref(sHref) || sHref.startsWith("#")) score -= 3;
 
   return score;
@@ -138,7 +133,6 @@ function looksLikeJunk(text, hrefAbs, pageUrl) {
   const lower = (text || "").toLowerCase();
   if (includesAny(lower, JUNK_KEYWORDS)) return true;
 
-  // 典型“首页/法律页”路径关键词
   const hp = hrefAbs.toLowerCase();
   if (/(impressum|privacy|datenschutz|agb|terms|policy|kontakt|contact|login|account|register)/.test(hp))
     return true;
@@ -166,33 +160,35 @@ function uniqBy(arr, keyFn) {
 }
 
 function finalize(products) {
-  // 只保留 title/url，并裁剪数量
   return products
     .map(p => ({
       sku: p.sku || "",
       title: cleanTitle(p.title || ""),
       url: p.url
     }))
-    .filter(p => p.url && p.title)    // 没标题/没链接的丢弃
+    .filter(p => p.url && p.title)
     .slice(0, MAX_RESULTS);
 }
 
+// 解析主容器 / 卡片
 async function parseByPrimaryAreas($, pageUrl, logger) {
   const items = [];
+
+  // 这里的 areas 是一堆候选容器选择器
   const areas = PRIMARY_AREAS.join(",");
 
   $(areas).each((_, area) => {
     const $area = $(area);
-    // 常见“卡片”
+
     const cards = $area.find(`
-      .product, .product-card, .card, .product-item, .productbox, 
+      .product, .product-card, .card, .product-item, .productbox,
       li, article, .grid__item, .box, .tile
     `);
     if (!cards.length) return;
 
     cards.each((__, card) => {
       const $card = $(card);
-      // 卡片里最可能的链接
+
       let $a = $card.find("a[href]").filter((i, a) => {
         const href = $(a).attr("href") || "";
         return !href.startsWith("#");
@@ -202,13 +198,12 @@ async function parseByPrimaryAreas($, pageUrl, logger) {
       const hrefAbs = absUrl(pageUrl, $a.attr("href"));
       if (!hrefAbs) return;
 
-      const title =
-        cleanTitle(
-          $a.attr("title") ||
-          $a.text() ||
-          $card.find("[itemprop='name']").text() ||
-          $card.find(".product-title, .title").text()
-        );
+      const title = cleanTitle(
+        $a.attr("title") ||
+        $a.text() ||
+        $card.find("[itemprop='name']").text() ||
+        $card.find(".product-title, .title").text()
+      );
 
       if (!title) return;
       if (looksLikeJunk(title, hrefAbs, pageUrl)) return;
@@ -231,6 +226,7 @@ async function parseByPrimaryAreas($, pageUrl, logger) {
   return items;
 }
 
+// 深度 anchor 兜底
 async function parseByDeepAnchors($, pageUrl, logger) {
   const candidates = [];
 
@@ -241,7 +237,10 @@ async function parseByDeepAnchors($, pageUrl, logger) {
     if (!hrefAbs) return;
 
     const text = cleanTitle(
-      $a.attr("title") || $a.text() || $a.find("img").attr("alt") || ""
+      $a.attr("title") ||
+      $a.text() ||
+      $a.find("img").attr("alt") ||
+      ""
     );
 
     if (!text) return;
@@ -251,7 +250,7 @@ async function parseByDeepAnchors($, pageUrl, logger) {
     const price = $card.length ? extractPriceFrom($, $card) : "";
 
     const s = scoreHref(hrefAbs, `${text} ${price}`);
-    if (s <= 0) return; // 只收“像产品”的链接
+    if (s <= 0) return;
 
     candidates.push({
       url: hrefAbs,
@@ -262,59 +261,65 @@ async function parseByDeepAnchors($, pageUrl, logger) {
     });
   });
 
-  // 去重 + 评分排序
   const unique = uniqBy(candidates, it => it.url);
   unique.sort((a, b) => b.score - a.score);
 
   const top = unique.slice(0, MAX_RESULTS);
-  logger.debug?.(`[generic-links] deep anchors extracted: ${top.length}`);
+  getLogger().debug?.(`[generic-links] deep anchors extracted: ${top.length}`);
   return top;
 }
 
-// 统一入口
+// 统一入口：现在允许 scope="rootOnly"
 module.exports = async function genericLinksParser(ctx) {
-  const { $, url: pageUrl } = ctx;
+  // ctx:
+  //   $         cheerio root (可能是整页，也可能是 smartRootLocator 的 root 片段)
+  //   url       pageUrl
+  //   scope     "rootOnly" | undefined
+  //   logger    optional
+  const { $, url: pageUrl, scope } = ctx;
   const logger = getLogger(ctx);
 
   try {
+    // 1. 在 rootOnly 模式下，我们假定 $ 只包含产品主容器片段
+    //    这时 parseByPrimaryAreas 的命中率会比全页扫描高很多
     let items = await parseByPrimaryAreas($, pageUrl, logger);
 
+    // 2. 如果产品卡片还不够多，就 fallback deep anchors
     if (items.length < MIN_PRIMARY_HITS) {
-      logger.info?.(`[generic-links] primary hits=${items.length} < ${MIN_PRIMARY_HITS}, fallback to deep a[href]…`);
-      // >>> 新增：明确进入 deepAnchorFallback
+      logger.info?.(
+        `[generic-links] primary hits=${items.length} < ${MIN_PRIMARY_HITS}, fallback to deep a[href]…`
+      );
       logger.debug?.('[links] deepAnchorFallback: entering');
-      const deep = await parseByDeepAnchors($, pageUrl, logger);
 
-      // 优先保留 primary，再补充 deep
+      const deep = await parseByDeepAnchors($, pageUrl, logger);
       const merged = uniqBy([...items, ...deep], it => it.url);
       items = merged;
     }
 
-    // 最终清洗
+    // 3. 最终清洗
     const products = finalize(items);
-    logger.info?.(`[generic-links] done for ${pageUrl} => ${products.length} items`);
+    logger.info?.(
+      `[generic-links] done for ${pageUrl} (scope=${scope||"full"}) => ${products.length} items`
+    );
 
-    // ===== DEBUG: generic-links =====
+    // Debug 输出
     try {
       if (process.env.DEBUG) {
         const totalA = $('a[href]').length;
-        console.log('[links]', 'total_a=', totalA, 'emitted=', Array.isArray(items) ? items.length : -1, 'base=', pageUrl);
+        console.log(
+          '[links]',
+          'total_a=', totalA,
+          'emitted=', Array.isArray(items) ? items.length : -1,
+          'base=', pageUrl,
+          'scope=', scope || 'full'
+        );
       }
     } catch (_) {}
-    // ===== /DEBUG =====
 
-    // 兜底原因（明确告诉日志：为什么走了 generic-links）
-    try {
-      const aCount = $('a[href]').length || 0;
-      dbg('[generic-links] fallback', { aCount, note: 'no platform-specific parser matched' });
-    } catch (e) {
-      dbg('[generic-links] debug error', String(e));
-    }
-
-    // “无产品”日志（给你排查时看）
+    // 无产品时的告警
     if (!products.length) {
-      logger.warn?.('[links] NoProductFound: fall back to nav links / sitewide anchors');
-      logger.warn?.(`[NoProductFound] ${pageUrl} (generic-links)`);
+      logger.warn?.('[links] NoProductFound in generic-links parser');
+      logger.warn?.(`[NoProductFound] ${pageUrl} (generic-links scope=${scope||"full"})`);
     }
 
     return {
