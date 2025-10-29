@@ -1,8 +1,8 @@
-// backend/lib/structureDetector.js
-// 强化版 (aggressive):
-// 1. deep catalog URL 判定彻底放宽 + debug 日志
-// 2. 只要判定为 deep catalog => 直接强制当成 "list"
-// 3. 其余逻辑保持不变
+// backend/modules/structureDetector.js
+// Aggressive list-forcing edition
+// - 保留平台/信号检测
+// - 只在“非常像单品详情”的情况下返回 detail
+// - 其它情况一律强制当成 list，驱动 runExtractListPage 去抓货架
 
 import * as cheerio from "cheerio";
 const { load } = cheerio;
@@ -37,6 +37,7 @@ const __logDebug = (msg) => {
 };
 // ===== /logger =====
 
+// --- commerce signal dictionaries / heuristics ---
 const PRICE_TOKENS = [
   "price",
   "preise",
@@ -55,7 +56,7 @@ const PRICE_TOKENS = [
   "uvp",
   "sale",
   "sonderpreis",
-  "angebot"
+  "angebot",
 ];
 
 const CART_TOKENS = [
@@ -69,7 +70,7 @@ const CART_TOKENS = [
   "jetzt kaufen",
   "in den einkaufswagen",
   "zum warenkorb",
-  "checkout"
+  "checkout",
 ];
 
 // 宽松商业信号
@@ -120,7 +121,7 @@ const GENERIC_LINK_BAD = new RegExp(
     "gutschein",
     "jobs",
     "karriere",
-    "\\.pdf$"
+    "\\.pdf$",
   ].join("|"),
   "i"
 );
@@ -192,7 +193,7 @@ function detectPlatform($, html) {
         scriptWoo: $('script[src*="woocommerce"]').length,
         params:
           $('script:contains("woocommerce_params")').length +
-          $('script:contains("wc_add_to_cart_params")').length
+          $('script:contains("wc_add_to_cart_params")').length,
       },
       shopware: {
         meta: /shopware/i.test($('meta[name="generator"]').attr("content") || "") ? 1 : 0,
@@ -203,7 +204,7 @@ function detectPlatform($, html) {
         ).length,
         bundles: $(
           'link[href*="/bundles/storefront/"], script[src*="/bundles/storefront/"]'
-        ).length
+        ).length,
       },
       magento: {
         reqjs: $('script[src*="requirejs-config.js"]').length,
@@ -212,19 +213,23 @@ function detectPlatform($, html) {
         ).length,
         mage: $('script[src*="/mage/"], script[src*="Magento_"]').length,
         mageInit: $("[data-mage-init]").length,
-        metaGen: /Magento/i.test($('meta[name="generator"]').attr("content") || "") ? 1 : 0,
-        word: $('script:contains("Magento")').length
-      }
+        metaGen:
+          /Magento/i.test($('meta[name="generator"]').attr("content") || "") ? 1 : 0,
+        word: $('script:contains("Magento")').length,
+      },
     };
 
     const verdict = {
       isShopify: false,
       isWoo: !!isWooByCss,
       isShopware: !!(isShopwareByMeta || isShopwareByHints),
-      isMagento: !!isMagentoByAssets
+      isMagento: !!isMagentoByAssets,
     };
     const isGenericCandidate =
-      !verdict.isShopify && !verdict.isWoo && !verdict.isShopware && !verdict.isMagento;
+      !verdict.isShopify &&
+      !verdict.isWoo &&
+      !verdict.isShopware &&
+      !verdict.isMagento;
 
     __dbg("counts", cnt);
     __dbg("verdict", { ...verdict, isGenericCandidate });
@@ -280,9 +285,15 @@ function hasJsonLdProduct($) {
           ? typeRaw.map((x) => String(x).toLowerCase())
           : [String(typeRaw).toLowerCase()];
         if (types.some((t) => t.includes("product"))) yes = true;
-        if (node.offers && (node.offers.price || node.offers.priceCurrency)) yes = true;
+        if (node.offers && (node.offers.price || node.offers.priceCurrency))
+          yes = true;
         if (Array.isArray(node.offers)) {
-          if (node.offers.some((o) => o && (o.price || o.priceCurrency))) yes = true;
+          if (
+            node.offers.some(
+              (o) => o && (o.price || o.priceCurrency)
+            )
+          )
+            yes = true;
         }
       }
     } catch {
@@ -292,13 +303,7 @@ function hasJsonLdProduct($) {
   return yes;
 }
 
-// NEW: 更激进的深层类目URL判定
-// 我们不仅接受 /catalog/.../...
-// 也接受 /produkte/... , /category/... , /collections/... , /shop/... 等常见电商类目路径
-// 规则：
-//   - URL 必须包含这些关键词之一
-//   - 路径段深度 >= 4 (例如 /catalog/computer/usb-kabel-2-0 -> ["catalog","computer","usb-kabel-2-0"] 深度3，域后+catalog本身+子类=至少3~4段整体）
-//   - 只要满足就认为它是“类目下钻页”，极可能是货架/子货架
+// 用于日志的深层类目 URL 侦测
 function isDeepCatalogUrl(rawUrl = "") {
   try {
     const u = new URL(rawUrl);
@@ -315,18 +320,14 @@ function isDeepCatalogUrl(rawUrl = "") {
       "/collections/",
       "/shop/",
       "/waren/",
-      "/produkt/"
+      "/produkt/",
     ];
 
     const keywordHit = catalogKeywords.some((kw) => lower.includes(kw));
 
-    // 粗暴估一个“深度”：/a/b/c -> ["a","b","c"] = 3
     const parts = u.pathname.split("/").filter(Boolean);
-    const depth = parts.length;
+    const depth = parts.length; // "catalog/computer/usb-kabel-2-0" -> 3
 
-    // 我们设门槛为 depth >= 3
-    // 例: /catalog/computer/usb-kabel-2-0  -> ["catalog","computer","usb-kabel-2-0"] = 3 ✅
-    // 例: /shop/cables/usb -> ["shop","cables","usb"] = 3 ✅
     if (keywordHit && depth >= 3) {
       return true;
     }
@@ -337,7 +338,13 @@ function isDeepCatalogUrl(rawUrl = "") {
 }
 
 // 统一返回格式：type = "list" | "detail" | "other"
-function debugReturnNormalized(normType, platform, reason, extra = {}, adapterHint = "") {
+function debugReturnNormalized(
+  normType,
+  platform,
+  reason,
+  extra = {},
+  adapterHint = ""
+) {
   const payload = {
     type: normType,
     platform: platform || "",
@@ -346,8 +353,8 @@ function debugReturnNormalized(normType, platform, reason, extra = {}, adapterHi
       reason,
       platform: platform || "",
       adapterHint: adapterHint || "",
-      ...extra
-    }
+      ...extra,
+    },
   };
   if (process.env.DEBUG) {
     try {
@@ -385,10 +392,15 @@ function __platformFlags($, html) {
       shopify: !!shopify,
       shopware: !!shopware,
       woocom: !!woocom,
-      magento: !!magento
+      magento: !!magento,
     };
   } catch {
-    return { shopify: false, shopware: false, woocom: false, magento: false };
+    return {
+      shopify: false,
+      shopware: false,
+      woocom: false,
+      magento: false,
+    };
   }
 }
 
@@ -414,10 +426,12 @@ export async function detectStructure(url, html, adapterHint = "") {
   const bodyText = $("body").text() || "";
   const hint = adapterHint || process.env.ADAPTER_HINT || "";
 
+  // ---------------------------------
   // 0) JSON-LD 强信号 => detail
+  // ---------------------------------
   const jsonldProduct = hasJsonLdProduct($);
   if (jsonldProduct) {
-    const payload = debugReturnNormalized(
+    const payloadDetailJsonLd = debugReturnNormalized(
       "detail",
       platform,
       "Product via JSON-LD",
@@ -427,16 +441,18 @@ export async function detectStructure(url, html, adapterHint = "") {
     try {
       const decidedAdapter = platform || hint || "";
       __logDebug(
-        `[struct] url=${url} decided=type=${payload.type},platform=${decidedAdapter || "-"}`
+        `[struct] url=${url} decided=type=${payloadDetailJsonLd.type},platform=${decidedAdapter || "-"}`
       );
     } catch {}
     console.info?.(
-      `[struct] type=${payload.type} platform=${platform || "-"} adapterHint=${hint || "-"}`
+      `[struct] type=${payloadDetailJsonLd.type} platform=${platform || "-"} adapterHint=${hint || "-"}`
     );
-    return payload;
+    return payloadDetailJsonLd;
   }
 
-  // 1) 统计信号
+  // ---------------------------------
+  // 1) 统计信号（粗略 detail 判定）
+  // ---------------------------------
   let productAnchorCount = 0;
   $("a[href]").each((_, a) => {
     const href = $(a).attr("href") || "";
@@ -481,138 +497,79 @@ export async function detectStructure(url, html, adapterHint = "") {
   const hasPrice = hasPriceTokens || hasPriceWide;
   const hasCart = hasCartTokens || hasCartWide;
 
-  // 2) detail 判定
+  // 如果页面看起来像“只有一两个产品 + 有价格/购入按钮”
+  // 我们仍然允许它被判断成 detail 提前返回，
+  // 因为这真的是单品页，不适合批量抓
   if (
     (cardCount <= 3 && (hasPrice || hasCart)) ||
     (productAnchorCount < 6 && hasPrice && hasCart)
   ) {
     const mediaCount = $("img, video, picture").length;
     if (mediaCount >= 1) {
-      const payload = debugReturnNormalized(
+      const payloadDetailSignals = debugReturnNormalized(
         "detail",
         platform,
         "Single product signals",
-        { url, cardCount, productAnchorCount, hasPrice, hasCart, mediaCount },
+        {
+          url,
+          cardCount,
+          productAnchorCount,
+          hasPrice,
+          hasCart,
+          mediaCount,
+        },
         hint
       );
       try {
         const decidedAdapter = platform || hint || "";
         __logDebug(
-          `[struct] url=${url} decided=type=${payload.type},platform=${decidedAdapter || "-"}`
+          `[struct] url=${url} decided=type=${payloadDetailSignals.type},platform=${decidedAdapter || "-"}`
         );
       } catch {}
       console.info?.(
-        `[struct] type=${payload.type} platform=${platform || "-"} adapterHint=${hint || "-"}`
+        `[struct] type=${payloadDetailSignals.type} platform=${platform || "-"} adapterHint=${hint || "-"}`
       );
-      return payload;
+      return payloadDetailSignals;
     }
   }
 
-  // 2.5) deep catalog 判定（现在：直接强制视为 LIST，不再依赖 deepHit）
-// 我们先读取 deepHit 只是为了日志，还会继续强推成 list
-const deepHit = isDeepCatalogUrl(url);
-console.info?.(
-  `[struct-debug] FORCE-LIST mode url=${url} isDeepCatalogUrl=${deepHit} (ignoring detail)`
-);
-
-// 直接把当前页面视为"list"
-const payload = debugReturnNormalized(
-  "list",
-  platform,
-  "Forced as list (ultra aggressive mode)",
-  {
-    url,
-    cardCount,
-    productAnchorCount,
-    hasPrice,
-    hasCart,
-    deepCatalog: true
-  },
-  hint
-);
-
-try {
-  const decidedAdapter = platform || hint || "";
-  __logDebug(
-    `[struct] url=${url} decided=type=${payload.type},platform=${decidedAdapter || "-"} (FORCED LIST global)`
+  // ---------------------------------
+  // 2.5) 强制 LIST 模式（无论 deepHit 真假，我们都返回 list）
+  // 这一步的意义：推动 catalog.js 进入 runExtractListPage()
+  // ---------------------------------
+  const deepHit = isDeepCatalogUrl(url); // 日志用
+  console.info?.(
+    `[struct-debug] FORCE-LIST mode url=${url} isDeepCatalogUrl=${deepHit} (ignoring detail fallback)`
   );
-} catch {}
 
-console.info?.(
-  `[struct] type=${payload.type} platform=${platform || "-"} adapterHint=${hint || "-"} forced-list-global`
-);
-
-// 立刻返回，不给后面的 detail/list 逻辑机会
-return payload;
-
-  // 3) 一般 list 判定
-  if (cardCount >= 6 || productAnchorCount >= 12) {
-    let decision = "list";
-    let reason = "Many cards/anchors";
-
-    // 防止把 mega menu 当商品列表
-    if (!hasPrice && !hasCart && !isDeepCatalogUrl(url)) {
-      const firstLinks = $("a[href]")
-        .slice(0, 80)
-        .toArray()
-        .map((a) => $(a).attr("href") || "");
-      const badRatio = firstLinks.length
-        ? firstLinks.filter((h) => GENERIC_LINK_BAD.test(h || "")).length /
-          firstLinks.length
-        : 0;
-
-      const canonical = ($('link[rel="canonical"]').attr("href") || "").toLowerCase();
-      const looksLikeCatalogPath = /(category|categories|collection|collections|catalog|produkte|produkte\/|kategorie|waren)/.test(
-        canonical
-      );
-
-      if (badRatio > 0.4 && !looksLikeCatalogPath) {
-        decision = "other";
-        reason =
-          "Catalog downgraded: no price/cart & too many site-links (possible homepage/mega menu)";
-        console.warn?.(
-          `[struct] list->other fallback (no price/cart signals) adapterHint=${hint || "-"}`
-        );
-      }
-    }
-
-    const payload = debugReturnNormalized(
-      decision,
-      platform,
-      reason,
-      { url, cardCount, productAnchorCount, hasPrice, hasCart, deepCatalog: false },
-      hint
-    );
-    try {
-      const decidedAdapter = platform || hint || "";
-      __logDebug(
-        `[struct] url=${url} decided=type=${payload.type},platform=${decidedAdapter || "-"}`
-      );
-    } catch {}
-    console.info?.(
-      `[struct] type=${payload.type} platform=${platform || "-"} adapterHint=${hint || "-"}`
-    );
-    return payload;
-  }
-
-  // 4) fallback => other
-  const payload = debugReturnNormalized(
-    "other",
+  const forcedList = debugReturnNormalized(
+    "list",
     platform,
-    "Low commerce signals",
-    { url, cardCount, productAnchorCount, hasPrice, hasCart, deepCatalog: false },
+    "Forced as list (ultra aggressive mode)",
+    {
+      url,
+      cardCount,
+      productAnchorCount,
+      hasPrice,
+      hasCart,
+      deepCatalog: true,
+    },
     hint
   );
+
   try {
     const decidedAdapter = platform || hint || "";
     __logDebug(
-      `[struct] url=${url} decided=type=${payload.type},platform=${decidedAdapter || "-"}`
+      `[struct] url=${url} decided=type=${forcedList.type},platform=${decidedAdapter || "-"} (FORCED LIST global)`
     );
   } catch {}
+
   console.info?.(
-    `[struct] type=${payload.type} platform=${platform || "-"} adapterHint=${hint || "-"}`
+    `[struct] type=${forcedList.type} platform=${platform || "-"} adapterHint=${hint || "-"} forced-list-global`
   );
-  return payload;
+
+  // 我们直接在这里返回，不再执行传统的 "3) list 判定 / 4) other"
+  return forcedList;
 }
 
 export default detectStructure;
