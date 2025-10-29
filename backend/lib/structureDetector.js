@@ -497,42 +497,6 @@ export async function detectStructure(url, html, adapterHint = "") {
   const hasPrice = hasPriceTokens || hasPriceWide;
   const hasCart = hasCartTokens || hasCartWide;
 
-  // 如果页面看起来像“只有一两个产品 + 有价格/购入按钮”
-  // 我们仍然允许它被判断成 detail 提前返回，
-  // 因为这真的是单品页，不适合批量抓
-  if (
-    (cardCount <= 3 && (hasPrice || hasCart)) ||
-    (productAnchorCount < 6 && hasPrice && hasCart)
-  ) {
-    const mediaCount = $("img, video, picture").length;
-    if (mediaCount >= 1) {
-      const payloadDetailSignals = debugReturnNormalized(
-        "detail",
-        platform,
-        "Single product signals",
-        {
-          url,
-          cardCount,
-          productAnchorCount,
-          hasPrice,
-          hasCart,
-          mediaCount,
-        },
-        hint
-      );
-      try {
-        const decidedAdapter = platform || hint || "";
-        __logDebug(
-          `[struct] url=${url} decided=type=${payloadDetailSignals.type},platform=${decidedAdapter || "-"}`
-        );
-      } catch {}
-      console.info?.(
-        `[struct] type=${payloadDetailSignals.type} platform=${platform || "-"} adapterHint=${hint || "-"}`
-      );
-      return payloadDetailSignals;
-    }
-  }
-
   // ---------------------------------
   // 2.5) 强制 LIST 模式（无论 deepHit 真假，我们都返回 list）
   // 这一步的意义：推动 catalog.js 进入 runExtractListPage()
