@@ -33,8 +33,18 @@ import genericLinksParser from "../lib/parsers/genericLinksParser.js";
 
 // === 页面防跑偏阈值（避免整站/站点地图类页面） ===
 
-// NEW: family predictor
-import { predictFamilySync } from "../modules/templateClusterRuntime.js";
+// NEW: family predictor (optional dynamic load to avoid startup failure)
+let predictFamilySync = (sample) => ({ familyId: "UNKNOWN", similarityScore: 0 });
+try {
+  const __predictMod = await import("../modules/templateClusterRuntime.js");
+  if (__predictMod && typeof __predictMod.predictFamilySync === "function") {
+    predictFamilySync = __predictMod.predictFamilySync;
+  } else {
+    console.warn("[catalog] templateClusterRuntime.js found but no predictFamilySync export; using stub.");
+  }
+} catch (e) {
+  console.warn("[catalog] templateClusterRuntime.js missing; family prediction disabled. ", e?.message || e);
+}
 // === 页面防跑偏阈值（避免整站/站点地图类页面） ===
 const MAX_TEXT_LEN = 200000; // 超过视为噪音页，直接拒抓（参谋长建议）
 
