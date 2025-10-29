@@ -1,14 +1,78 @@
-// backend/lib/parsers/genericLinksParser.js
-// ESM version (patched with parsingUtils: sku split, price normalize, absolute URLs)
+// backend/lib/parsers/genericLinksParser.js (STANDALONE VERSION)
+// This version inlines helpers so it does NOT import ../modules/parsingUtils.js
+// Drop-in replacement to fix ERR_MODULE_NOT_FOUND on parsingUtils.js
 
 import { URL } from "url";
-
-// try to reuse your logger if available, fallback to console
 import loggerBase from "../logger.js";
 const logger = loggerBase || console;
 
-// NEW: field helpers
-import { cleanText, absolutize, splitSkuAndName, normalizePrice } from "../../modules/parsingUtils.js";
+// ===== Inlined helpers (cleanText, absolutize, splitSkuAndName, normalizePrice) =====
+
+function cleanText(s = "") {
+  try {
+    return String(s)
+      .replace(/\s+/g, " ")
+      .replace(/[\u00A0\u200B\u200C\u200D]+/g, " ")
+      .trim();
+  } catch {
+    return s || "";
+  }
+}
+
+function absolutize(url = "", pageUrl = "") {
+  if (!url) return "";
+  try {
+    if (/^https?:\/\//i.test(url)) return url;
+    const base = new URL(pageUrl);
+    const abs = new URL(url, base.origin);
+    return abs.toString();
+  } catch {
+    return url;
+  }
+}
+
+function splitSkuAndName(raw = "") {
+  const s = cleanText(raw);
+  if (!s) return { sku: "", rest: "" };
+  const m = s.match(/^([A-Za-z0-9._\-\/]+)\s+(.+)$/);
+  if (m) {
+    return { sku: m[1], rest: m[2] };
+  }
+  return { sku: s, rest: "" };
+}
+
+function normalizePrice(str = "") {
+  const s = cleanText(str);
+  const curMatch = s.match(/(€|\$|£|CHF|EUR|USD|GBP)/i);
+  let currency = "";
+  if (curMatch) {
+    const c = curMatch[1].toUpperCase();
+    if (c === "€") currency = "EUR";
+    else if (c === "£") currency = "GBP";
+    else if (c === "$") currency = "USD";
+    else currency = c;
+  }
+  const numRaw = s.replace(/[^0-9,\.\-]/g, " ");
+  const tokens = numRaw.split(/\s+/).filter(Boolean);
+  let numeric = "";
+  for (let i = tokens.length - 1; i >= 0; i--) {
+    const t = tokens[i];
+    if (/^-?\d{1,3}([\.,]\d{3})*([\.,]\d{2})?$/.test(t) || /^-?\d+(\.\d+)?$/.test(t)) {
+      numeric = t;
+      break;
+    }
+  }
+  if (!numeric && tokens.length) numeric = tokens[tokens.length - 1] || "";
+  if (numeric.includes(",") && !numeric.includes(".")) {
+    numeric = numeric.replace(",", ".");
+  } else if ((numeric.match(/\./g) || []).length > 1) {
+    numeric = numeric.replace(/\.(?=\d{3}(\D|$))/g, "");
+  }
+  const final = numeric.match(/-?\d+(\.\d+)?/);
+  return { price: final ? final[0] : "", currency: currency || "" };
+}
+
+// ===== Parser constants & helpers =====
 
 const MAX_RESULTS = 200;
 const MIN_PRIMARY_HITS = 6;
@@ -63,10 +127,7 @@ function cleanTitle(txt) {
 
   t = t.replace(/\b(add to cart|in den warenkorb|jetzt kaufen|buy now)\b/gi, "");
   t = t
-    .replace(
-      /\b(home|start|audio|video|strom|multimedia|b-run|solar)\b/gi,
-      " "
-    )
+    .replace(/\b(home|start|audio|video|strom|multimedia|b-run|solar)\b/gi, " ")
     .replace(/\s+/g, " ")
     .trim();
 
@@ -103,12 +164,8 @@ function scoreHref(href, text) {
 
   if (PRODUCTY_HINTS.some((h) => sHref.includes(h))) score += 3;
   if (PRICE_RE.test(sTxt)) score += 2;
-
   if (includesAny(sTxt, NAV_WORDS)) score -= 2;
-
-  if (/(?:\/p\/|\/pd\/|\/detail|\/details|\/produkt|\/product)/.test(sHref))
-    score += 2;
-
+  if (/(?:\/p\/|\/pd\/|\/detail|\/details|\/produkt|\/product)/.test(sHref)) score += 2;
   if (isAssetHref(sHref) || sHref.startsWith("#")) score -= 3;
 
   return score;
@@ -122,13 +179,7 @@ function looksLikeJunk(text, hrefAbs, pageUrl) {
   if (includesAny(lower, JUNK_KEYWORDS)) return true;
 
   const hp = hrefAbs.toLowerCase();
-  if (
-    /(impressum|privacy|datenschutz|agb|terms|policy|kontakt|contact|login|account|register)/.test(
-      hp
-    )
-  )
-    return true;
-
+  if (/(impressum|privacy|datenschutz|agb|terms|policy|kontakt|contact|login|account|register)/.test(hp)) return true;
   return false;
 }
 
@@ -159,7 +210,6 @@ function uniqBy(arr, keyFn) {
   return out;
 }
 
-// FINALIZE now uses parsingUtils to clean fields and absolutize URLs
 function finalize(products, pageUrl) {
   return products
     .map((p) => {
@@ -183,47 +233,37 @@ function finalize(products, pageUrl) {
     .slice(0, MAX_RESULTS);
 }
 
-// -- extraction helpers -------------------------------------------------
+// ---------- extraction strategies ----------
 
 async function parseByPrimaryAreas($, pageUrl, log) {
   const items = [];
-
-  // 多个候选容器
   const areas = PRIMARY_AREAS.join(",");
 
   $(areas).each((_, area) => {
     const $area = $(area);
-
     const cards = $area.find(`
       .product, .product-card, .card, .product-item, .productbox,
       li, article, .grid__item, .box, .tile
     `);
-
     if (!cards.length) return;
 
     cards.each((__, card) => {
       const $card = $(card);
-
-      // 挑第一个带 href 的链接
-      let $a = $card
-        .find("a[href]")
-        .filter((i, a) => {
-          const href = $(a).attr("href") || "";
-          return !href.startsWith("#");
-        })
-        .first();
-
+      let $a = $card.find("a[href]").filter((i, a) => {
+        const href = $(a).attr("href") || "";
+        return !href.startsWith("#");
+      }).first();
       if (!$a.length) return;
+
       const hrefAbs = absUrl(pageUrl, $a.attr("href"));
       if (!hrefAbs) return;
 
       const title = cleanTitle(
         $a.attr("title") ||
-          $a.text() ||
-          $card.find("[itemprop='name']").text() ||
-          $card.find(".product-title, .title").text()
+        $a.text() ||
+        $card.find("[itemprop='name']").text() ||
+        $card.find(".product-title, .title").text()
       );
-
       if (!title) return;
       if (looksLikeJunk(title, hrefAbs, pageUrl)) return;
 
@@ -241,9 +281,7 @@ async function parseByPrimaryAreas($, pageUrl, log) {
     });
   });
 
-  log.debug?.(
-    `[generic-links] primary areas extracted: ${items.length}`
-  );
+  log.debug?.(`[generic-links] primary areas extracted: ${items.length}`);
   return items;
 }
 
@@ -257,18 +295,12 @@ async function parseByDeepAnchors($, pageUrl, log) {
     if (!hrefAbs) return;
 
     const text = cleanTitle(
-      $a.attr("title") ||
-        $a.text() ||
-        $a.find("img").attr("alt") ||
-        ""
+      $a.attr("title") || $a.text() || $a.find("img").attr("alt") || ""
     );
-
     if (!text) return;
     if (looksLikeJunk(text, hrefAbs, pageUrl)) return;
 
-    const $card = $a.closest(
-      "article, li, .card, .product, .product-card, .productbox, .grid__item, .tile, .box"
-    );
+    const $card = $a.closest("article, li, .card, .product, .product-card, .productbox, .grid__item, .tile, .box");
     const price = $card.length ? extractPriceFrom($, $card) : "";
 
     const s = scoreHref(hrefAbs, `${text} ${price}`);
@@ -285,69 +317,31 @@ async function parseByDeepAnchors($, pageUrl, log) {
 
   const unique = uniqBy(candidates, (it) => it.url);
   unique.sort((a, b) => b.score - a.score);
-
   const top = unique.slice(0, MAX_RESULTS);
-  logger.debug?.(
-    `[generic-links] deep anchors extracted: ${top.length}`
-  );
+  logger.debug?.(`[generic-links] deep anchors extracted: ${top.length}`);
   return top;
 }
 
-// -- main export -------------------------------------------------------
+// ---------- main ----------
 
 export default async function genericLinksParser(ctx) {
-  // ctx:
-  //   $         cheerio instance (could be full page or rootOnly fragment)
-  //   url       pageUrl
-  //   scope     "rootOnly" | undefined
-  //   logger    optional
   const { $, url: pageUrl, scope } = ctx;
   const log = ctx.logger || logger;
 
   try {
-    // 1. rootOnly 模式下，parseByPrimaryAreas 命中率更高
     let items = await parseByPrimaryAreas($, pageUrl, log);
-
-    // 2. 如果主容器卡片不足，fallback 深层 a[href] 扫描
     if (items.length < MIN_PRIMARY_HITS) {
-      log.info?.(
-        `[generic-links] primary hits=${items.length} < ${MIN_PRIMARY_HITS}, fallback to deep a[href]…`
-      );
+      log.info?.(`[generic-links] primary hits=${items.length} < ${MIN_PRIMARY_HITS}, fallback to deep a[href]…`);
       const deep = await parseByDeepAnchors($, pageUrl, log);
-      const merged = uniqBy([...items, ...deep], (it) => it.url);
-      items = merged;
+      items = uniqBy([...items, ...deep], (it) => it.url);
     }
 
-    // 3. 清洗 & 统一输出格式（使用 pageUrl 绝对化）
     const products = finalize(items, pageUrl);
-
-    log.info?.(
-      `[generic-links] done for ${pageUrl} (scope=${scope || "full"}) => ${products.length} items`
-    );
-
-    // Debug 输出
-    try {
-      if (process.env.DEBUG) {
-        const totalA = $("a[href]").length;
-        console.log(
-          "[links]",
-          "total_a=",
-          totalA,
-          "emitted=",
-          Array.isArray(items) ? items.length : -1,
-          "base=",
-          pageUrl,
-          "scope=",
-          scope || "full"
-        );
-      }
-    } catch (_) {}
+    log.info?.(`[generic-links] done for ${pageUrl} (scope=${scope || "full"}) => ${products.length} items`);
 
     if (!products.length) {
       log.warn?.("[links] NoProductFound in generic-links parser");
-      log.warn?.(
-        `[NoProductFound] ${pageUrl} (generic-links scope=${scope || "full"})`
-      );
+      log.warn?.(`[NoProductFound] ${pageUrl} (generic-links scope=${scope || "full"})`);
     }
 
     return {
