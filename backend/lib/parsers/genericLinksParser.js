@@ -1,12 +1,14 @@
 // backend/lib/parsers/genericLinksParser.js
-// ESM version
+// ESM version (patched with parsingUtils: sku split, price normalize, absolute URLs)
 
 import { URL } from "url";
 
 // try to reuse your logger if available, fallback to console
 import loggerBase from "../logger.js";
-
 const logger = loggerBase || console;
+
+// NEW: field helpers
+import { cleanText, absolutize, splitSkuAndName, normalizePrice } from "../../modules/parsingUtils.js";
 
 const MAX_RESULTS = 200;
 const MIN_PRIMARY_HITS = 6;
@@ -157,18 +159,27 @@ function uniqBy(arr, keyFn) {
   return out;
 }
 
-function finalize(products) {
+// FINALIZE now uses parsingUtils to clean fields and absolutize URLs
+function finalize(products, pageUrl) {
   return products
-    .map((p) => ({
-      sku: p.sku || "",
-      title: cleanTitle(p.title || ""),
-      url: p.url,
-      img: p.img || "",
-      price: p.price || "",
-      currency: p.currency || "",
-      desc: p.desc || "",
-    }))
-    .filter((p) => p.url && p.title)
+    .map((p) => {
+      const titleClean = cleanText(p.title || "");
+      const { sku, rest } = splitSkuAndName(titleClean);
+      const priceInfo = normalizePrice(p.price || "");
+      const urlAbs = absolutize(p.url || p.link || "", pageUrl);
+      const imgAbs = absolutize(p.img || "", pageUrl);
+
+      return {
+        sku: sku || "",
+        title: rest || titleClean,
+        url: urlAbs,
+        img: imgAbs || "",
+        price: priceInfo.price || "",
+        currency: priceInfo.currency || "",
+        desc: p.desc || rest || titleClean || "",
+      };
+    })
+    .filter((p) => p.url && (p.title || p.sku))
     .slice(0, MAX_RESULTS);
 }
 
@@ -307,8 +318,8 @@ export default async function genericLinksParser(ctx) {
       items = merged;
     }
 
-    // 3. 清洗 & 统一输出格式
-    const products = finalize(items);
+    // 3. 清洗 & 统一输出格式（使用 pageUrl 绝对化）
+    const products = finalize(items, pageUrl);
 
     log.info?.(
       `[generic-links] done for ${pageUrl} (scope=${scope || "full"}) => ${products.length} items`
