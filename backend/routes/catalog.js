@@ -32,6 +32,10 @@ import detectRoot from "../lib/smartRootLocator.js";
 import genericLinksParser from "../lib/parsers/genericLinksParser.js";
 
 // === 页面防跑偏阈值（避免整站/站点地图类页面） ===
+
+// NEW: family predictor
+import { predictFamilySync } from "../modules/templateClusterRuntime.js";
+// === 页面防跑偏阈值（避免整站/站点地图类页面） ===
 const MAX_TEXT_LEN = 200000; // 超过视为噪音页，直接拒抓（参谋长建议）
 
 // --------------------------------------------------
@@ -110,6 +114,30 @@ async function ensureFetchHtml(url, wantDebug, hintType = "") {
   return { html: r.html, debugFetch: r.debugFetch };
 }
 
+// --------------------------------------------------
+// helpers / dbg (原样)
+// --------------------------------------------------
+
+// NEW: sample saver for template clustering
+import { fileURLToPath } from "url";
+const __filename2 = typeof __filename !== "undefined" ? __filename : fileURLToPath(import.meta.url);
+const __dirname2  = typeof __dirname  !== "undefined" ? __dirname  : path.dirname(__filename2);
+
+function saveTemplateSample({ url, pageType, rootSelector, fields }) {
+  try {
+    const outDir = path.join(__dirname2, "..", "..", "logs", "training", "templates", "input_samples");
+    fs.mkdirSync(outDir, { recursive: true });
+    const site = (() => {
+      try { return new URL(url).hostname.replace(/^www\./, ""); }
+      catch { return "unknown-site"; }
+    })();
+    const sample = { site, pageType, rootSelector, fields };
+    const outFile = path.join(outDir, `${Date.now()}_${site}.json`);
+    fs.writeFileSync(outFile, JSON.stringify(sample, null, 2), "utf-8");
+  } catch (e) {
+    console.warn("[cluster-sample] failed to save:", e?.message || e);
+  }
+}
 // --------------------------------------------------
 // helpers / dbg (原样)
 // --------------------------------------------------
@@ -721,13 +749,35 @@ const parseHandler = async (req, res) => {
       );
     } catch {}
 
-    const resp = {
+    // Predict family based on rootSelector + fields (if available)
+let familyInfo = { familyId: "UNKNOWN", similarityScore: 0 };
+try {
+  const rootSel = debugPart?.rootLocator?.selector || debugPart?.rootLocator?.rootSelector || "";
+  const first = products?.[0] || items?.[0] || {};
+  const fields = Object.keys(first || {});
+  if (rootSel && fields && fields.length) {
+    const sampleForPredict = {
+      site: new URL(url).hostname.replace(/^www\./, ""),
+      pageType: "list",
+      rootSelector: rootSel,
+      fields,
+    };
+    familyInfo = predictFamilySync(sampleForPredict);
+  }
+} catch (e) {
+  console.warn("[catalog-family-predict] failed:", e?.message || e);
+}
+
+const resp = {
+
       ok: true,
       url,
       count,
       products,
       items,
       adapter: adapter_used,
+      familyId: familyInfo.familyId,
+      familyScore: familyInfo.similarityScore,
     };
 
     if (wantDebug) {
