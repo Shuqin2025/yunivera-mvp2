@@ -6,6 +6,14 @@ import axios from "axios";
 const UA =
   process.env.SCRAPER_UA ||
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
+ // --- app init & middlewares ---
+const app = express();
+app.use(cors());
+app.use(express.json({ limit: "2mb" }));
+app.use(express.urlencoded({ extended: true }));
+
+// health check
+app.get("/v1/health", (_req, res) => res.status(200).json({ ok: true }));
 
 app.get("/v1/api/image", async (req, res) => {
   const url = String(req.query.url || "").trim();
@@ -17,23 +25,19 @@ app.get("/v1/api/image", async (req, res) => {
       timeout: 20000,
       headers: {
         "User-Agent": UA,
-          "Accept": "image/avif,image/webp,image/*,*/*;q=0.8",
+        "Accept": "image/avif,image/webp,image/*,*/*;q=0.8",
         "Accept-Language": "de,en;q=0.8,zh;q=0.6",
-          "Referer": new URL(url).origin + "/",
+        "Referer": new URL(url).origin + "/",
       },
       validateStatus: (s) => s >= 200 && s < 400,
-     });
-    
+    });
+
     const ct = r.headers["content-type"] || "image/jpeg";
     res.set("Access-Control-Allow-Origin", "*");
 
     if (format === "base64") {
       const base64 = Buffer.from(r.data).toString("base64");
-      return res.json({
-        ok: true,
-        contentType: ct,
-        base64: `data:${ct};base64,${base64}`,
-      });
+      return res.json({ ok: true, contentType: ct, base64: `data:${ct};base64,${base64}` });
     }
 
     res.set("Content-Type", ct);
@@ -42,6 +46,12 @@ app.get("/v1/api/image", async (req, res) => {
   } catch (e) {
     res.status(502).send("image fetch failed");
   }
+});
+app.get("/v1/api/image64", (req, res) => {
+  // 把原 query 合并上 format=base64，然后改写成 /v1/api/image 的路径再交给路由器
+  const params = new URLSearchParams({ ...req.query, format: "base64" });
+  req.url = `/v1/api/image?${params.toString()}`;
+  app._router.handle(req, res, () => {});
 });
 
 function abs(base, maybe) {
@@ -1100,6 +1110,6 @@ async function parseUniversalCatalog(
 // 兼容别名：/v1/api/parse
 // ✅ 兼容老路径：/v1/api/catalog 与 *.json 变体
 /* ──────────────────────────── listen ──────────────────────────── */
-const PORT = process.env.PORT || 3000;
+const PORT = Number(process.env.PORT || 10000);
 
 app.listen(PORT, () => console.log(`[mvp2-backend] listening on :${PORT}`));
