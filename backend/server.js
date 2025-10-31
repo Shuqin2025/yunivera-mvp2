@@ -2,6 +2,7 @@ import { detectStructure } from './lib/structureDetector.js';
 import express from "express";
 import cors from "cors";
 import axios from "axios";
+import catalogRouter from "./routes/catalog.js";
 // --- UA: single source of truth ---
 const UA =
   process.env.SCRAPER_UA ||
@@ -11,6 +12,13 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
+app.use("/v1/api", catalogRouter);
+app.get("/v1/api/catalog/parse", (req, res) => {
+  const qs = req.originalUrl.includes("?")
+    ? req.originalUrl.slice(req.originalUrl.indexOf("?"))
+    : "";
+  res.redirect(307, `/v1/api/catalog${qs}`);
+});
 
 // health check
 app.get("/v1/health", (_req, res) => res.status(200).json({ ok: true }));
