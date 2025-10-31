@@ -14,6 +14,16 @@ app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
 
 // load router lazily to avoid cyclic/declaration issues
+// --- legacy aliases: must be registered BEFORE catalogRouter mounts ---
+app.get("/v1/api/catalog/parse", (req, res) => {
+  const qs = new URLSearchParams(req.query).toString();
+  res.redirect(307, `/v1/api/catalog?${qs}`);
+});
+
+app.get("/v1/api/parse", (req, res) => {
+  const qs = new URLSearchParams(req.query).toString();
+  res.redirect(307, `/v1/api/catalog?${qs}`);
+});
 const { default: catalogRouter } = await import("./routes/catalog.js");
 app.use("/v1/api/catalog", catalogRouter);
 app.use("/v1/api", catalogRouter);
