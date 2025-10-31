@@ -12,6 +12,9 @@ const app = express();
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
+const { default: catalogRouter } = await import("./routes/catalog.js");
+app.use("/v1/api", catalogRouter);
+app.use("/v1/api/catalog", catalogRouter);
 app.use("/v1/api", catalogRouter);
 app.get("/v1/api/catalog/parse", (req, res) => {
   const qs = req.originalUrl.includes("?")
