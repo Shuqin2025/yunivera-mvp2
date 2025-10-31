@@ -2,10 +2,8 @@ import { detectStructure } from './lib/structureDetector.js';
 import express from "express";
 import cors from "cors";
 import axios from "axios";
-// --- UA: single source of truth ---
 const UA =
-  process.env.SCRAPER_UA ||
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36";
 
 app.get("/v1/api/image", async (req, res) => {
   const url = String(req.query.url || "").trim();
@@ -42,205 +40,6 @@ app.get("/v1/api/image", async (req, res) => {
   }
 });
 
-import * as cheerio from "cheerio";
-function text($el) { return ($el.text() || "").replace(/\s+/g, " ").trim(); }
-function abs(base, maybe) { try { return new URL(maybe, base).href; } catch { return ""; } }
-function normalizePrice(str) {
-  if (!str) return "";
-  const s = String(str).replace(/\s+/g, " ").trim();
-  const m =
-    s.match(/€\s*\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2})/) ||
-    s.match(/\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2})\s*€/) ||
-    s.match(/\d+[.,]\d{2}/);
-  if (!m) return s;
-  let v = m[0].replace(/\s+/g, " ");
-  if (!/[€]/.test(v)) v = "€ " + v;
-  return v;
-}
-
-async function enrichDetail(item) {
-  try {
-    const html = await axios.get(item.url, {
-      headers: { "User-Agent": UA, "Accept-Language": "de,en;q=0.8" },
-      timeout: 20000, validateStatus: s => s >= 200 && s < 400
-    }).then(r => (typeof r.data === "string" ? r.data : ""));
-    if (!html) return;
-    const $ = cheerio.load(html);
-
-    // 价格（先结构化，再 CSS，最后正则兜底）
-    let price =
-      $('meta[itemprop="price"]').attr("content") ||
-      $('[itemprop="price"]').attr("content") ||
-      text($(".price .amount").first()) ||
-      text($(".product-price,.price,.amount").first());
-    if (!price) {
-      const m = $("body").text().match(/\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2})\s*(€|EUR)/i);
-      if (m) price = m[0];
-    }
-    if (price) item.price = normalizePrice(price);
-
-    // MOQ（常见类名）
-    const moq = text($(".moq,.min-order,.minbestellmenge,.minimum-order").first());
-    if (moq) item.moq = moq;
-
-    // 图片（详情页更清晰）
-    if (!item.img) {
-      const og = $('meta[property="og:image"]').attr("content") || "";
-      const $img = $(".product-media img, .gallery img, img").first();
-      const src = og ||
-        $img.attr("data-src") ||
-        ($img.attr("srcset") || "").split(" ").find(s => /^https?:/i.test(s)) ||
-        $img.attr("src") || "";
-      if (src) item.img = abs(item.url, (src || "").split("?")[0]);
-    }
-  } catch {}
-}
-
-import fs from 'node:fs';
-import path from 'node:path';
-import compat from './routes/compat.js';
-import detectRouter from './routes/detect.js'; 
-import catalogRouter from './routes/catalog.js';
-
-// 新增：引入自定义 logger（仅用于 http 访问日志）
-import { logger } from './lib/logger.js';
-// 调试：阶段快照 & 自动日志巡检
-import snapshot from "./lib/debugSnapshot.js";
-import { autoLogInspector } from "./modules/diagnostics/autoLogInspector.js";
-import errorCollector from "./modules/errorCollector.js";
-
-// health info
-import pkg from './package.json' assert { type: 'json' };
-
-// ✅ 可选翻译（保持你原有接口）
-import * as translate from "./lib/translate.js";
-
-// ✅ 站点适配器（保持你已有）
-import parseMemoryking from "./adapters/memoryking.js";
-import sino from "./adapters/sinotronic.js";
-import parseUniversal from "./adapters/universal.js";
-
-const app = express();
-// 让后端能读到 JSON body（你已有的话可跳过）
-
-// --- Global CORS & preflight (allow any origin; cover OPTIONS) ---
-
-app.use(express.json({ limit: "1mb" }));
-// 自动日志巡检（轻量拦截，记录关键信息）
-app.use(autoLogInspector());
-
-// === 极简 CORS（允许任意跨域；覆盖预检） ===
-// 保证任何场景都不会被 OPTIONS 卡住
-app.use((req, res, next) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Headers', '*, Authorization, Content-Type');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS,PUT,PATCH,DELETE');
-  if (req.method === 'OPTIONS') return res.sendStatus(200);
-  next();
-});
-
-// 兼容路由：让 /v1/* 和 /v1/api/* 都走同一套新路由
-app.use(['/v1', '/v1/api'], compat);
-app.use(['/v1', '/v1/api'], detectRouter);
-app.use(['/v1', '/v1/api'], catalogRouter);
-// 统一 health 路由（多前缀）
-app.get(['/v1/health', '/health', '/api/health', '/'], (_req, res) => {
-  res.json({ ok: true, service: "mvp2-backend", ts: Date.now() });
-});
-// 放在所有 app.use('/v1'...) 路由后面
-app.use((err, req, res, next) => {
-  try {
-    // 可选：如果你已经有 errorCollector，可保留这行
-    // await errorCollector.capture(err, req);
-
-    const status = Number(err?.status) || 500;
-    res.status(status).json({
-      ok: false,
-      error: err?.name || 'INTERNAL_ERROR',
-      code: err?.code || 'INTERNAL_ERROR',
-      message: err?.message || 'Internal Server Error',
-      ts: Date.now(),
-    });
-  } catch {
-    res.status(500).json({
-      ok: false,
-      error: 'INTERNAL_ERROR',
-      code: 'INTERNAL_ERROR',
-      message: 'Internal Server Error',
-      ts: Date.now(),
-    });
-  }
-});
-
-
-// 兼容所有跨域场景（含预检）
-app.use(cors({ origin: "*", exposedHeaders: ["X-Lang", "X-Adapter"] }));
-// --- CORS 预检（允许任意跨域；覆盖预检）---
-
-// ✅ 极简 CORS（允许任意跨域；覆盖预检），保证任何场景都不会被 OPTIONS 卡住
-// ADDON: 兼容路由挂载
-app.use((req, _res, next) => {
-  try {
-    const ip =
-      (req.headers["x-forwarded-for"]?.toString().split(",")[0] || req.ip || "").trim();
-    const ua = (req.headers["user-agent"] || "").slice(0, 120);
-    logger.info(`[http] ${req.method} ${req.url} ip=${ip} ua="${ua}"`);
-  } catch {}
-  next();
-});
-// === /新增 ===
-
-/* ──────────────────────────── snapshots static ──────────────────────────── */
-const SNAPSHOT_DIR = process.env.SNAPSHOT_DIR || path.resolve('./snapshots');
-try { if (!fs.existsSync(SNAPSHOT_DIR)) fs.mkdirSync(SNAPSHOT_DIR, { recursive: true }); } catch {}
-
-app.use('/snapshots', (req, res, next) => {
-  const p = path.join(SNAPSHOT_DIR, req.path);
-  try {
-    if (fs.existsSync(p) && fs.statSync(p).isDirectory()) {
-      const list = fs.readdirSync(p).sort().reverse();
-      res.type('html').send(
-        `<h3>/snapshots${req.path}</h3><ul>` +
-        list.map(n => `<li><a href="${encodeURIComponent(n)}/">${n}/</a></li>`).join('') +
-        `</ul>`
-      );
-      return;
-    }
-  } catch {}
-  next();
-}, (req, res, next) => express.static(SNAPSHOT_DIR)(req, res, next));
-
-
-/* --- health check (added) --- */
-
-// 兼容路由：让 /v1/* 和 /v1/api/* 都走新路由；同时保留根前缀以兼容旧请求
-
-
-app.get("/v1/api/__version", (_req, res) => {
-  res.json({
-    version: "mvp-universal-parse-2025-10-06-beamer-paging-fix-artnr",
-    note:
-      "beamer-discount: stronger detail SKU overwrite (Artikel-Nr), aggressive pagination + dedupe; keep other sites untouched.",
-  });
-});
-
-/* ──────────────────────────── utils ──────────────────────────── */
-const localUA = UA; // 继续下面逻辑时都用 localUA
- 
-async function fetchHtml(targetUrl) {
-  const { data } = await axios.get(targetUrl, {
-    headers: {
-      "User-Agent": UA,
-      "Accept-Language": "de,en;q=0.8,zh;q=0.6",
-      Accept:
-        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-      Referer: targetUrl,
-    },
-    timeout: 25000,
-    maxRedirects: 5,
-    validateStatus: (s) => s >= 200 && s < 400,
-  });
-  return typeof data === "string" ? data : "";
 }
 
 function abs(base, maybe) {
@@ -344,42 +143,7 @@ function looksLikeMagento($, html) {
 
 // === /v1/api/detect =====================================================
 
-app.get("/v1/api/image", async (req, res) => {
-  const url = String(req.query.url || "").trim();
-  const format = String(req.query.format || "").toLowerCase();
-  if (!url) return res.status(400).send("missing url");
-  try {
-    const r = await axios.get(url, {
-      responseType: "arraybuffer",
-      timeout: 20000,
-      headers: {
-        "User-Agent": UA,
-        Accept: "image/avif,image/webp,image/*,*/*;q=0.8",
-        Referer: new URL(url).origin + "/",
-      },
-      validateStatus: (s) => s >= 200 && s < 400,
-    });
 
-    const ct = r.headers["content-type"] || "image/jpeg";
-    res.set("Access-Control-Allow-Origin", "*");
-
-    if (format === "base64") {
-      const base64 = Buffer.from(r.data).toString("base64");
-      return res.json({
-        ok: true,
-        contentType: ct,
-        base64: `data:${ct};base64,${base64}`,
-      });
-    }
-
-    res.set("Content-Type", ct);
-    res.set("Cache-Control", "public, max-age=604800");
-    res.send(r.data);
-  } catch (e) {
-    console.error("[image] fail:", e?.message || e);
-    res.status(502).send("image fetch failed");
-  }
-});
 app.get("/v1/api/image64", (req, res) => {
   // 把原 query 合并上 format=base64，然后改写成 /v1/api/image 的路径再交给路由器
   const params = new URLSearchParams({ ...req.query, format: "base64" });
@@ -1110,12 +874,7 @@ async function parseUniversalCatalog(
       const n = Math.min(detailSkuMax || 30, limit);
       await overwriteSkuFromBeamerDetail(out, n);
 
-      // === PATCH: beamer 详情覆写 SKU 后，再顺手补价格/图片（首批） =====================
-const enrichN = Math.min(20, out.length, limit);
-await Promise.all(out.slice(0, enrichN).map(enrichDetail));
-// 你本来就有：return { items: out, adapter: "beamer-list+paging+detailSku" };
-return { items: out, adapter: "beamer-list+paging+detailSku+enrich" };
-
+      return { items: out, adapter: "beamer-list+paging+detailSku" };
     }
 
     // ✅ akkuman.de（保持你的策略）
@@ -1198,11 +957,7 @@ return { items: out, adapter: "beamer-list+paging+detailSku+enrich" };
       };
 
       let $ = await harvest(listUrl);
-      if (out.length >= limit) // === PATCH: s-impuls-shop 富化价格/图片（首批） ==========================
-const enrichN = Math.min(20, out.length, limit);
-await Promise.all(out.slice(0, enrichN).map(enrichDetail));
-// 你本来就有：return { items: out, adapter };
-return { items: out, adapter: "s-impuls-shop+enrich" };
+      if (out.length >= limit) return { items: out, adapter };
 
       const pageSet = new Map(); // pageNo -> url
       const addPage = (href) => {
@@ -1272,15 +1027,7 @@ return { items: out, adapter: "s-impuls-shop+enrich" };
           if (!advanced) break;
           n += 1;
         }
-        // === PATCH: s-impuls-shop 分页抓取结束后也补一批 enrich ==================
-
-        const enrichN2 = Math.min(20, out.length, limit);
-
-        await Promise.all(out.slice(0, enrichN2).map(enrichDetail));
-
-        // 你本来就有：return { items: out, adapter };
-
-        return { items: out, adapter: "s-impuls-shop+enrich" };
+        return { items: out, adapter };
       }
 
       const pages = [...pageSet.entries()]
@@ -1318,17 +1065,9 @@ return { items: out, adapter: "s-impuls-shop+enrich" };
   if (cardItems.length) {
     if (detailSku) {
       await overwriteSkuFromDetailGeneric(cardItems, Math.min(detailSkuMax || 30, limit));
-      // === PATCH: generic-cards 也补一批图价 ================================
-const enrichN = Math.min(20, cardItems.length, limit);
-await Promise.all(cardItems.slice(0, enrichN).map(enrichDetail));
-// 你本来就有：return { items: cardItems, adapter: "generic-cards+detailSku" };
-return { items: cardItems, adapter: "generic-cards+detailSku+enrich" };
+      return { items: cardItems, adapter: "generic-cards+detailSku" };
     }
-    // === PATCH: generic-cards 也补一批图价 ================================
-const enrichN = Math.min(20, cardItems.length, limit);
-await Promise.all(cardItems.slice(0, enrichN).map(enrichDetail));
-// 你本来就有：return { items: cardItems, adapter: "generic-cards" };
-return { items: cardItems, adapter: "generic-cards+enrich" };
+    return { items: cardItems, adapter: "generic-cards" };
   }
 
   const wcCards = $("ul.products li.product");
