@@ -17,11 +17,13 @@ app.get("/v1/api/image", async (req, res) => {
       timeout: 20000,
       headers: {
         "User-Agent": UA,
-        Accept: "image/avif,image/webp,image/*,*/*;q=0.8",
-        Referer: new URL(url).origin + "/",
+          "Accept": "image/avif,image/webp,image/*,*/*;q=0.8",
+        "Accept-Language": "de,en;q=0.8,zh;q=0.6",
+          "Referer": new URL(url).origin + "/",
       },
       validateStatus: (s) => s >= 200 && s < 400,
-    });
+     });
+    
     const ct = r.headers["content-type"] || "image/jpeg";
     res.set("Access-Control-Allow-Origin", "*");
 
@@ -41,8 +43,6 @@ app.get("/v1/api/image", async (req, res) => {
     res.status(502).send("image fetch failed");
   }
 });
-
-}
 
 function abs(base, maybe) {
   if (!maybe) return "";
