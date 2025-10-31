@@ -3,11 +3,13 @@ import express from "express";
 import cors from "cors";
 import axios from "axios";
 // --- UA: single source of truth ---
+import * as cheerio from "cheerio";
 const UA =
   process.env.SCRAPER_UA ||
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 async function fetchHtml(targetUrl) {
   globalThis.fetchHtml = fetchHtml;
+  globalThis.cheerio = cheerio;
   const { data } = await axios.get(targetUrl, {
     headers: {
       "User-Agent": UA,
