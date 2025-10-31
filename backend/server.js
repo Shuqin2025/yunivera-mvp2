@@ -1159,8 +1159,12 @@ app.get("/v1/api/catalog/parse", __handleCatalogParse);
 app.get("/v1/api/parse", __handleCatalogParse);
 app.get("/v1/api/catalog", __handleCatalogParse);
 app.get("/v1/api/catalog.json", __handleCatalogParse);
-// ====== end compat routes ======
+// --- legacy aliases without /api (some clients/gateway still use these) ---
+app.get("/v1/catalog/parse", __handleCatalogParse);
+app.get("/v1/catalog", __handleCatalogParse);
+app.get("/v1/catalog.json", __handleCatalogParse);
 
+// ====== end compat routes ======
 
 const PORT = Number(process.env.PORT || 10000);
 
