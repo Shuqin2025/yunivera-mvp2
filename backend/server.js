@@ -2,20 +2,22 @@ import { detectStructure } from './lib/structureDetector.js';
 import express from "express";
 import cors from "cors";
 import axios from "axios";
-import catalogRouter from "./routes/catalog.js";
 // --- UA: single source of truth ---
 const UA =
   process.env.SCRAPER_UA ||
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
- // --- app init & middlewares ---
+
+// --- app init & middlewares ---
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
+
+// load router lazily to avoid cyclic/declaration issues
 const { default: catalogRouter } = await import("./routes/catalog.js");
-app.use("/v1/api", catalogRouter);
 app.use("/v1/api/catalog", catalogRouter);
 app.use("/v1/api", catalogRouter);
+
 app.get("/v1/api/catalog/parse", (req, res) => {
   const qs = req.originalUrl.includes("?")
     ? req.originalUrl.slice(req.originalUrl.indexOf("?"))
