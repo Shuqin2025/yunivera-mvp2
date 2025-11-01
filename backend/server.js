@@ -73,6 +73,7 @@ app.get("/v1/api/catalog/parse", (req, res) => {
 
 // health check
 app.get("/v1/health", (_req, res) => res.status(200).json({ ok: true }));
+app.get("/v1/api/health", (_req, res) => res.status(200).json({ ok: true }));
 
 app.get("/v1/api/image", async (req, res) => {
   const url = String(req.query.url || "").trim();
@@ -92,9 +93,7 @@ app.get("/v1/api/image", async (req, res) => {
     });
 
     const ct = r.headers["content-type"] || "image/jpeg";
-    res.set("Access-Control-Allow-Origin", "*");
-
-    if (format === "base64") {
+if (format === "base64") {
       const base64 = Buffer.from(r.data).toString("base64");
       return res.json({ ok: true, contentType: ct, base64: `data:${ct};base64,${base64}` });
     }
@@ -1205,3 +1204,5 @@ app.get("/v1/catalog.json", __handleCatalogParse);
 const PORT = Number(process.env.PORT || 10000);
 
 app.listen(PORT, () => console.log(`[mvp2-backend] listening on :${PORT}`));
+
+ 
