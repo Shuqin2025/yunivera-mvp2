@@ -820,17 +820,8 @@ const resp = {
     }
 
     // ====== 仅此处替换为所需返回结构 ======
-    return res.json({
-      ok: true,
-      url,
-      count: Array.isArray(items) ? items.length : 0,
-      items,
-      adapter: adapter_used,
-      // --- 兼容老前端字段 ---
-      cardItems: items,           // generic-cards 老前端读取这个
-      out: { items, adapter: adapter_used },    // 另一批老前端读取 out.items
-    });
-  } catch (err) {
+    return res.json(standardize({ ok: true, url, count: items.length, items, adapter: adapter_used }));
+} catch (err) {
     logger.error(
       `[route/catalog.parse] ERROR url=${req?.body?.url || req?.query?.url} -> ${err?.message || err}`
     );
