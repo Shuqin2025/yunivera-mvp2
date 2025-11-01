@@ -55,6 +55,21 @@ app.use(express.urlencoded({ extended: true }));
 app.get("/v1/health", (_req, res) => res.status(200).json({ ok: true }));
 app.get("/v1/api/health", (_req, res) => res.status(200).json({ ok: true }));
 
+
+// ---- catalog probe (top-level, fallback if subrouter missing) ----
+app.get("/v1/api/catalog/_probe", (_req, res) => {
+  const rows = [{ sku:"demo", title:"probe ok", url:"#", img:"", desc:"", moq:"", price:"" }];
+  return res.json({
+    ok: true,
+    url: "/_probe",
+    count: rows.length,
+    adapter: "probe",
+    items: rows, data: rows, list: rows, rows
+  });
+});
+
+
+
 app.get("/v1/api/image", async (req, res) => {
   const url = String(req.query.url || "").trim();
   const format = String(req.query.format || "").toLowerCase();
@@ -1216,3 +1231,4 @@ app.use("/v1/api", catalogRouter);
 const PORT = Number(process.env.PORT || 10000);
 
 app.listen(PORT, () => console.log(`[mvp2-backend] listening on :${PORT}`));
+
