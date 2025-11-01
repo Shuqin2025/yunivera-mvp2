@@ -51,10 +51,6 @@ app.use(express.urlencoded({ extended: true }));
 
 // load router lazily to avoid cyclic/declaration issues
 // --- legacy aliases: must be registered BEFORE catalogRouter mounts ---
-const { default: catalogRouter } = await import("./routes/catalog.js");
-app.use("/v1/api/catalog", catalogRouter);
-app.use("/v1/api", catalogRouter);
-
 // health check
 app.get("/v1/health", (_req, res) => res.status(200).json({ ok: true }));
 app.get("/v1/api/health", (_req, res) => res.status(200).json({ ok: true }));
@@ -198,10 +194,8 @@ function looksLikeMagento($, html) {
 // === /v1/api/detect =====================================================
 
 
-app.get("/v1/api/image64", (req, res) => {
-  // 把原 query 合并上 format=base64，然后改写成 /v1/api/image 的路径再交给路由器
-  const params = new URLSearchParams({ ...req.query, format: "base64" });
-  req.url = `/v1/api/image?${params.toString()}`;
+
+req.url = `/v1/api/image?${params.toString()}`;
   app._router.handle(req, res, () => {});
 });
 
@@ -1217,6 +1211,13 @@ app.get("/v1/catalog", __handleCatalogParse);
 app.get("/v1/catalog.json", __handleCatalogParse);
 
 // ====== end compat routes ======
+
+
+// Mount catalog router AFTER compat routes so parse hits unified handler first
+const { default: catalogRouter } = await import("./routes/catalog.js");
+app.use("/v1/api/catalog", catalogRouter);
+app.use("/v1/api", catalogRouter);
+
 
 const PORT = Number(process.env.PORT || 10000);
 
