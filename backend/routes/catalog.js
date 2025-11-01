@@ -823,6 +823,7 @@ const resp = {
     // === normalize to frontend-required schema ===
 const itemsStd = (Array.isArray(items) ? items : []).map((it) => {
   const link   = it.link || it.url || it.href || "";
+  const url    = link; // 同时返回 url & link，兼容前端
   const title  = String(it.title || it.name || it.sku || "").trim();
   const sku    = String(it.sku || it.code || title).trim();
   const img    = it.img || it.image || (Array.isArray(it.imgs) ? it.imgs[0] : "") || "";
@@ -830,8 +831,8 @@ const itemsStd = (Array.isArray(items) ? items : []).map((it) => {
   const minQty = it.minQty || it.moq || "";
   const desc   = it.desc || it.description || "";
 
-  return { sku, title, img, desc, minQty, price, link };
-}).filter(it => it.title || it.link); // 保底过滤空项
+  return { sku, title, img, desc, minQty, price, url, link };
+}).filter(it => it.title || it.url || it.link); // 允许用 url 或 link 作为有效性判定
 
 return res.json({
   ok: true,
