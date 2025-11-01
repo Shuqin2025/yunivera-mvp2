@@ -1169,38 +1169,6 @@ async function parseUniversalCatalog(
 // ✅ 兼容老路径：/v1/api/catalog 与 *.json 变体
 /* ──────────────────────────── listen ──────────────────────────── */
 
-// ====== CATALOG PARSE ROUTES (compat) ======
-// Unified handler
-async function __handleCatalogParse(req, res) {
-  try {
-    const url   = String(req.query.url || "").trim();
-    const limit = Math.min(parseInt(req.query.limit || "50", 10) || 50, 200);
-    const debug = /^(1|true|yes)$/i.test(String(req.query.debug || ""));
-    const detailSku = /^(1|true|yes)$/i.test(String(req.query.detail || ""));
-
-    if (!url) return res.status(400).json({ ok: false, error: "missing url" });
-
-    const { items = [], adapter = "generic" } = await parseUniversalCatalog(url, limit, { debug, detailSku });
-    return res.json({ ok: true, url, count: items.length, items, adapter });
-  } catch (e) {
-    return res.status(500).json({ ok: false, error: (e && e.message) ? e.message : String(e) });
-  }
-}
-
-// Primary path used by the frontend
-app.get("/v1/api/catalog/parse", __handleCatalogParse);
-
-// Aliases kept for backward-compatibility
-app.get("/v1/api/parse", __handleCatalogParse);
-app.get("/v1/api/catalog", __handleCatalogParse);
-app.get("/v1/api/catalog.json", __handleCatalogParse);
-// --- legacy aliases without /api (some clients/gateway still use these) ---
-app.get("/v1/catalog/parse", __handleCatalogParse);
-app.get("/v1/catalog", __handleCatalogParse);
-app.get("/v1/catalog.json", __handleCatalogParse);
-
-// ====== end compat routes ======
-
 const PORT = Number(process.env.PORT || 10000);
 
 app.listen(PORT, () => console.log(`[mvp2-backend] listening on :${PORT}`));
