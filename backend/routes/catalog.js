@@ -280,9 +280,10 @@ function genericExtract($, baseUrl, { limit = 50, debug = false } = {}) {
       "";
     const img = absolutize(imgRel);
 
+    // ✅ 这里是修复后的“干净版” title 段
     let title =
       ($el.find("img").attr("alt") || "").trim() ||
-      $el.find("h1,h2,h3,h4,h5,h6").").first().text().trim() ||
+      $el.find("h1,h2,h3,h4,h5,h6").first().text().trim() ||
       ($a.text() || "").trim() ||
       $el.text().trim();
 
@@ -786,34 +787,27 @@ const parseHandler = async (req, res) => {
     }
 
     // ====== 仅此处替换为所需返回结构 ======
-    // —— 统一/补齐字段，兼容旧前端 ——
-    // 期望：sku/title/img/desc/moq/price/url 都有值
-    const rows = (items || []).map(it => ({
-      sku:   it.sku   ?? it.title ?? "",
-      title: it.title ?? it.desc  ?? "",
-      desc:  it.desc  ?? it.title ?? "",
-      img:   it.img   ?? it.image ?? "",
-      // 强制转成字符串，避免前端因为类型不一致不渲染
-      price: it.price == null ? "" : String(it.price),
-      moq:   it.moq   == null ? "" : String(it.moq),
-      url:   it.url   ?? it.href  ?? ""
-    }));
+    // === normalize to frontend-required schema ===
+const itemsStd = (Array.isArray(items) ? items : []).map((it) => {
+  const link   = it.link || it.url || it.href || "";
+  const url    = link; // 同时返回 url & link，兼容前端
+  const title  = String(it.title || it.name || it.sku || "").trim();
+  const sku    = String(it.sku || it.code || title).trim();
+  const img    = it.img || it.image || (Array.isArray(it.imgs) ? it.imgs[0] : "") || "";
+  const price  = it.price == null ? "" : String(it.price);
+  const minQty = it.minQty || it.moq || "";
+  const desc   = it.desc || it.description || "";
 
-    const payload = {
-      ok: true,
-      url,
-      count: rows.length,
-      items: rows,
-      adapter: adapter_used
-    };
+  return { sku, title, img, desc, minQty, price, url, link };
+}).filter(it => it.title || it.url || it.link); // 允许用 url 或 link 作为有效性判定
 
-    // 兼容老字段名：有些前端读 list / rows / data.items
-    payload.list = rows;
-    payload.rows = rows;
-    payload.data = { items: rows, count: rows.length };
-
-    res.json(payload);
-
+return res.json({
+  ok: true,
+  url,
+  count: itemsStd.length,
+  items: itemsStd,
+  adapter: adapter_used || adapter || ""
+});
   } catch (err) {
     logger.error(
       `[route/catalog.parse] ERROR url=${req?.body?.url || req?.query?.url} -> ${err?.message || err}`
