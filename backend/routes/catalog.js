@@ -282,7 +282,7 @@ function genericExtract($, baseUrl, { limit = 50, debug = false } = {}) {
 
     let title =
       ($el.find("img").attr("alt") || "").trim() ||
-      $el.find("h1,h2,h3,h4,h5,h6").first().text().trim() ||
+      $el.find("h1,h2,h3,h4,h5,h6").").first().text().trim() ||
       ($a.text() || "").trim() ||
       $el.text().trim();
 
@@ -467,29 +467,17 @@ async function runExtractListPage({ url, html, limit = 50, debug = false, hintTy
   // 如果这些专用/模板解析器都没拿到结果 ⇒ 进入我们的新策略：
   // detectRoot + genericLinksParser (root-scoped)
   if (!items.length) {
-    // 1. 用 detectRoot() 在整页 $full 上定位“最可能的商品列表主容器”
-    // detectRoot 来自 ../lib/smartRootLocator.js
-    // 它返回例如：
-    // { selector: ".product-grid", confidence: 0.78, reason: "...", probes: [...] }
     const rootInfo = await detectRoot({ $: $full });
-
-    // 2. 根据 rootInfo.selector 在整页 DOM 里找到对应节点
     const $rootNode = $full(rootInfo.selector).first();
-
-    // 3. 只截取这个容器自身的 HTML 片段
     const rootHtml = $rootNode.length ? $rootNode.html() : "";
-
-    // 4. 用 cheerio 只加载该区块，而不是整页
     const $rootOnly = cheerio.load(rootHtml || "", { decodeEntities: false });
 
-    // 5. 让 genericLinksParser 只在这个 root 片段下尝试提取产品卡片
     const parsedFromRoot = await genericLinksParser({
-  $: $rootOnly,
-  url,
-  scope: "rootOnly",
-});
+      $: $rootOnly,
+      url,
+      scope: "rootOnly",
+    });
 
-    // 6. 如果 parser 有产出，把它们映射成统一 items 结构
     if (
       parsedFromRoot &&
       parsedFromRoot.products &&
@@ -507,10 +495,7 @@ async function runExtractListPage({ url, html, limit = 50, debug = false, hintTy
         desc: p.desc || "",
       }));
 
-      // 标记我们是走哪条分支拿到结果的
       used = (parsedFromRoot.adapter || "") + "+rootScope";
-
-      // debugPart 里补入 rootInfo，方便训练/诊断
       debugPart = {
         ...(debugPart || {}),
         rootLocator: {
@@ -633,38 +618,24 @@ const parseHandler = async (req, res) => {
         );
       }
 
-         // ============== NEW STEP 1: 结构判别 (LIST / DETAIL / OTHER) ==============
-    // 关键修正：必须把 url 也传给 detectStructure，
-    // 否则它拿不到真实地址，无法触发 deep catalog -> "list" 的强制分支
-    let pageType = "other";
-    let structDebug = null;
-    try {
-      const det = await detectStructure(url, html, hintType || "");
+      // ============== NEW STEP 1: 结构判别 (LIST / DETAIL / OTHER) ==============
+      let pageType = "other";
+      let structDebug = null;
+      try {
+        const det = await detectStructure(url, html, hintType || "");
 
-      if (det && det.type) {
-        pageType = String(det.type || "").toLowerCase();
+        if (det && det.type) {
+          pageType = String(det.type || "").toLowerCase();
+        }
+        structDebug = det || null;
+      } catch (e) {
+        console.warn("[catalog] detectStructure error:", e?.message || e);
       }
 
-      // 我们把 det 整体保留下来，后面 snapshot 也存进去，便于回放训练
-      structDebug = det || null;
-    } catch (e) {
-      console.warn(
-        "[catalog] detectStructure error:",
-        e?.message || e
-      );
-      // fallback "other"
-    }
+      try {
+        await snapshot("structureDetector", { url, pageType, structDebug });
+      } catch {}
 
-    // Snapshot结构类型 + 判定细节，便于后续训练 / 调参 / 回放
-    try {
-      await snapshot("structureDetector", {
-        url,
-        pageType,
-        structDebug,
-      });
-    } catch {}
-
-      // 如果页面是超大垃圾页（站点地图/门户全览），直接拒抓，减少污染
       if (html.length > MAX_TEXT_LEN || pageType === "other") {
         logger.warn?.(
           `[catalog] Skip non-list page or oversized page: type=${pageType}, len=${html.length}`
@@ -672,13 +643,10 @@ const parseHandler = async (req, res) => {
         adapter_used = "skipped-non-list";
         items = [];
       } else if (pageType === "detail") {
-        // TODO: 未来 detailParser，在这里走单品详情抓取
-        // 目前我们先不误报，把它当“无批量目录”，输出空
         logger.info?.("[catalog] Detected DETAIL page, skip bulk listing parse.");
         adapter_used = "detail-skip";
         items = [];
       } else {
-        // pageType === "list" → 真正的目录页，执行 runExtractListPage
         const ret = await runExtractListPage({
           url,
           html,
@@ -691,7 +659,6 @@ const parseHandler = async (req, res) => {
         debugPart = ret.debugPart;
       }
 
-      // templateCluster.classify 仍可参与 hint
       try {
         const preClass = classify(url, html);
         if (!hintType && preClass && preClass.adapterHint) {
@@ -760,26 +727,25 @@ const parseHandler = async (req, res) => {
     } catch {}
 
     // Predict family based on rootSelector + fields (if available)
-let familyInfo = { familyId: "UNKNOWN", similarityScore: 0 };
-try {
-  const rootSel = debugPart?.rootLocator?.selector || debugPart?.rootLocator?.rootSelector || "";
-  const first = products?.[0] || items?.[0] || {};
-  const fields = Object.keys(first || {});
-  if (rootSel && fields && fields.length) {
-    const sampleForPredict = {
-      site: new URL(url).hostname.replace(/^www\./, ""),
-      pageType: "list",
-      rootSelector: rootSel,
-      fields,
-    };
-    familyInfo = predictFamilySync(sampleForPredict);
-  }
-} catch (e) {
-  console.warn("[catalog-family-predict] failed:", e?.message || e);
-}
+    let familyInfo = { familyId: "UNKNOWN", similarityScore: 0 };
+    try {
+      const rootSel = debugPart?.rootLocator?.selector || debugPart?.rootLocator?.rootSelector || "";
+      const first = products?.[0] || items?.[0] || {};
+      const fields = Object.keys(first || {});
+      if (rootSel && fields && fields.length) {
+        const sampleForPredict = {
+          site: new URL(url).hostname.replace(/^www\./, ""),
+          pageType: "list",
+          rootSelector: rootSel,
+          fields,
+        };
+        familyInfo = predictFamilySync(sampleForPredict);
+      }
+    } catch (e) {
+      console.warn("[catalog-family-predict] failed:", e?.message || e);
+    }
 
-const resp = {
-
+    const resp = {
       ok: true,
       url,
       count,
@@ -820,28 +786,35 @@ const resp = {
     }
 
     // ====== 仅此处替换为所需返回结构 ======
-    // === normalize to frontend-required schema ===
-const itemsStd = (Array.isArray(items) ? items : []).map((it) => {
-  const link   = it.link || it.url || it.href || "";
-  const url    = link; // 同时返回 url & link，兼容前端
-  const title  = String(it.title || it.name || it.sku || "").trim();
-  const sku    = String(it.sku || it.code || title).trim();
-  const img    = it.img || it.image || (Array.isArray(it.imgs) ? it.imgs[0] : "") || "";
-  const price  = it.price == null ? "" : String(it.price);
-  const minQty = it.minQty || it.moq || "";
-  const desc   = it.desc || it.description || "";
+    // —— 统一/补齐字段，兼容旧前端 ——
+    // 期望：sku/title/img/desc/moq/price/url 都有值
+    const rows = (items || []).map(it => ({
+      sku:   it.sku   ?? it.title ?? "",
+      title: it.title ?? it.desc  ?? "",
+      desc:  it.desc  ?? it.title ?? "",
+      img:   it.img   ?? it.image ?? "",
+      // 强制转成字符串，避免前端因为类型不一致不渲染
+      price: it.price == null ? "" : String(it.price),
+      moq:   it.moq   == null ? "" : String(it.moq),
+      url:   it.url   ?? it.href  ?? ""
+    }));
 
-  return { sku, title, img, desc, minQty, price, url, link };
-}).filter(it => it.title || it.url || it.link); // 允许用 url 或 link 作为有效性判定
+    const payload = {
+      ok: true,
+      url,
+      count: rows.length,
+      items: rows,
+      adapter: adapter_used
+    };
 
-return res.json({
-  ok: true,
-  url,
-  count: itemsStd.length,
-  items: itemsStd,
-  adapter: adapter_used || adapter || ""
-});
-} catch (err) {
+    // 兼容老字段名：有些前端读 list / rows / data.items
+    payload.list = rows;
+    payload.rows = rows;
+    payload.data = { items: rows, count: rows.length };
+
+    res.json(payload);
+
+  } catch (err) {
     logger.error(
       `[route/catalog.parse] ERROR url=${req?.body?.url || req?.query?.url} -> ${err?.message || err}`
     );
