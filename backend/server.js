@@ -23,6 +23,25 @@ async function fetchHtml(targetUrl) {
   });
   return typeof data === "string" ? data : "";
 }
+function normalizeItem(x = {}) {
+  return {
+    sku: String(x.sku ?? "").trim(),
+    title: String(x.title ?? "").trim(),
+    img: String(x.img ?? ""),
+    url: String(x.url ?? ""),
+    price: Number.isFinite(x.price) ? x.price : null,
+    currency: String(x.currency ?? ""),
+    moq: String(x.moq ?? "")
+  };
+}
+
+function standardize(payload) {
+  if (!payload || !Array.isArray(payload.items)) return payload;
+  return { ...payload, items: payload.items.map(normalizeItem) };
+}
+
+globalThis.normalizeItem = normalizeItem;
+globalThis.standardize = standardize;
 
 // --- app init & middlewares ---
 const app = express();
