@@ -27,9 +27,9 @@ function normalizeItem(x = {}) {
   return {
     sku: String(x.sku ?? "").trim(),
     title: String(x.title ?? "").trim(),
-    img: String(x.img ?? ""),
-    url: String(x.url ?? ""),
-    price: Number.isFinite(x.price) ? x.price : null,
+    url: String(x.url ?? "").trim(),
+    img: String(x.img ?? "").trim(),
+    price: (x.price ?? null),
     currency: String(x.currency ?? ""),
     moq: String(x.moq ?? "")
   };
