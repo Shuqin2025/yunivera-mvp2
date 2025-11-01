@@ -788,31 +788,33 @@ const parseHandler = async (req, res) => {
 
     // ====== 仅此处替换为所需返回结构 ======
     // === compatibility normalizer for frontend table ===
-    function normRow(it = {}) {
-      return {
-        sku:   String(it.sku   ?? ""),
-        title: String(it.title ?? ""),
-        img:   String(it.img   ?? ""),
-        desc:  String(it.desc  ?? ""),
-        moq:   String(it.moq   ?? ""),
-        price: String(it.price ?? ""),
-        url:   String(it.url   ?? ""),
-      };
-    }
+function normRow(it = {}) {
+  const u = String(it.url ?? it.link ?? "");
+  return {
+    sku:   String(it.sku   ?? ""),
+    title: String(it.title ?? ""),
+    img:   String(it.img   ?? ""),
+    desc:  String(it.desc  ?? ""),
+    moq:   String(it.moq   ?? ""),
+    price: String(it.price ?? ""),
+    url:   u,
+    link:  u,            // 兼容老前端“链接”列读 link 的逻辑
+  };
+}
 
-    const items2 = Array.isArray(items) ? items.map(normRow) : [];
-    const payload = {
-      ok: true,
-      url,
-      count: items2.length,
-      adapter: adapter_used,
-      // primary field the UI新旧版本都会读
-      items: items2,
-      // 兼容老前端兜底字段（有的逻辑只认 data / list）
-      data: items2,
-      list: items2,
-    };
-    return res.json(payload);
+const rows = Array.isArray(items) ? items.map(normRow) : [];
+const payload = {
+  ok: true,
+  url,
+  count: rows.length,
+  adapter: adapter_used,
+  // 统一同时提供所有老字段名，避免前端版本差异
+  items: rows,
+  data:  rows,
+  list:  rows,
+  rows,               // 再多给一个 rows，部分旧组件只认它
+};
+return res.json(payload);
 
   } catch (err) {
     logger.error(
