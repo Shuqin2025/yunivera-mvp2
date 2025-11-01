@@ -51,13 +51,21 @@ app.use(express.urlencoded({ extended: true }));
 
 // load router lazily to avoid cyclic/declaration issues
 // --- legacy aliases: must be registered BEFORE catalogRouter mounts ---
+const { default: catalogRouter } = await import("./routes/catalog.js");
+app.use("/v1/api/catalog", catalogRouter);
+app.use("/v1/api", catalogRouter);
+
 // health check
 app.get("/v1/health", (_req, res) => res.status(200).json({ ok: true }));
 app.get("/v1/api/health", (_req, res) => res.status(200).json({ ok: true }));
 
+// ---- legacy detect + probe aliases (for old frontends) ----
+app.get("/v1/detect", (req, res) => {
+  const url = String(req.query.url || "");
+  return res.json({ ok: true, url, type: "catalog", adapter: "generic" });
+});
 
-// ---- catalog probe (top-level, fallback if subrouter missing) ----
-app.get("/v1/api/catalog/_probe", (_req, res) => {
+app.get("/v1/catalog/_probe", (_req, res) => {
   const rows = [{ sku:"demo", title:"probe ok", url:"#", img:"", desc:"", moq:"", price:"" }];
   return res.json({
     ok: true,
@@ -67,8 +75,6 @@ app.get("/v1/api/catalog/_probe", (_req, res) => {
     items: rows, data: rows, list: rows, rows
   });
 });
-
-
 
 app.get("/v1/api/image", async (req, res) => {
   const url = String(req.query.url || "").trim();
@@ -207,6 +213,14 @@ function looksLikeMagento($, html) {
 // === structure detect helpers (END) =====================================
 
 // === /v1/api/detect =====================================================
+
+
+app.get("/v1/api/image64", (req, res) => {
+  // 把原 query 合并上 format=base64，然后改写成 /v1/api/image 的路径再交给路由器
+  const params = new URLSearchParams({ ...req.query, format: "base64" });
+  req.url = `/v1/api/image?${params.toString()}`;
+  app._router.handle(req, res, () => {});
+});
 
 /* ──────────────────────────── site: auto-schmuck.com ──────────────────────────── */
 async function parseAutoSchmuck(listUrl, limit = 50) {
@@ -1157,7 +1171,7 @@ async function parseUniversalCatalog(
 /* ──────────────────────────── listen ──────────────────────────── */
 
 // ====== CATALOG PARSE ROUTES (compat) ======
-// Unified handler（覆盖你现有的 __handleCatalogParse）
+// Unified handler
 async function __handleCatalogParse(req, res) {
   try {
     const url   = String(req.query.url || "").trim();
@@ -1167,45 +1181,12 @@ async function __handleCatalogParse(req, res) {
 
     if (!url) return res.status(400).json({ ok: false, error: "missing url" });
 
-    // 调用你现成的万能解析
-    const { items = [], adapter = "generic" } =
-      await parseUniversalCatalog(url, limit, { debug, detailSku });
-
-    // --- compatibility normalizer for frontend table ---
-    function normRow(it = {}) {
-      const u = String(it.url ?? it.link ?? "");
-      return {
-        sku:   String(it.sku   ?? ""),
-        title: String(it.title ?? ""),
-        img:   String(it.img   ?? ""),
-        desc:  String(it.desc  ?? ""),
-        moq:   String(it.moq   ?? ""),
-        price: String(it.price ?? ""),
-        url:   u,
-        link:  u, // 前端有时读 link
-      };
-    }
-    const rows = Array.isArray(items) ? items.map(normRow) : [];
-
-    const payload = {
-      ok: true,
-      url,
-      count: rows.length,
-      adapter,
-      items: rows, // 兼容：items
-      data:  rows, // 兼容：data
-      list:  rows, // 兼容：list
-      rows,        // 兼容：rows
-    };
-
-    return res.json(payload);
+    const { items = [], adapter = "generic" } = await parseUniversalCatalog(url, limit, { debug, detailSku });
+    return res.json({ ok: true, url, count: items.length, items, adapter });
   } catch (e) {
-    return res
-      .status(500)
-      .json({ ok: false, error: (e && e.message) ? e.message : String(e) });
+    return res.status(500).json({ ok: false, error: (e && e.message) ? e.message : String(e) });
   }
 }
-
 
 // Primary path used by the frontend
 app.get("/v1/api/catalog/parse", __handleCatalogParse);
@@ -1220,13 +1201,6 @@ app.get("/v1/catalog", __handleCatalogParse);
 app.get("/v1/catalog.json", __handleCatalogParse);
 
 // ====== end compat routes ======
-
-
-// Mount catalog router AFTER compat routes so parse hits unified handler first
-const { default: catalogRouter } = await import("./routes/catalog.js");
-app.use("/v1/api/catalog", catalogRouter);
-app.use("/v1/api", catalogRouter);
-
 
 const PORT = Number(process.env.PORT || 10000);
 
