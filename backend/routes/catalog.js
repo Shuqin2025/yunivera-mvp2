@@ -820,7 +820,26 @@ const resp = {
     }
 
     // ====== 仅此处替换为所需返回结构 ======
-    return res.json(standardize({ ok: true, url, count: items.length, items, adapter: adapter_used }));
+    // === normalize to frontend-required schema ===
+const itemsStd = (Array.isArray(items) ? items : []).map((it) => {
+  const link   = it.link || it.url || it.href || "";
+  const title  = String(it.title || it.name || it.sku || "").trim();
+  const sku    = String(it.sku || it.code || title).trim();
+  const img    = it.img || it.image || (Array.isArray(it.imgs) ? it.imgs[0] : "") || "";
+  const price  = it.price == null ? "" : String(it.price);
+  const minQty = it.minQty || it.moq || "";
+  const desc   = it.desc || it.description || "";
+
+  return { sku, title, img, desc, minQty, price, link };
+}).filter(it => it.title || it.link); // 保底过滤空项
+
+return res.json({
+  ok: true,
+  url,
+  count: itemsStd.length,
+  items: itemsStd,
+  adapter: adapter_used || adapter || ""
+});
 } catch (err) {
     logger.error(
       `[route/catalog.parse] ERROR url=${req?.body?.url || req?.query?.url} -> ${err?.message || err}`
