@@ -280,7 +280,7 @@ function genericExtract($, baseUrl, { limit = 50, debug = false } = {}) {
       "";
     const img = absolutize(imgRel);
 
-    // ✅ 这里是修复后的“干净版” title 段
+    // ✅ 修复后的“干净版” title 段
     let title =
       ($el.find("img").attr("alt") || "").trim() ||
       $el.find("h1,h2,h3,h4,h5,h6").first().text().trim() ||
@@ -787,27 +787,33 @@ const parseHandler = async (req, res) => {
     }
 
     // ====== 仅此处替换为所需返回结构 ======
-    // === normalize to frontend-required schema ===
-const itemsStd = (Array.isArray(items) ? items : []).map((it) => {
-  const link   = it.link || it.url || it.href || "";
-  const url    = link; // 同时返回 url & link，兼容前端
-  const title  = String(it.title || it.name || it.sku || "").trim();
-  const sku    = String(it.sku || it.code || title).trim();
-  const img    = it.img || it.image || (Array.isArray(it.imgs) ? it.imgs[0] : "") || "";
-  const price  = it.price == null ? "" : String(it.price);
-  const minQty = it.minQty || it.moq || "";
-  const desc   = it.desc || it.description || "";
+    // === compatibility normalizer for frontend table ===
+    function normRow(it = {}) {
+      return {
+        sku:   String(it.sku   ?? ""),
+        title: String(it.title ?? ""),
+        img:   String(it.img   ?? ""),
+        desc:  String(it.desc  ?? ""),
+        moq:   String(it.moq   ?? ""),
+        price: String(it.price ?? ""),
+        url:   String(it.url   ?? ""),
+      };
+    }
 
-  return { sku, title, img, desc, minQty, price, url, link };
-}).filter(it => it.title || it.url || it.link); // 允许用 url 或 link 作为有效性判定
+    const items2 = Array.isArray(items) ? items.map(normRow) : [];
+    const payload = {
+      ok: true,
+      url,
+      count: items2.length,
+      adapter: adapter_used,
+      // primary field the UI新旧版本都会读
+      items: items2,
+      // 兼容老前端兜底字段（有的逻辑只认 data / list）
+      data: items2,
+      list: items2,
+    };
+    return res.json(payload);
 
-return res.json({
-  ok: true,
-  url,
-  count: itemsStd.length,
-  items: itemsStd,
-  adapter: adapter_used || adapter || ""
-});
   } catch (err) {
     logger.error(
       `[route/catalog.parse] ERROR url=${req?.body?.url || req?.query?.url} -> ${err?.message || err}`
@@ -838,5 +844,14 @@ router.all("/parse", parseHandler);
 // 新入口
 router.all("/catalog", parseHandler);        // /v1/catalog
 router.all("/api/catalog", parseHandler);    // /v1/api/catalog
+
+// quick sanity endpoint: GET /v1/api/catalog/_probe
+router.get("/_probe", (_req, res) => {
+  const rows = [
+    { sku:"P-1001", title:"Probe 1", img:"", desc:"demo", moq:"1", price:"9.99", url:"https://example.com/a" },
+    { sku:"P-1002", title:"Probe 2", img:"", desc:"demo", moq:"2", price:"19.99", url:"https://example.com/b" },
+  ];
+  res.json({ ok:true, url:"probe://local", count:rows.length, adapter:"probe", items:rows, data:rows, list:rows });
+});
 
 export default router;
