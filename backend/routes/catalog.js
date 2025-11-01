@@ -850,10 +850,18 @@ router.all("/api/catalog", parseHandler);    // /v1/api/catalog
 // quick sanity endpoint: GET /v1/api/catalog/_probe
 router.get("/_probe", (_req, res) => {
   const rows = [
-    { sku:"P-1001", title:"Probe 1", img:"", desc:"demo", moq:"1", price:"9.99", url:"https://example.com/a" },
-    { sku:"P-1002", title:"Probe 2", img:"", desc:"demo", moq:"2", price:"19.99", url:"https://example.com/b" },
+    { sku: "demo", title: "probe ok", url: "#", img: "", desc: "", moq: "", price: "" }
   ];
-  res.json({ ok:true, url:"probe://local", count:rows.length, adapter:"probe", items:rows, data:rows, list:rows });
+  res.json({
+    ok: true,
+    url: "/_probe",
+    count: rows.length,
+    adapter: "probe",
+    items: rows,
+    data: rows,
+    list: rows,
+    rows
+  });
 });
 
 export default router;
