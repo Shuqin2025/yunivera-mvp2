@@ -193,12 +193,6 @@ function looksLikeMagento($, html) {
 
 // === /v1/api/detect =====================================================
 
-
-
-req.url = `/v1/api/image?${params.toString()}`;
-  app._router.handle(req, res, () => {});
-});
-
 /* ──────────────────────────── site: auto-schmuck.com ──────────────────────────── */
 async function parseAutoSchmuck(listUrl, limit = 50) {
   const html = await fetchHtml(listUrl);
