@@ -1154,7 +1154,7 @@ async function parseUniversalCatalog(
 /* ──────────────────────────── listen ──────────────────────────── */
 
 // ====== CATALOG PARSE ROUTES (compat) ======
-// Unified handler
+// Unified handler（覆盖你现有的 __handleCatalogParse）
 async function __handleCatalogParse(req, res) {
   try {
     const url   = String(req.query.url || "").trim();
@@ -1164,12 +1164,45 @@ async function __handleCatalogParse(req, res) {
 
     if (!url) return res.status(400).json({ ok: false, error: "missing url" });
 
-    const { items = [], adapter = "generic" } = await parseUniversalCatalog(url, limit, { debug, detailSku });
-    return res.json({ ok: true, url, count: items.length, items, adapter });
+    // 调用你现成的万能解析
+    const { items = [], adapter = "generic" } =
+      await parseUniversalCatalog(url, limit, { debug, detailSku });
+
+    // --- compatibility normalizer for frontend table ---
+    function normRow(it = {}) {
+      const u = String(it.url ?? it.link ?? "");
+      return {
+        sku:   String(it.sku   ?? ""),
+        title: String(it.title ?? ""),
+        img:   String(it.img   ?? ""),
+        desc:  String(it.desc  ?? ""),
+        moq:   String(it.moq   ?? ""),
+        price: String(it.price ?? ""),
+        url:   u,
+        link:  u, // 前端有时读 link
+      };
+    }
+    const rows = Array.isArray(items) ? items.map(normRow) : [];
+
+    const payload = {
+      ok: true,
+      url,
+      count: rows.length,
+      adapter,
+      items: rows, // 兼容：items
+      data:  rows, // 兼容：data
+      list:  rows, // 兼容：list
+      rows,        // 兼容：rows
+    };
+
+    return res.json(payload);
   } catch (e) {
-    return res.status(500).json({ ok: false, error: (e && e.message) ? e.message : String(e) });
+    return res
+      .status(500)
+      .json({ ok: false, error: (e && e.message) ? e.message : String(e) });
   }
 }
+
 
 // Primary path used by the frontend
 app.get("/v1/api/catalog/parse", __handleCatalogParse);
@@ -1188,5 +1221,3 @@ app.get("/v1/catalog.json", __handleCatalogParse);
 const PORT = Number(process.env.PORT || 10000);
 
 app.listen(PORT, () => console.log(`[mvp2-backend] listening on :${PORT}`));
-
- 
