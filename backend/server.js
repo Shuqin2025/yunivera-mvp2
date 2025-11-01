@@ -51,25 +51,9 @@ app.use(express.urlencoded({ extended: true }));
 
 // load router lazily to avoid cyclic/declaration issues
 // --- legacy aliases: must be registered BEFORE catalogRouter mounts ---
-app.get("/v1/api/catalog/parse", (req, res) => {
-  const qs = new URLSearchParams(req.query).toString();
-  res.redirect(307, `/v1/api/catalog?${qs}`);
-});
-
-app.get("/v1/api/parse", (req, res) => {
-  const qs = new URLSearchParams(req.query).toString();
-  res.redirect(307, `/v1/api/catalog?${qs}`);
-});
 const { default: catalogRouter } = await import("./routes/catalog.js");
 app.use("/v1/api/catalog", catalogRouter);
 app.use("/v1/api", catalogRouter);
-
-app.get("/v1/api/catalog/parse", (req, res) => {
-  const qs = req.originalUrl.includes("?")
-    ? req.originalUrl.slice(req.originalUrl.indexOf("?"))
-    : "";
-  res.redirect(307, `/v1/api/catalog${qs}`);
-});
 
 // health check
 app.get("/v1/health", (_req, res) => res.status(200).json({ ok: true }));
@@ -1173,4 +1157,5 @@ const PORT = Number(process.env.PORT || 10000);
 
 app.listen(PORT, () => console.log(`[mvp2-backend] listening on :${PORT}`));
 
+ 
  
