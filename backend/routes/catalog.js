@@ -518,37 +518,66 @@ const parseHandler = async (req, res) => {
     const wantSnapshot = ["1","true","yes","on"].includes(String(qp.snapshot || qp.debug || "").toLowerCase());
 
     // === compatibility normalizer for frontend table ===
-    function normRow(it = {}) {
-      const u = String(it.url ?? it.link ?? "");
-      return {
-        sku:   String(it.sku   ?? ""),
-        title: String(it.title ?? ""),
-        img:   String(it.img   ?? ""),
-        desc:  String(it.desc  ?? ""),
-        moq:   String(it.moq   ?? ""),
-        price: String(it.price ?? ""),
-        url:   u,
-        link:  u, // 前端有时读 link
-      };
+// 兼容不同源字段名：sku/img/desc/link/url/moq/price
+function pickImg(it = {}) {
+  return String(
+    it.img ??
+    it.image ??
+    it.thumb ??
+    it.picture ??
+    it.pic ??
+    ""
+  );
+}
+
+// memoryking 补货号：从 /details/<slug> 提取；失败再试 title 的第一个 token
+function deriveSku(it = {}) {
+  const u = String(it.url ?? it.link ?? "");
+  const t = String(it.title ?? "");
+  if (it.sku) return String(it.sku);
+
+  try {
+    const host = new URL(u).hostname || "";
+    if (host.includes("memoryking.de")) {
+      // 例：https://www.memoryking.de/details/deleycon-tv-antennen-...
+      const m = u.match(/\/details\/([^\/?#]+)/i);
+      if (m && m[1]) return m[1];
     }
+  } catch (_) { /* ignore URL parse errors */ }
 
-    // 优先 products，回退 items
-    const baseRows = Array.isArray(products) && products.length ? products : (Array.isArray(items) ? items : []);
-    const rows = baseRows.map(normRow);
+  // 兜底：用标题第一个非空词作为 sku
+  const firstToken = (t.trim().split(/\s+/)[0] || "");
+  return firstToken || "";
+}
 
-    const payload = {
-      ok: true,
-      url,
-      count: rows.length,
-      adapter: adapter_used || "generic",
-      items: rows, // 兼容：items
-      data:  rows, // 兼容：data
-      list:  rows, // 兼容：list
-      rows,       // 兼容：rows（前端最常用）
-    };
+function normRow(it = {}) {
+  const link = String(it.link ?? it.url ?? "");
+  return {
+    sku:   deriveSku(it),
+    title: String(it.title ?? ""),
+    img:   pickImg(it),
+    desc:  String(it.desc ?? it.description ?? ""),
+    moq:   String(it.moq ?? ""),
+    price: String(it.price ?? ""),
+    url:   link,
+    link, // 前端有时读 link
+  };
+}
 
-    if (wantSnapshot) payload.fieldsRate = fieldsRate;
-    return res.json(payload);
+const rows = Array.isArray(items) ? items.map(normRow) : [];
+
+const payload = {
+  ok: true,
+  url,
+  count: rows.length,
+  adapter: adapter_used,
+  items: rows, // 兼容：items
+  data:  rows, // 兼容：data
+  list:  rows, // 兼容：list
+  rows,        // 兼容：rows
+};
+
+return res.json(payload);
 
   } catch (err) {
     logger.error(`[route/catalog.parse] ERROR url=${req?.body?.url || req?.query?.url} -> ${err?.message || err}`);
@@ -585,4 +614,3 @@ router.get("/_probe", (_req, res) => {
 });
 
 export default router;
-
