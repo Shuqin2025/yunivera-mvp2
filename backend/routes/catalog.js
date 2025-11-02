@@ -1,9 +1,9 @@
-// backend/routes/catalog.js (REVISED)
+// backend/routes/catalog.js (REVISED, full file)
 // 重点更新：
-//  - 引入 smartRootLocator 定位产品主容器
-//  - 引入 detectStructure 做 LIST / DETAIL / OTHER 预分流
-//  - 增加 OversizedPageDetected 防跑偏保护
-//  - genericLinksParser 现在吃 root HTML，而不是整页 body
+//  - 统一 /parse 输出结构到 rows/data/list/items（含 link/url）
+//  - 引入 smartRootLocator + genericLinksParser 作为更稳的兜底
+//  - 与后端 server.js 的 toTablePayload 规范一致（本文件内置等价 normalizer）
+//  - 保留你现有的抓取/适配器逻辑与调试开关
 
 import { Router } from "express";
 import axios from "axios";
@@ -27,11 +27,11 @@ import { decideFetchStrategy, fetchHtml as fetchHtmlAdaptive } from "../modules/
 import { classify } from "../modules/templateCluster.js";
 import * as errorCollector from "../modules/errorCollector.js";
 
-// === 🔥 新增：智能 root 定位 + 目录解析器 ===
+// === 新增兜底：智能 root 定位 + 目录解析器 ===
 import detectRoot from "../lib/smartRootLocator.js";
 import genericLinksParser from "../lib/parsers/genericLinksParser.js";
 
-// NEW: family predictor (optional dynamic load to avoid startup failure)
+// family predictor（可选加载，缺失不影响启动）
 let predictFamilySync = (sample) => ({ familyId: "UNKNOWN", similarityScore: 0 });
 try {
   const __predictMod = await import("../modules/templateClusterRuntime.js");
@@ -642,14 +642,7 @@ const parseHandler = async (req, res) => {
     }));
 
     const fieldsRate = computeFieldsRate(products || []);
-    const wantMetrics = ["1", "true", "yes", "on"].includes(String(qp.metrics || "").toLowerCase());
     const wantSnapshot = ["1", "true", "yes", "on"].includes(String(qp.snapshot || qp.debug || "").toLowerCase());
-
-    try {
-      const sample =
-        (products && products[0] && (products[0].url || products[0].link)) || null;
-      logger.debug("[route]", "adapter=", adapter_used, "count=", products.length, "url=", url, "sample=", sample);
-    } catch {}
 
     // ====== 仅此处替换为所需返回结构（关键修复） ======
     // === compatibility normalizer for frontend table ===
