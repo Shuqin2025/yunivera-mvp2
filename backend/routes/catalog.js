@@ -1,9 +1,4 @@
-// backend/routes/catalog.js (REVISED, full file)
-// 重点更新：
-//  - 统一 /parse 输出结构到 rows/data/list/items（含 link/url）
-//  - 引入 smartRootLocator + genericLinksParser 作为更稳的兜底
-//  - 与后端 server.js 的 toTablePayload 规范一致（本文件内置等价 normalizer）
-//  - 保留你现有的抓取/适配器逻辑与调试开关
+// backend/routes/catalog.js  — FULL FILE (aligned to toTablePayload)
 
 import { Router } from "express";
 import axios from "axios";
@@ -27,30 +22,20 @@ import { decideFetchStrategy, fetchHtml as fetchHtmlAdaptive } from "../modules/
 import { classify } from "../modules/templateCluster.js";
 import * as errorCollector from "../modules/errorCollector.js";
 
-// === 新增兜底：智能 root 定位 + 目录解析器 ===
+// === 新增：智能 root 定位 + 链接解析兜底 ===
 import detectRoot from "../lib/smartRootLocator.js";
 import genericLinksParser from "../lib/parsers/genericLinksParser.js";
 
-// family predictor（可选加载，缺失不影响启动）
+// （可选）family predictor，缺失不影响启动
 let predictFamilySync = (sample) => ({ familyId: "UNKNOWN", similarityScore: 0 });
 try {
-  const __predictMod = await import("../modules/templateClusterRuntime.js");
-  if (__predictMod && typeof __predictMod.predictFamilySync === "function") {
-    predictFamilySync = __predictMod.predictFamilySync;
-  } else {
-    console.warn("[catalog] templateClusterRuntime.js found but no predictFamilySync export; using stub.");
-  }
+  const rt = await import("../modules/templateClusterRuntime.js");
+  if (rt?.predictFamilySync) predictFamilySync = rt.predictFamilySync;
 } catch (e) {
-  console.warn("[catalog] templateClusterRuntime.js missing; family prediction disabled. ", e?.message || e);
+  console.warn("[catalog] templateClusterRuntime.js missing; family prediction disabled.", e?.message || e);
 }
 
-// === 页面防跑偏阈值（避免整站/站点地图类页面） ===
-const MAX_TEXT_LEN = 200000; // 超过视为噪音页，直接拒抓
-
-// --------------------------------------------------
-// fetchHtml helpers
-// --------------------------------------------------
-
+const MAX_TEXT_LEN = 200000;
 const UA_DESKTOP =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
 
@@ -78,56 +63,45 @@ async function fetchHtmlBasic(url, wantDebug) {
       : "utf-8";
 
   const html = iconv.decode(buf, useEnc);
-  const debugFetch = wantDebug
-    ? { http_status: res.status, detected_encoding: useEnc }
-    : undefined;
-
+  const debugFetch = wantDebug ? { http_status: res.status, detected_encoding: useEnc } : undefined;
   return { html, status: res.status, detected_encoding: useEnc, debugFetch };
 }
 
-// 高级：先 adaptiveCrawler -> fallback axios/iconv
 async function ensureFetchHtml(url, wantDebug, hintType = "") {
   try {
     const strat = decideFetchStrategy({ url, hintType });
     const fetched = await fetchHtmlAdaptive({ url, strategy: strat });
-
-    // OversizedPageDetected 防线
     if (fetched?.html && fetched.html.length > MAX_TEXT_LEN) {
       throw Object.assign(new Error("OversizedPageDetected"), { code: "OVERSIZED_PAGE" });
     }
-
     if (fetched?.html) {
       return {
         html: fetched.html,
         debugFetch: wantDebug ? { used: fetched.used, http_status: fetched.status } : undefined,
       };
     }
-  } catch { /* ignore */ }
-
+  } catch {}
   const r = await fetchHtmlBasic(url, wantDebug);
-
   if (r.html && r.html.length > MAX_TEXT_LEN) {
     throw Object.assign(new Error("OversizedPageDetected"), { code: "OVERSIZED_PAGE" });
   }
-
   return { html: r.html, debugFetch: r.debugFetch };
 }
 
-// --------------------------------------------------
-// helpers / dbg
-// --------------------------------------------------
-
 import { fileURLToPath } from "url";
 const __filename2 = typeof __filename !== "undefined" ? __filename : fileURLToPath(import.meta.url);
-const __dirname2  = typeof __dirname  !== "undefined" ? __dirname  : path.dirname(__filename2);
+const __dirname2 = typeof __dirname !== "undefined" ? __dirname : path.dirname(__filename2);
 
 function saveTemplateSample({ url, pageType, rootSelector, fields }) {
   try {
     const outDir = path.join(__dirname2, "..", "..", "logs", "training", "templates", "input_samples");
     fs.mkdirSync(outDir, { recursive: true });
     const site = (() => {
-      try { return new URL(url).hostname.replace(/^www\./, ""); }
-      catch { return "unknown-site"; }
+      try {
+        return new URL(url).hostname.replace(/^www\./, "");
+      } catch {
+        return "unknown-site";
+      }
     })();
     const sample = { site, pageType, rootSelector, fields };
     const outFile = path.join(outDir, `${Date.now()}_${site}.json`);
@@ -154,43 +128,22 @@ async function __snap(tag, data) {
   } catch {}
 }
 
-// --------------------------------------------------
 // optional Playwright
-// --------------------------------------------------
-
 let chromium = null;
 try {
   ({ chromium } = await import("playwright"));
 } catch {}
 
-// --------------------------------------------------
-// metrics helper
-// --------------------------------------------------
-
 function computeFieldsRate(list) {
   const keys = ["title", "url", "img", "price", "sku", "desc"];
   const n = Array.isArray(list) ? list.length : 0;
   const out = {};
-  for (const k of keys) {
-    out[k] = n ? list.filter((x) => x && String(x[k] || "").trim()).length / n : 0;
-  }
+  for (const k of keys) out[k] = n ? list.filter((x) => x && String(x[k] || "").trim()).length / n : 0;
   return out;
 }
 
-// --------------------------------------------------
-// legacy generic fallback extractor (仍可保留兜底)
-// --------------------------------------------------
-
-const CONTAINER_FALLBACK = [
-  "#productlist",
-  ".productlist",
-  ".listBox",
-  ".products",
-  ".product-list",
-  "main",
-  "body",
-];
-
+// legacy generic fallback
+const CONTAINER_FALLBACK = ["#productlist", ".productlist", ".listBox", ".products", ".product-list", "main", "body"];
 const ITEM_FALLBACK = [
   "#productlist ul > li",
   "ul.products > li",
@@ -205,8 +158,8 @@ const ITEM_FALLBACK = [
 function genericExtract($, baseUrl, { limit = 50, debug = false } = {}) {
   const tried = { container: [], item: [] };
 
-  // 1) container
-  let $container = $(), usedContainer = "";
+  let $container = $(),
+    usedContainer = "";
   for (const sel of CONTAINER_FALLBACK) {
     tried.container.push(sel);
     const hit = $(sel);
@@ -221,8 +174,8 @@ function genericExtract($, baseUrl, { limit = 50, debug = false } = {}) {
     usedContainer = "body";
   }
 
-  // 2) items
-  let $items = $(), itemSelectorUsed = "";
+  let $items = $(),
+    itemSelectorUsed = "";
   for (const sel of ITEM_FALLBACK) {
     let list = sel.startsWith("#") ? $(sel) : $container.find(sel);
     if (!list.length) list = $(sel);
@@ -252,7 +205,6 @@ function genericExtract($, baseUrl, { limit = 50, debug = false } = {}) {
   $items.each((_, el) => {
     if (items.length >= limit) return false;
     const $el = $(el);
-
     const $a = $el.find("a[href]").first();
     const link = absolutize($a.attr("href"));
 
@@ -263,7 +215,6 @@ function genericExtract($, baseUrl, { limit = 50, debug = false } = {}) {
       "";
     const img = absolutize(imgRel);
 
-    // ✅ 干净 title
     let title =
       ($el.find("img").attr("alt") || "").trim() ||
       $el.find("h1,h2,h3,h4,h5,h6").first().text().trim() ||
@@ -273,14 +224,7 @@ function genericExtract($, baseUrl, { limit = 50, debug = false } = {}) {
     title = title.replace(/\s+/g, " ").trim();
     if (!title && !img && !link) return;
 
-    items.push({
-      sku: title,
-      desc: title,
-      minQty: "",
-      price: "",
-      img,
-      link,
-    });
+    items.push({ sku: title, desc: title, minQty: "", price: "", img, link });
   });
 
   const debugPart = debug
@@ -296,58 +240,35 @@ function genericExtract($, baseUrl, { limit = 50, debug = false } = {}) {
   return { items, debugPart };
 }
 
-// --------------------------------------------------
-// adapter decision helpers
-// --------------------------------------------------
-
 function chooseAdapter({ url, $, html, hintType, host }) {
   if (hintType) {
     const t = String(hintType).toLowerCase();
-    if (t === "shopware" || t === "woocommerce" || t === "shopify" || t === "magento") {
-      return "template";
-    }
+    if (["shopware", "woocommerce", "shopify", "magento"].includes(t)) return "template";
     if (t === "memoryking") return "memoryking";
   }
   if (/(^|\. )memoryking\.de$/i.test(host)) return "memoryking";
 
   const det = detectStructure(html || $);
-  if (det && det.type) {
-    if (
-      det.type === "Shopware" ||
-      det.type === "WooCommerce" ||
-      det.type === "Shopify" ||
-      det.type === "Magento"
-    ) {
-      return "template";
-    }
-  }
+  if (det?.type && ["Shopware", "WooCommerce", "Shopify", "Magento"].includes(det.type)) return "template";
   return "generic";
 }
 
-// unify templateParser export styles
 function callTemplateParse(html, url, opts) {
   try {
-    if (templateParser && typeof templateParser.parse === "function") {
-      return templateParser.parse(loadHtml(html), url, opts);
-    }
-    if (typeof templateParser === "function") {
-      return templateParser({ html, url, ...(opts || {}) });
-    }
+    if (templateParser && typeof templateParser.parse === "function") return templateParser.parse(loadHtml(html), url, opts);
+    if (typeof templateParser === "function") return templateParser({ html, url, ...(opts || {}) });
   } catch {}
   return Promise.resolve([]);
 }
 
 function getParseCatalog() {
-  return templateParser && typeof templateParser.parseCatalog === "function"
-    ? templateParser.parseCatalog
-    : null;
+  return templateParser && typeof templateParser.parseCatalog === "function" ? templateParser.parseCatalog : null;
 }
 
 function loadHtml(html) {
   return cheerio.load(html, { decodeEntities: false });
 }
 
-// 封装 universal，优先尝试“喂现成 html”
 async function callUniversalWithHtml(url, html, { limit, debug }) {
   try {
     const u1 = await universal({ url, html, limit, debug });
@@ -360,10 +281,6 @@ async function callUniversalWithHtml(url, html, { limit, debug }) {
   return null;
 }
 
-// --------------------------------------------------
-// NEW: extraction pipeline for LIST pages
-// --------------------------------------------------
-
 async function runExtractListPage({ url, html, limit = 50, debug = false, hintType = "" }) {
   const $full = cheerio.load(html, { decodeEntities: false });
 
@@ -372,7 +289,7 @@ async function runExtractListPage({ url, html, limit = 50, debug = false, hintTy
   let debugPart;
 
   // 0) sinotronic
-  if (sinotronic.test && sinotronic.test(url)) {
+  if (sinotronic.test?.(url)) {
     const out = sinotronic.parse($full, url, { limit, debug });
     items = out.items || [];
     if (debug) debugPart = out.debugPart;
@@ -382,7 +299,11 @@ async function runExtractListPage({ url, html, limit = 50, debug = false, hintTy
   // 1) choose adapter
   if (!items.length) {
     const host = (() => {
-      try { return new URL(url).host; } catch { return ""; }
+      try {
+        return new URL(url).host;
+      } catch {
+        return "";
+      }
     })();
     const which = chooseAdapter({ url, $: $full, html, hintType, host });
 
@@ -391,11 +312,11 @@ async function runExtractListPage({ url, html, limit = 50, debug = false, hintTy
       let mmItems = Array.isArray(out) ? out : out.items || out.products || [];
       if (debug && !debugPart) debugPart = out?.debugPart;
 
-      if (!mmItems || mmItems.length === 0) {
+      if (!mmItems?.length) {
         const tOut = await callTemplateParse(html, url, { limit, debug });
         mmItems = Array.isArray(tOut) ? tOut : tOut?.items || tOut?.products || [];
 
-        if (!mmItems || mmItems.length === 0) {
+        if (!mmItems?.length) {
           const u = await callUniversalWithHtml(url, html, { limit, debug });
           mmItems = Array.isArray(u) ? u : u?.items || u?.products || [];
           used = "universal-fallback";
@@ -406,25 +327,23 @@ async function runExtractListPage({ url, html, limit = 50, debug = false, hintTy
         used = "memoryking";
       }
       items = mmItems || [];
-    }
-    else if (which === "template") {
+    } else if (which === "template") {
       const tOut = await callTemplateParse(html, url, { limit, debug });
       items = Array.isArray(tOut) ? tOut : tOut?.items || tOut?.products || [];
       used = "template";
 
-      if (!items || items.length === 0) {
+      if (!items?.length) {
         const u = await callUniversalWithHtml(url, html, { limit, debug });
         const cand = Array.isArray(u) ? u : u?.items || u?.products || [];
-        if (cand && cand.length) {
+        if (cand?.length) {
           items = cand;
           used = "universal-fallback";
         }
       }
-    }
-    else if (which === "generic") {
+    } else {
       const tOut = await callTemplateParse(html, url, { limit, debug });
       let tmp = Array.isArray(tOut) ? tOut : tOut?.items || tOut?.products || [];
-      if (tmp && tmp.length) {
+      if (tmp?.length) {
         items = tmp;
         used = "template-try";
       }
@@ -432,7 +351,7 @@ async function runExtractListPage({ url, html, limit = 50, debug = false, hintTy
       if (!items.length) {
         const u = await callUniversalWithHtml(url, html, { limit, debug });
         const cand = Array.isArray(u) ? u : u?.items || u?.products || [];
-        if (cand && cand.length) {
+        if (cand?.length) {
           items = cand;
           used = "universal";
         }
@@ -453,7 +372,7 @@ async function runExtractListPage({ url, html, limit = 50, debug = false, hintTy
       scope: "rootOnly",
     });
 
-    if (parsedFromRoot && parsedFromRoot.products && parsedFromRoot.products.length) {
+    if (parsedFromRoot?.products?.length) {
       items = parsedFromRoot.products.map((p) => ({
         sku: p.sku || p.title || "",
         title: p.title || "",
@@ -479,7 +398,7 @@ async function runExtractListPage({ url, html, limit = 50, debug = false, hintTy
     }
   }
 
-  // 3) 兜底：旧 genericExtract
+  // 3) 兜底
   if (!items.length) {
     const out = genericExtract($full, url, { limit, debug });
     items = out.items || [];
@@ -489,10 +408,6 @@ async function runExtractListPage({ url, html, limit = 50, debug = false, hintTy
 
   return { items, adapter_used: used, debugPart };
 }
-
-// --------------------------------------------------
-// parseHandler 主入口
-// --------------------------------------------------
 
 const router = Router();
 
@@ -511,20 +426,14 @@ const parseHandler = async (req, res) => {
     if (!url) return res.status(400).json({ ok: false, error: "missing url" });
 
     const limit = Math.max(1, parseInt(qp.limit ?? 50, 10) || 50);
-
-    const imgMode = String(qp.img || "").toLowerCase(); // "base64" | ""
+    const imgMode = String(qp.img || "").toLowerCase(); // base64 | ''
     const imgCount = Math.max(0, parseInt(qp.imgCount ?? 0, 10) || 0);
 
     const rawDebug = qp.debug ?? qp.debug1 ?? qp.debug_1;
     const wantDebug = ["1", "true", "yes", "on"].includes(String(rawDebug ?? "").toLowerCase());
 
-    // 前端 hint
     hintType = (qp.t || qp.type || "").toString();
-
-    // 浏览器渲染
-    const useBrowser = ["1", "true", "yes", "on"].includes(
-      String(qp.useBrowser || qp.browser || "").toLowerCase()
-    );
+    const useBrowser = ["1", "true", "yes", "on"].includes(String(qp.useBrowser || qp.browser || "").toLowerCase());
 
     await __snap("parse:enter", { url, limit, t: qp.t });
     DEBUG_ENV && console.log("[struct]", "parse:start", { url, hintType, useBrowser });
@@ -532,62 +441,60 @@ const parseHandler = async (req, res) => {
     let items = [];
     let adapter_used = "";
     let html = "";
-    let debugFetch = undefined;
-    let debugPart = undefined;
+    let debugFetch;
+    let debugPart;
 
-    // ---- 路线 A：Playwright
+    // A) Browser DOM （如可用）
     if (useBrowser && chromium && getParseCatalog()) {
       const browser = await chromium.launch({ headless: true });
-      const page = await browser.newPage({
-        userAgent: UA_DESKTOP,
-        viewport: { width: 1366, height: 900 },
-      });
-
+      const page = await browser.newPage({ userAgent: UA_DESKTOP, viewport: { width: 1366, height: 900 } });
       try {
         const r = await getParseCatalog()(page, url, hintType || "");
-        const browProducts = r && Array.isArray(r.products) ? r.products : [];
-        if (browProducts.length) {
-          items = browProducts.map((p) => ({
-            sku:   p.sku || "",
+        const list = r && Array.isArray(r.products) ? r.products : [];
+        if (list.length) {
+          items = list.map((p) => ({
+            sku: p.sku || "",
             title: p.title || p.name || "",
-            url:   p.url || p.link || "",
-            link:  p.link || p.url || "",
-            img:   p.image || p.img || (Array.isArray(p.imgs) ? p.imgs[0] : ""),
+            url: p.url || p.link || "",
+            link: p.link || p.url || "",
+            img: p.image || p.img || (Array.isArray(p.imgs) ? p.imgs[0] : ""),
             price: p.price || "",
             currency: p.currency || "",
-            moq:   p.moq || p.minQty || "",
-            desc:  p.desc || p.description || "",
+            moq: p.moq || p.minQty || "",
+            desc: p.desc || p.description || "",
           }));
           adapter_used = hintType || "browser-dom";
         }
-      } catch { /* ignore */ }
-
-      try { await page.close(); } catch {}
-      try { await browser.close(); } catch {}
+      } catch {}
+      try {
+        await page.close();
+      } catch {}
+      try {
+        await browser.close();
+      } catch {}
     }
 
-    // ---- 路线 B：Cheerio + root 流程
+    // B) Cheerio + root 流程
     if (!items.length) {
       const ensured = await ensureFetchHtml(url, wantDebug, hintType);
       html = ensured.html;
       debugFetch = ensured.debugFetch;
 
-      if (!html) {
-        throw Object.assign(new Error("crawlPages: fetchHtml is required"), { code: "FETCH_EMPTY" });
-      }
+      if (!html) throw Object.assign(new Error("crawlPages: fetchHtml is required"), { code: "FETCH_EMPTY" });
 
-      // ============== NEW STEP 1: 结构判别 ==============
       let pageType = "other";
       let structDebug = null;
       try {
         const det = await detectStructure(url, html, hintType || "");
-        if (det && det.type) pageType = String(det.type || "").toLowerCase();
+        if (det?.type) pageType = String(det.type || "").toLowerCase();
         structDebug = det || null;
       } catch (e) {
         console.warn("[catalog] detectStructure error:", e?.message || e);
       }
 
-      try { await snapshot("structureDetector", { url, pageType, structDebug }); } catch {}
+      try {
+        await snapshot("structureDetector", { url, pageType, structDebug });
+      } catch {}
 
       if (html.length > MAX_TEXT_LEN || pageType === "other") {
         logger.warn?.(`[catalog] Skip non-list page or oversized page: type=${pageType}, len=${html.length}`);
@@ -606,14 +513,14 @@ const parseHandler = async (req, res) => {
 
       try {
         const preClass = classify(url, html);
-        if (!hintType && preClass && preClass.adapterHint) {
-          hintType = preClass.platform;
-        }
-        try { await snapshot("pre-classify", { url, preClass }); } catch {}
+        if (!hintType && preClass?.adapterHint) hintType = preClass.platform;
+        try {
+          await snapshot("pre-classify", { url, preClass });
+        } catch {}
       } catch {}
     }
 
-    // ---- 图片转 base64
+    // 图片 base64（前 N 张）
     if (imgMode === "base64" && items.length && imgCount > 0) {
       const N = Math.min(imgCount, items.length);
       await Promise.all(
@@ -628,7 +535,7 @@ const parseHandler = async (req, res) => {
       );
     }
 
-    // ---- 统一输出结构（保持 products & items 供调试）
+    // === 统一归一化（等价于 server.js: toTablePayload） ===
     const products = (items || []).map((it) => ({
       sku: it.sku || it.code || "",
       title: it.title || it.desc || "",
@@ -644,24 +551,22 @@ const parseHandler = async (req, res) => {
     const fieldsRate = computeFieldsRate(products || []);
     const wantSnapshot = ["1", "true", "yes", "on"].includes(String(qp.snapshot || qp.debug || "").toLowerCase());
 
-    // ====== 仅此处替换为所需返回结构（关键修复） ======
-    // === compatibility normalizer for frontend table ===
     function normRow(it = {}) {
       const u = String(it.url ?? it.link ?? "");
       return {
-        sku:   String(it.sku   ?? ""),
+        sku: String(it.sku ?? ""),
         title: String(it.title ?? ""),
-        img:   String(it.img   ?? ""),
-        desc:  String(it.desc  ?? ""),
-        moq:   String(it.moq   ?? ""),
+        img: String(it.img ?? ""),
+        desc: String(it.desc ?? ""),
+        moq: String(it.moq ?? ""),
         price: String(it.price ?? ""),
-        url:   u,
-        link:  u, // 前端“链接”列有时读 link
+        url: u,
+        link: u,
       };
     }
 
-    // 优先使用 products；若不存在则回退到 items
-    const baseRows = Array.isArray(products) && products.length ? products : (Array.isArray(items) ? items : []);
+    const baseRows =
+      (Array.isArray(products) && products.length ? products : Array.isArray(items) ? items : []) || [];
     const rows = baseRows.map(normRow);
 
     const payload = {
@@ -669,20 +574,18 @@ const parseHandler = async (req, res) => {
       url,
       count: rows.length,
       adapter: adapter_used || "generic",
-      items: rows, // 兼容：items
-      data:  rows, // 兼容：data
-      list:  rows, // 兼容：list
-      rows,       // 兼容：rows（前端最常用）
+      items: rows,
+      data: rows,
+      list: rows,
+      rows,
     };
-
-    if (wantSnapshot) {
-      payload.fieldsRate = fieldsRate;
-    }
+    if (wantSnapshot) payload.fieldsRate = fieldsRate;
 
     return res.json(payload);
-
   } catch (err) {
-    logger.error(`[route/catalog.parse] ERROR url=${req?.body?.url || req?.query?.url} -> ${err?.message || err}`);
+    logger.error(
+      `[route/catalog.parse] ERROR url=${req?.body?.url || req?.query?.url} -> ${err?.code || ""} ${err?.message || err}`
+    );
     try {
       await errorCollector.note(err, {
         route: "catalog.parse",
@@ -696,27 +599,28 @@ const parseHandler = async (req, res) => {
         error: err?.message || String(err),
       });
     } catch {}
-
     return res.status(200).json({ ok: false, error: String(err?.message || err) });
   }
 };
 
-// 旧入口兼容
+// 路由
+const router = Router();
 router.all("/parse", parseHandler);
+router.all("/catalog", parseHandler);
+router.all("/api/catalog", parseHandler);
 
-// 新入口
-router.all("/catalog", parseHandler);     // /v1/catalog
-router.all("/api/catalog", parseHandler); // /v1/api/catalog
-
-// 子路由探针：GET /v1/api/catalog/_probe
+// 健康探针（四别名对齐）
 router.get("/_probe", (_req, res) => {
-  const rows = [{ sku:"demo", title:"probe ok", url:"#", img:"", desc:"", moq:"", price:"" }];
+  const rows = [{ sku: "demo", title: "probe ok", url: "#", img: "", desc: "", moq: "", price: "" }];
   res.json({
-    ok:true,
-    url:"/_probe",
-    count:rows.length,
-    adapter:"probe",
-    items:rows, data:rows, list:rows, rows
+    ok: true,
+    url: "/_probe",
+    count: rows.length,
+    adapter: "probe",
+    items: rows,
+    data: rows,
+    list: rows,
+    rows,
   });
 });
 
