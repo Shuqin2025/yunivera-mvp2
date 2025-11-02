@@ -802,7 +802,7 @@ function normRow(it = {}) {
   };
 }
 
-const rows = Array.isArray(items) ? items.map(normRow) : [];
+const rows = Array.isArray(products) ? products.map(normRow) : [];
 
 const payload = {
   ok: true,
