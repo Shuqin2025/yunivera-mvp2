@@ -43,6 +43,40 @@ function standardize(payload) {
 globalThis.normalizeItem = normalizeItem;
 globalThis.standardize = standardize;
 
+// === table normalizer helpers (for frontend compatibility) ===
+function normalizeRow(it = {}) {
+  const u = String(it.url ?? it.link ?? "");
+  return {
+    sku:   String(it.sku   ?? ""),
+    title: String(it.title ?? ""),
+    img:   String(it.img   ?? ""),
+    desc:  String(it.desc  ?? ""),
+    moq:   String(it.moq   ?? ""),
+    price: (it.price == null ? "" : (typeof it.price === "number" ? it.price : String(it.price))),
+    url:   u,
+    link:  u,
+  };
+}
+
+function toTablePayload({ url = "", items = [], adapter = "generic" } = {}) {
+  const rows = Array.isArray(items) ? items.map(normalizeRow) : [];
+  return {
+    ok: true,
+    url,
+    count: rows.length,
+    adapter,
+    items: rows,
+    data:  rows,
+    list:  rows,
+    rows,
+  };
+}
+
+globalThis.normalizeRow = normalizeRow;
+globalThis.toTablePayload = toTablePayload;
+// === end table normalizer helpers ===
+
+
 // --- app init & middlewares ---
 const app = express();
 app.use(cors());
@@ -1181,10 +1215,15 @@ async function __handleCatalogParse(req, res) {
 
     if (!url) return res.status(400).json({ ok: false, error: "missing url" });
 
-    const { items = [], adapter = "generic" } = await parseUniversalCatalog(url, limit, { debug, detailSku });
-    return res.json({ ok: true, url, count: items.length, items, adapter });
+    const { items = [], adapter = "generic" } =
+      await parseUniversalCatalog(url, limit, { debug, detailSku });
+
+    const payload = toTablePayload({ url, items, adapter });
+    return res.json(payload);
   } catch (e) {
-    return res.status(500).json({ ok: false, error: (e && e.message) ? e.message : String(e) });
+    return res
+      .status(500)
+      .json({ ok: false, error: (e && e.message) ? e.message : String(e) });
   }
 }
 
@@ -1205,4 +1244,3 @@ app.get("/v1/catalog.json", __handleCatalogParse);
 const PORT = Number(process.env.PORT || 10000);
 
 app.listen(PORT, () => console.log(`[mvp2-backend] listening on :${PORT}`));
-
