@@ -787,38 +787,36 @@ const parseHandler = async (req, res) => {
     }
 
    
-    // ====== 仅此处替换为所需返回结构 ======
     // === compatibility normalizer for frontend table ===
-    function normRow(it = {}) {
-      const u = String(it.url ?? it.link ?? "");
-      return {
-        sku:   String(it.sku   ?? ""),
-        title: String(it.title ?? ""),
-        img:   String(it.img   ?? ""),
-        desc:  String(it.desc  ?? ""),
-        moq:   String(it.moq   ?? ""),
-        price: String(it.price ?? ""),
-        url:   u,
-        link:  u,            // 兼容老前端“链接”列读 link 的逻辑
-      };
-    }
+function normRow(it = {}) {
+  const u = String(it.url ?? it.link ?? "");
+  return {
+    sku:   String(it.sku   ?? ""),
+    title: String(it.title ?? ""),
+    img:   String(it.img   ?? ""),
+    desc:  String(it.desc  ?? ""),
+    moq:   String(it.moq   ?? ""),
+    price: String(it.price ?? ""),
+    url:   u,
+    link:  u, // 前端有时候读 link
+  };
+}
 
-    const rows = Array.isArray(items) ? items.map(normRow) : [];
-    const payload = {
-      ok: true,
-      url,
-      count: rows.length,
-      adapter: adapter_used,
-      // 统一同时提供所有老字段名，避免前端版本差异
-      items: rows,
-      data:  rows,
-      list:  rows,
-      rows,               // 再多给一个 rows，部分旧组件只认它
-    };
-    return res.json(payload);
+const rows = Array.isArray(items) ? items.map(normRow) : [];
 
+const payload = {
+  ok: true,
+  url,
+  count: rows.length,
+  adapter: adapter_used || adapter,
+  items: rows, // 兼容：items
+  data:  rows, // 兼容：data
+  list:  rows, // 兼容：list
+  rows,        // 兼容：rows（前端最常用）
+};
 
-  } catch (err) {
+return res.json(payload);
+} catch (err) {
     logger.error(
       `[route/catalog.parse] ERROR url=${req?.body?.url || req?.query?.url} -> ${err?.message || err}`
     );
