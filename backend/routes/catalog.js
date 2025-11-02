@@ -31,8 +31,6 @@ import * as errorCollector from "../modules/errorCollector.js";
 import detectRoot from "../lib/smartRootLocator.js";
 import genericLinksParser from "../lib/parsers/genericLinksParser.js";
 
-// === 页面防跑偏阈值（避免整站/站点地图类页面） ===
-
 // NEW: family predictor (optional dynamic load to avoid startup failure)
 let predictFamilySync = (sample) => ({ familyId: "UNKNOWN", similarityScore: 0 });
 try {
@@ -45,11 +43,12 @@ try {
 } catch (e) {
   console.warn("[catalog] templateClusterRuntime.js missing; family prediction disabled. ", e?.message || e);
 }
+
 // === 页面防跑偏阈值（避免整站/站点地图类页面） ===
-const MAX_TEXT_LEN = 200000; // 超过视为噪音页，直接拒抓（参谋长建议）
+const MAX_TEXT_LEN = 200000; // 超过视为噪音页，直接拒抓
 
 // --------------------------------------------------
-// fetchHtml helpers (原样保留)
+// fetchHtml helpers
 // --------------------------------------------------
 
 const UA_DESKTOP =
@@ -92,43 +91,32 @@ async function ensureFetchHtml(url, wantDebug, hintType = "") {
     const strat = decideFetchStrategy({ url, hintType });
     const fetched = await fetchHtmlAdaptive({ url, strategy: strat });
 
-    // OversizedPageDetected 防线: adaptiveCrawler 也可能拉到整站大块
+    // OversizedPageDetected 防线
     if (fetched?.html && fetched.html.length > MAX_TEXT_LEN) {
-      throw Object.assign(
-        new Error("OversizedPageDetected"),
-        { code: "OVERSIZED_PAGE" }
-      );
+      throw Object.assign(new Error("OversizedPageDetected"), { code: "OVERSIZED_PAGE" });
     }
 
     if (fetched?.html) {
       return {
         html: fetched.html,
-        debugFetch: wantDebug
-          ? { used: fetched.used, http_status: fetched.status }
-          : undefined,
+        debugFetch: wantDebug ? { used: fetched.used, http_status: fetched.status } : undefined,
       };
     }
-  } catch {
-    /* ignore */
-  }
+  } catch { /* ignore */ }
 
   const r = await fetchHtmlBasic(url, wantDebug);
 
   if (r.html && r.html.length > MAX_TEXT_LEN) {
-    throw Object.assign(
-      new Error("OversizedPageDetected"),
-      { code: "OVERSIZED_PAGE" }
-    );
+    throw Object.assign(new Error("OversizedPageDetected"), { code: "OVERSIZED_PAGE" });
   }
 
   return { html: r.html, debugFetch: r.debugFetch };
 }
 
 // --------------------------------------------------
-// helpers / dbg (原样)
+// helpers / dbg
 // --------------------------------------------------
 
-// NEW: sample saver for template clustering
 import { fileURLToPath } from "url";
 const __filename2 = typeof __filename !== "undefined" ? __filename : fileURLToPath(import.meta.url);
 const __dirname2  = typeof __dirname  !== "undefined" ? __dirname  : path.dirname(__filename2);
@@ -148,9 +136,6 @@ function saveTemplateSample({ url, pageType, rootSelector, fields }) {
     console.warn("[cluster-sample] failed to save:", e?.message || e);
   }
 }
-// --------------------------------------------------
-// helpers / dbg (原样)
-// --------------------------------------------------
 
 const __dbgR = (tag, data) => {
   try {
@@ -170,7 +155,7 @@ async function __snap(tag, data) {
 }
 
 // --------------------------------------------------
-// optional Playwright (原样)
+// optional Playwright
 // --------------------------------------------------
 
 let chromium = null;
@@ -179,7 +164,7 @@ try {
 } catch {}
 
 // --------------------------------------------------
-// metrics helper (原样)
+// metrics helper
 // --------------------------------------------------
 
 function computeFieldsRate(list) {
@@ -187,9 +172,7 @@ function computeFieldsRate(list) {
   const n = Array.isArray(list) ? list.length : 0;
   const out = {};
   for (const k of keys) {
-    out[k] = n
-      ? list.filter((x) => x && String(x[k] || "").trim()).length / n
-      : 0;
+    out[k] = n ? list.filter((x) => x && String(x[k] || "").trim()).length / n : 0;
   }
   return out;
 }
@@ -280,7 +263,7 @@ function genericExtract($, baseUrl, { limit = 50, debug = false } = {}) {
       "";
     const img = absolutize(imgRel);
 
-    // ✅ 修复后的“干净版” title 段
+    // ✅ 干净 title
     let title =
       ($el.find("img").attr("alt") || "").trim() ||
       $el.find("h1,h2,h3,h4,h5,h6").first().text().trim() ||
@@ -314,18 +297,13 @@ function genericExtract($, baseUrl, { limit = 50, debug = false } = {}) {
 }
 
 // --------------------------------------------------
-// adapter decision helpers (原样)
+// adapter decision helpers
 // --------------------------------------------------
 
 function chooseAdapter({ url, $, html, hintType, host }) {
   if (hintType) {
     const t = String(hintType).toLowerCase();
-    if (
-      t === "shopware" ||
-      t === "woocommerce" ||
-      t === "shopify" ||
-      t === "magento"
-    ) {
+    if (t === "shopware" || t === "woocommerce" || t === "shopify" || t === "magento") {
       return "template";
     }
     if (t === "memoryking") return "memoryking";
@@ -346,7 +324,7 @@ function chooseAdapter({ url, $, html, hintType, host }) {
   return "generic";
 }
 
-// unify templateParser export styles (原样)
+// unify templateParser export styles
 function callTemplateParse(html, url, opts) {
   try {
     if (templateParser && typeof templateParser.parse === "function") {
@@ -369,7 +347,7 @@ function loadHtml(html) {
   return cheerio.load(html, { decodeEntities: false });
 }
 
-// 封装 universal，优先尝试“喂现成 html” (原样)
+// 封装 universal，优先尝试“喂现成 html”
 async function callUniversalWithHtml(url, html, { limit, debug }) {
   try {
     const u1 = await universal({ url, html, limit, debug });
@@ -383,13 +361,12 @@ async function callUniversalWithHtml(url, html, { limit, debug }) {
 }
 
 // --------------------------------------------------
-// NEW: high-level extraction pipeline for LIST pages
+// NEW: extraction pipeline for LIST pages
 // --------------------------------------------------
 
 async function runExtractListPage({ url, html, limit = 50, debug = false, hintType = "" }) {
   const $full = cheerio.load(html, { decodeEntities: false });
 
-  // 先尝试已有的适配器/模板系统 (保持你原有逻辑顺序)
   let used = "generic";
   let items = [];
   let debugPart;
@@ -415,7 +392,6 @@ async function runExtractListPage({ url, html, limit = 50, debug = false, hintTy
       if (debug && !debugPart) debugPart = out?.debugPart;
 
       if (!mmItems || mmItems.length === 0) {
-        // fallback template
         const tOut = await callTemplateParse(html, url, { limit, debug });
         mmItems = Array.isArray(tOut) ? tOut : tOut?.items || tOut?.products || [];
 
@@ -446,7 +422,6 @@ async function runExtractListPage({ url, html, limit = 50, debug = false, hintTy
       }
     }
     else if (which === "generic") {
-      // 尝试 template anyway
       const tOut = await callTemplateParse(html, url, { limit, debug });
       let tmp = Array.isArray(tOut) ? tOut : tOut?.items || tOut?.products || [];
       if (tmp && tmp.length) {
@@ -454,7 +429,6 @@ async function runExtractListPage({ url, html, limit = 50, debug = false, hintTy
         used = "template-try";
       }
 
-      // still empty, try universal (safe)
       if (!items.length) {
         const u = await callUniversalWithHtml(url, html, { limit, debug });
         const cand = Array.isArray(u) ? u : u?.items || u?.products || [];
@@ -465,8 +439,8 @@ async function runExtractListPage({ url, html, limit = 50, debug = false, hintTy
       }
     }
   }
-  // 如果这些专用/模板解析器都没拿到结果 ⇒ 进入我们的新策略：
-  // detectRoot + genericLinksParser (root-scoped)
+
+  // 2) detectRoot + genericLinksParser (root-scoped)
   if (!items.length) {
     const rootInfo = await detectRoot({ $: $full });
     const $rootNode = $full(rootInfo.selector).first();
@@ -479,11 +453,7 @@ async function runExtractListPage({ url, html, limit = 50, debug = false, hintTy
       scope: "rootOnly",
     });
 
-    if (
-      parsedFromRoot &&
-      parsedFromRoot.products &&
-      parsedFromRoot.products.length
-    ) {
+    if (parsedFromRoot && parsedFromRoot.products && parsedFromRoot.products.length) {
       items = parsedFromRoot.products.map((p) => ({
         sku: p.sku || p.title || "",
         title: p.title || "",
@@ -509,7 +479,7 @@ async function runExtractListPage({ url, html, limit = 50, debug = false, hintTy
     }
   }
 
-  // 最后兜底：如果还没抓到，沿用旧 genericExtract 全页遍历
+  // 3) 兜底：旧 genericExtract
   if (!items.length) {
     const out = genericExtract($full, url, { limit, debug });
     items = out.items || [];
@@ -521,7 +491,7 @@ async function runExtractListPage({ url, html, limit = 50, debug = false, hintTy
 }
 
 // --------------------------------------------------
-// parseHandler 主入口（大部分沿用，但插入结构判定）
+// parseHandler 主入口
 // --------------------------------------------------
 
 const router = Router();
@@ -534,15 +504,11 @@ const parseHandler = async (req, res) => {
     const qp = isGet ? req.query : req.body || {};
 
     __dbgR("parse.start", { url: qp?.url });
-    const DEBUG_ENV =
-      process.env.DEBUG === "1" ||
-      process.env.DEBUG === "true";
+    const DEBUG_ENV = process.env.DEBUG === "1" || process.env.DEBUG === "true";
 
     const url = String(qp.url || "").trim();
     logger.debug(`[route/catalog.parse] url=${url} size=${qp.size ?? ""}`);
-    if (!url) {
-      return res.status(400).json({ ok: false, error: "missing url" });
-    }
+    if (!url) return res.status(400).json({ ok: false, error: "missing url" });
 
     const limit = Math.max(1, parseInt(qp.limit ?? 50, 10) || 50);
 
@@ -550,9 +516,7 @@ const parseHandler = async (req, res) => {
     const imgCount = Math.max(0, parseInt(qp.imgCount ?? 0, 10) || 0);
 
     const rawDebug = qp.debug ?? qp.debug1 ?? qp.debug_1;
-    const wantDebug = ["1", "true", "yes", "on"].includes(
-      String(rawDebug ?? "").toLowerCase()
-    );
+    const wantDebug = ["1", "true", "yes", "on"].includes(String(rawDebug ?? "").toLowerCase());
 
     // 前端 hint
     hintType = (qp.t || qp.type || "").toString();
@@ -563,8 +527,7 @@ const parseHandler = async (req, res) => {
     );
 
     await __snap("parse:enter", { url, limit, t: qp.t });
-    DEBUG_ENV &&
-      console.log("[struct]", "parse:start", { url, hintType, useBrowser });
+    DEBUG_ENV && console.log("[struct]", "parse:start", { url, hintType, useBrowser });
 
     let items = [];
     let adapter_used = "";
@@ -572,7 +535,7 @@ const parseHandler = async (req, res) => {
     let debugFetch = undefined;
     let debugPart = undefined;
 
-    // ---- 路线 A：Playwright DOM 特殊解析（原逻辑保留）
+    // ---- 路线 A：Playwright
     if (useBrowser && chromium && getParseCatalog()) {
       const browser = await chromium.launch({ headless: true });
       const page = await browser.newPage({
@@ -582,8 +545,7 @@ const parseHandler = async (req, res) => {
 
       try {
         const r = await getParseCatalog()(page, url, hintType || "");
-        const browProducts =
-          r && Array.isArray(r.products) ? r.products : [];
+        const browProducts = r && Array.isArray(r.products) ? r.products : [];
         if (browProducts.length) {
           items = browProducts.map((p) => ({
             sku:   p.sku || "",
@@ -598,49 +560,37 @@ const parseHandler = async (req, res) => {
           }));
           adapter_used = hintType || "browser-dom";
         }
-      } catch {
-        /* ignore browser errors */
-      }
+      } catch { /* ignore */ }
 
       try { await page.close(); } catch {}
       try { await browser.close(); } catch {}
     }
 
-    // ---- 路线 B：Cheerio 默认 + 新 root 流程
+    // ---- 路线 B：Cheerio + root 流程
     if (!items.length) {
       const ensured = await ensureFetchHtml(url, wantDebug, hintType);
       html = ensured.html;
       debugFetch = ensured.debugFetch;
 
       if (!html) {
-        throw Object.assign(
-          new Error("crawlPages: fetchHtml is required"),
-          { code: "FETCH_EMPTY" }
-        );
+        throw Object.assign(new Error("crawlPages: fetchHtml is required"), { code: "FETCH_EMPTY" });
       }
 
-      // ============== NEW STEP 1: 结构判别 (LIST / DETAIL / OTHER) ==============
+      // ============== NEW STEP 1: 结构判别 ==============
       let pageType = "other";
       let structDebug = null;
       try {
         const det = await detectStructure(url, html, hintType || "");
-
-        if (det && det.type) {
-          pageType = String(det.type || "").toLowerCase();
-        }
+        if (det && det.type) pageType = String(det.type || "").toLowerCase();
         structDebug = det || null;
       } catch (e) {
         console.warn("[catalog] detectStructure error:", e?.message || e);
       }
 
-      try {
-        await snapshot("structureDetector", { url, pageType, structDebug });
-      } catch {}
+      try { await snapshot("structureDetector", { url, pageType, structDebug }); } catch {}
 
       if (html.length > MAX_TEXT_LEN || pageType === "other") {
-        logger.warn?.(
-          `[catalog] Skip non-list page or oversized page: type=${pageType}, len=${html.length}`
-        );
+        logger.warn?.(`[catalog] Skip non-list page or oversized page: type=${pageType}, len=${html.length}`);
         adapter_used = "skipped-non-list";
         items = [];
       } else if (pageType === "detail") {
@@ -648,13 +598,7 @@ const parseHandler = async (req, res) => {
         adapter_used = "detail-skip";
         items = [];
       } else {
-        const ret = await runExtractListPage({
-          url,
-          html,
-          limit,
-          debug: wantDebug,
-          hintType,
-        });
+        const ret = await runExtractListPage({ url, html, limit, debug: wantDebug, hintType });
         items = ret.items || [];
         adapter_used = ret.adapter_used || "auto";
         debugPart = ret.debugPart;
@@ -669,7 +613,7 @@ const parseHandler = async (req, res) => {
       } catch {}
     }
 
-    // ---- 图片转 base64（原逻辑保留）
+    // ---- 图片转 base64
     if (imgMode === "base64" && items.length && imgCount > 0) {
       const N = Math.min(imgCount, items.length);
       await Promise.all(
@@ -678,15 +622,13 @@ const parseHandler = async (req, res) => {
           try {
             const r = await axios.get(it.img, { responseType: "arraybuffer" });
             const ext = (it.img.split(".").pop() || "jpg").toLowerCase();
-            it.img = `data:image/${ext};base64,${Buffer.from(
-              r.data
-            ).toString("base64")}`;
+            it.img = `data:image/${ext};base64,${Buffer.from(r.data).toString("base64")}`;
           } catch {}
         })
       );
     }
 
-    // ---- 输出结构（基本保持不变）
+    // ---- 统一输出结构（保持 products & items 供调试）
     const products = (items || []).map((it) => ({
       sku: it.sku || it.code || "",
       title: it.title || it.desc || "",
@@ -699,95 +641,17 @@ const parseHandler = async (req, res) => {
       desc: it.desc || "",
     }));
 
-    const count = products.length;
     const fieldsRate = computeFieldsRate(products || []);
-    const wantMetrics = ["1", "true", "yes", "on"].includes(
-      String(qp.metrics || "").toLowerCase()
-    );
-    const wantSnapshot = ["1", "true", "yes", "on"].includes(
-      String(qp.snapshot || qp.debug || "").toLowerCase()
-    );
+    const wantMetrics = ["1", "true", "yes", "on"].includes(String(qp.metrics || "").toLowerCase());
+    const wantSnapshot = ["1", "true", "yes", "on"].includes(String(qp.snapshot || qp.debug || "").toLowerCase());
 
     try {
       const sample =
-        (products &&
-          products[0] &&
-          (products[0].url || products[0].link)) ||
-        null;
-      logger.debug(
-        "[route]",
-        "adapter=",
-        adapter_used,
-        "count=",
-        products.length,
-        "url=",
-        url,
-        "sample=",
-        sample
-      );
+        (products && products[0] && (products[0].url || products[0].link)) || null;
+      logger.debug("[route]", "adapter=", adapter_used, "count=", products.length, "url=", url, "sample=", sample);
     } catch {}
 
-    // Predict family based on rootSelector + fields (if available)
-    let familyInfo = { familyId: "UNKNOWN", similarityScore: 0 };
-    try {
-      const rootSel = debugPart?.rootLocator?.selector || debugPart?.rootLocator?.rootSelector || "";
-      const first = products?.[0] || items?.[0] || {};
-      const fields = Object.keys(first || {});
-      if (rootSel && fields && fields.length) {
-        const sampleForPredict = {
-          site: new URL(url).hostname.replace(/^www\./, ""),
-          pageType: "list",
-          rootSelector: rootSel,
-          fields,
-        };
-        familyInfo = predictFamilySync(sampleForPredict);
-      }
-    } catch (e) {
-      console.warn("[catalog-family-predict] failed:", e?.message || e);
-    }
-
-    const resp = {
-      ok: true,
-      url,
-      count,
-      products,
-      items,
-      adapter: adapter_used,
-      familyId: familyInfo.familyId,
-      familyScore: familyInfo.similarityScore,
-    };
-
-    if (wantDebug) {
-      resp.debug = {
-        ...(debugFetch || {}),
-        ...(debugPart || {}),
-        adapter_used,
-        hintType,
-        useBrowser: !!(useBrowser && chromium && getParseCatalog()),
-      };
-    }
-    if (wantMetrics) {
-      resp.fieldsRate = fieldsRate;
-    }
-
-    logger.debug(
-      `[route/catalog.parse] done url=${url} adapter=${resp?.adapter} count=${resp?.products?.length ?? 0}`
-    );
-
-    __dbgR("parse.done", {
-      url: qp?.url,
-      adapter: resp?.adapter,
-      count: resp?.products?.length,
-    });
-    if ((resp?.products?.length || 0) === 0) {
-      __dbgR("parse.empty", {
-        url: qp?.url,
-        note: "NoProductFound after pipeline",
-      });
-    }
-
-   
-    // ====== 仅此处替换为所需返回结构 ======
+    // ====== 仅此处替换为所需返回结构（关键修复） ======
     // === compatibility normalizer for frontend table ===
     function normRow(it = {}) {
       const u = String(it.url ?? it.link ?? "");
@@ -799,36 +663,33 @@ const parseHandler = async (req, res) => {
         moq:   String(it.moq   ?? ""),
         price: String(it.price ?? ""),
         url:   u,
-        link:  u,   // 兼容老前端“链接”列读取 link
+        link:  u, // 前端“链接”列有时读 link
       };
     }
 
     // 优先使用 products；若不存在则回退到 items
-    const baseRows = Array.isArray(typeof products !== "undefined" && products ? products : items)
-      ? ((typeof products !== "undefined" && products) ? products : items)
-      : [];
-
+    const baseRows = Array.isArray(products) && products.length ? products : (Array.isArray(items) ? items : []);
     const rows = baseRows.map(normRow);
 
     const payload = {
       ok: true,
       url,
       count: rows.length,
-      adapter: typeof adapter_used !== "undefined" && adapter_used ? adapter_used : (typeof adapter !== "undefined" ? adapter : "generic"),
-      items: rows,   // 兼容：items
-      data:  rows,   // 兼容：data
-      list:  rows,   // 兼容：list
-      rows,          // 兼容：rows（前端最常用）
+      adapter: adapter_used || "generic",
+      items: rows, // 兼容：items
+      data:  rows, // 兼容：data
+      list:  rows, // 兼容：list
+      rows,       // 兼容：rows（前端最常用）
     };
+
+    if (wantSnapshot) {
+      payload.fieldsRate = fieldsRate;
+    }
 
     return res.json(payload);
 
-
-
   } catch (err) {
-    logger.error(
-      `[route/catalog.parse] ERROR url=${req?.body?.url || req?.query?.url} -> ${err?.message || err}`
-    );
+    logger.error(`[route/catalog.parse] ERROR url=${req?.body?.url || req?.query?.url} -> ${err?.message || err}`);
     try {
       await errorCollector.note(err, {
         route: "catalog.parse",
@@ -843,9 +704,7 @@ const parseHandler = async (req, res) => {
       });
     } catch {}
 
-    return res
-      .status(200)
-      .json({ ok: false, error: String(err?.message || err) });
+    return res.status(200).json({ ok: false, error: String(err?.message || err) });
   }
 };
 
@@ -853,23 +712,18 @@ const parseHandler = async (req, res) => {
 router.all("/parse", parseHandler);
 
 // 新入口
-router.all("/catalog", parseHandler);        // /v1/catalog
-router.all("/api/catalog", parseHandler);    // /v1/api/catalog
+router.all("/catalog", parseHandler);     // /v1/catalog
+router.all("/api/catalog", parseHandler); // /v1/api/catalog
 
-// quick sanity endpoint: GET /v1/api/catalog/_probe
+// 子路由探针：GET /v1/api/catalog/_probe
 router.get("/_probe", (_req, res) => {
-  const rows = [
-    { sku: "demo", title: "probe ok", url: "#", img: "", desc: "", moq: "", price: "" }
-  ];
+  const rows = [{ sku:"demo", title:"probe ok", url:"#", img:"", desc:"", moq:"", price:"" }];
   res.json({
-    ok: true,
-    url: "/_probe",
-    count: rows.length,
-    adapter: "probe",
-    items: rows,
-    data: rows,
-    list: rows,
-    rows
+    ok:true,
+    url:"/_probe",
+    count:rows.length,
+    adapter:"probe",
+    items:rows, data:rows, list:rows, rows
   });
 });
 
