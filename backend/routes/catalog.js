@@ -825,7 +825,6 @@ const parseHandler = async (req, res) => {
 
 
 
-
   } catch (err) {
     logger.error(
       `[route/catalog.parse] ERROR url=${req?.body?.url || req?.query?.url} -> ${err?.message || err}`
