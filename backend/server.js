@@ -7,6 +7,7 @@ import * as cheerio from "cheerio";
 const UA =
   process.env.SCRAPER_UA ||
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
+
 async function fetchHtml(targetUrl) {
   globalThis.fetchHtml = fetchHtml;
   globalThis.cheerio = cheerio;
@@ -29,7 +30,7 @@ function normalizeItem(x = {}) {
     title: String(x.title ?? "").trim(),
     url: String(x.url ?? "").trim(),
     img: String(x.img ?? "").trim(),
-    price: (x.price ?? null),
+    price: x.price ?? null,
     currency: String(x.currency ?? ""),
     moq: String(x.moq ?? "")
   };
@@ -52,6 +53,7 @@ function normalizeRow(it = {}) {
     img:   String(it.img   ?? ""),
     desc:  String(it.desc  ?? ""),
     moq:   String(it.moq   ?? ""),
+    // keep price as-is when null/number/string; default to ""
     price: (it.price == null ? "" : (typeof it.price === "number" ? it.price : String(it.price))),
     url:   u,
     link:  u,
@@ -65,10 +67,10 @@ function toTablePayload({ url = "", items = [], adapter = "generic" } = {}) {
     url,
     count: rows.length,
     adapter,
-    items: rows,
-    data:  rows,
-    list:  rows,
-    rows,
+    items: rows, // alias
+    data:  rows, // alias
+    list:  rows, // alias
+    rows,        // alias
   };
 }
 
@@ -128,7 +130,7 @@ app.get("/v1/api/image", async (req, res) => {
     });
 
     const ct = r.headers["content-type"] || "image/jpeg";
-if (format === "base64") {
+    if (format === "base64") {
       const base64 = Buffer.from(r.data).toString("base64");
       return res.json({ ok: true, contentType: ct, base64: `data:${ct};base64,${base64}` });
     }
@@ -248,13 +250,7 @@ function looksLikeMagento($, html) {
 
 // === /v1/api/detect =====================================================
 
-
-app.get("/v1/api/image64", (req, res) => {
-  // 把原 query 合并上 format=base64，然后改写成 /v1/api/image 的路径再交给路由器
-  const params = new URLSearchParams({ ...req.query, format: "base64" });
-  req.url = `/v1/api/image?${params.toString()}`;
-  app._router.handle(req, res, () => {});
-});
+// (image64 alias already defined above)
 
 /* ──────────────────────────── site: auto-schmuck.com ──────────────────────────── */
 async function parseAutoSchmuck(listUrl, limit = 50) {
@@ -842,6 +838,8 @@ async function parseUniversalCatalog(
       adapter = "memoryking/v5.1";
       const html = await fetchHtml(listUrl);
       const $ = cheerio.load(html, { decodeEntities: false });
+      // NOTE: parseMemoryking should exist in your adapters. If absent, generic flow still works.
+      const parseMemoryking = (await import("./adapters/memoryking.js")).default;
       const items = await parseMemoryking({ $, url: listUrl, rawHtml: html, limit, debug });
       return { items, adapter };
     }
@@ -1008,6 +1006,8 @@ async function parseUniversalCatalog(
 
       const firstHtml = await fetchHtml(listUrl);
       let $ = cheerio.load(firstHtml, { decodeEntities: false });
+      // 'sino' adapter must exist in your project context
+      const sino = await import("./adapters/sinotronic.js");
       let part = sino.parse($, listUrl, { limit });
       for (const it of part || []) {
         const key = it.url || it.img || it.title || "";
@@ -1158,7 +1158,8 @@ async function parseUniversalCatalog(
 
   // 外部通用适配器
   try {
-    const uni = await parseUniversal({ url: listUrl, limit });
+    const uniMod = await import("./adapters/universal.js");
+    const uni = await uniMod.parseUniversal({ url: listUrl, limit });
     if (Array.isArray(uni) && uni.length) return { items: uni, adapter: "universal-ext" };
   } catch {}
 
