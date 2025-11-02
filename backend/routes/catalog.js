@@ -1,4 +1,6 @@
-// backend/routes/catalog.js  — FULL FILE (aligned to toTablePayload)
+// backend/routes/catalog.js
+// 统一 /parse 输出结构到 rows/data/list/items（含 link/url）
+// 保留适配器 + 兜底，并与 server.js 的 toTablePayload 规范一致
 
 import { Router } from "express";
 import axios from "axios";
@@ -22,20 +24,26 @@ import { decideFetchStrategy, fetchHtml as fetchHtmlAdaptive } from "../modules/
 import { classify } from "../modules/templateCluster.js";
 import * as errorCollector from "../modules/errorCollector.js";
 
-// === 新增：智能 root 定位 + 链接解析兜底 ===
+// === 新增兜底：智能 root 定位 + 目录解析器 ===
 import detectRoot from "../lib/smartRootLocator.js";
 import genericLinksParser from "../lib/parsers/genericLinksParser.js";
 
-// （可选）family predictor，缺失不影响启动
+// family predictor（可选加载，缺失不影响启动）
 let predictFamilySync = (sample) => ({ familyId: "UNKNOWN", similarityScore: 0 });
 try {
-  const rt = await import("../modules/templateClusterRuntime.js");
-  if (rt?.predictFamilySync) predictFamilySync = rt.predictFamilySync;
+  const __predictMod = await import("../modules/templateClusterRuntime.js");
+  if (__predictMod && typeof __predictMod.predictFamilySync === "function") {
+    predictFamilySync = __predictMod.predictFamilySync;
+  } else {
+    console.warn("[catalog] templateClusterRuntime.js found but no predictFamilySync export; using stub.");
+  }
 } catch (e) {
-  console.warn("[catalog] templateClusterRuntime.js missing; family prediction disabled.", e?.message || e);
+  console.warn("[catalog] templateClusterRuntime.js missing; family prediction disabled. ", e?.message || e);
 }
 
-const MAX_TEXT_LEN = 200000;
+const MAX_TEXT_LEN = 200000; // 超大页面直接跳过
+
+// ---------------- fetchHtml ----------------
 const UA_DESKTOP =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
 
@@ -63,7 +71,10 @@ async function fetchHtmlBasic(url, wantDebug) {
       : "utf-8";
 
   const html = iconv.decode(buf, useEnc);
-  const debugFetch = wantDebug ? { http_status: res.status, detected_encoding: useEnc } : undefined;
+  const debugFetch = wantDebug
+    ? { http_status: res.status, detected_encoding: useEnc }
+    : undefined;
+
   return { html, status: res.status, detected_encoding: useEnc, debugFetch };
 }
 
@@ -71,6 +82,7 @@ async function ensureFetchHtml(url, wantDebug, hintType = "") {
   try {
     const strat = decideFetchStrategy({ url, hintType });
     const fetched = await fetchHtmlAdaptive({ url, strategy: strat });
+
     if (fetched?.html && fetched.html.length > MAX_TEXT_LEN) {
       throw Object.assign(new Error("OversizedPageDetected"), { code: "OVERSIZED_PAGE" });
     }
@@ -80,7 +92,8 @@ async function ensureFetchHtml(url, wantDebug, hintType = "") {
         debugFetch: wantDebug ? { used: fetched.used, http_status: fetched.status } : undefined,
       };
     }
-  } catch {}
+  } catch { /* ignore */ }
+
   const r = await fetchHtmlBasic(url, wantDebug);
   if (r.html && r.html.length > MAX_TEXT_LEN) {
     throw Object.assign(new Error("OversizedPageDetected"), { code: "OVERSIZED_PAGE" });
@@ -88,20 +101,18 @@ async function ensureFetchHtml(url, wantDebug, hintType = "") {
   return { html: r.html, debugFetch: r.debugFetch };
 }
 
+// ---------------- dbg helpers ----------------
 import { fileURLToPath } from "url";
 const __filename2 = typeof __filename !== "undefined" ? __filename : fileURLToPath(import.meta.url);
-const __dirname2 = typeof __dirname !== "undefined" ? __dirname : path.dirname(__filename2);
+const __dirname2  = typeof __dirname  !== "undefined" ? __dirname  : path.dirname(__filename2);
 
 function saveTemplateSample({ url, pageType, rootSelector, fields }) {
   try {
     const outDir = path.join(__dirname2, "..", "..", "logs", "training", "templates", "input_samples");
     fs.mkdirSync(outDir, { recursive: true });
     const site = (() => {
-      try {
-        return new URL(url).hostname.replace(/^www\./, "");
-      } catch {
-        return "unknown-site";
-      }
+      try { return new URL(url).hostname.replace(/^www\./, ""); }
+      catch { return "unknown-site"; }
     })();
     const sample = { site, pageType, rootSelector, fields };
     const outFile = path.join(outDir, `${Date.now()}_${site}.json`);
@@ -128,98 +139,69 @@ async function __snap(tag, data) {
   } catch {}
 }
 
-// optional Playwright
+// ---------------- optional Playwright ----------------
 let chromium = null;
-try {
-  ({ chromium } = await import("playwright"));
-} catch {}
+try { ({ chromium } = await import("playwright")); } catch {}
 
+// ---------------- metrics helper ----------------
 function computeFieldsRate(list) {
   const keys = ["title", "url", "img", "price", "sku", "desc"];
   const n = Array.isArray(list) ? list.length : 0;
   const out = {};
-  for (const k of keys) out[k] = n ? list.filter((x) => x && String(x[k] || "").trim()).length / n : 0;
+  for (const k of keys) {
+    out[k] = n ? list.filter((x) => x && String(x[k] || "").trim()).length / n : 0;
+  }
   return out;
 }
 
-// legacy generic fallback
-const CONTAINER_FALLBACK = ["#productlist", ".productlist", ".listBox", ".products", ".product-list", "main", "body"];
-const ITEM_FALLBACK = [
-  "#productlist ul > li",
-  "ul.products > li",
-  "ul > li",
-  ".product",
-  ".product-item",
-  ".productItem",
-  ".product-box",
-  "li",
-];
+// ---------------- legacy generic fallback ----------------
+const CONTAINER_FALLBACK = ["#productlist",".productlist",".listBox",".products",".product-list","main","body"];
+const ITEM_FALLBACK = ["#productlist ul > li","ul.products > li","ul > li",".product",".product-item",".productItem",".product-box","li"];
 
 function genericExtract($, baseUrl, { limit = 50, debug = false } = {}) {
   const tried = { container: [], item: [] };
 
-  let $container = $(),
-    usedContainer = "";
+  let $container = $(), usedContainer = "";
   for (const sel of CONTAINER_FALLBACK) {
     tried.container.push(sel);
     const hit = $(sel);
-    if (hit.length) {
-      $container = hit.first();
-      usedContainer = sel;
-      break;
-    }
+    if (hit.length) { $container = hit.first(); usedContainer = sel; break; }
   }
-  if (!$container.length) {
-    $container = $("body");
-    usedContainer = "body";
-  }
+  if (!$container.length) { $container = $("body"); usedContainer = "body"; }
 
-  let $items = $(),
-    itemSelectorUsed = "";
+  let $items = $(), itemSelectorUsed = "";
   for (const sel of ITEM_FALLBACK) {
     let list = sel.startsWith("#") ? $(sel) : $container.find(sel);
     if (!list.length) list = $(sel);
     tried.item.push(sel);
-    if (list.length) {
-      $items = list;
-      itemSelectorUsed = sel;
-      break;
-    }
+    if (list.length) { $items = list; itemSelectorUsed = sel; break; }
   }
-  if (!$items.length) {
-    tried.item.push("li");
-    $items = $container.find("li");
-    itemSelectorUsed = "li";
-  }
+  if (!$items.length) { tried.item.push("li"); $items = $container.find("li"); itemSelectorUsed = "li"; }
 
   const absolutize = (href) => {
     if (!href) return "";
-    try {
-      return new URL(href, baseUrl).href;
-    } catch {
-      return href;
-    }
+    try { return new URL(href, baseUrl).href; } catch { return href; }
   };
 
   const items = [];
   $items.each((_, el) => {
     if (items.length >= limit) return false;
     const $el = $(el);
+
     const $a = $el.find("a[href]").first();
     const link = absolutize($a.attr("href"));
 
-    const imgRel =
-      $el.find("img[src]").attr("src") ||
-      $el.find("img[data-src]").attr("data-src") ||
-      $el.find("img[data-original]").attr("data-original") ||
-      "";
+    const imgRel = $el.find("img[src]").attr("src")
+      || $el.find("img[data-src]").attr("data-src")
+      || $el.find("img[data-original]").attr("data-original")
+      || "";
     const img = absolutize(imgRel);
 
     let title =
-      ($el.find("img").attr("alt") || "").trim() ||
-      $el.find("h1,h2,h3,h4,h5,h6").first().text().trim() ||
-      ($a.text() || "").trim() ||
-      $el.text().trim();
+      ($el.find("img").attr("alt") || "").trim()
+      || $el.find("h1,h2,h3,h4,h5,h6").first().text().trim()
+      || ($a.text() || "").trim()
+      || $el.text().trim();
 
     title = title.replace(/\s+/g, " ").trim();
     if (!title && !img && !link) return;
@@ -227,47 +209,49 @@ function genericExtract($, baseUrl, { limit = 50, debug = false } = {}) {
     items.push({ sku: title, desc: title, minQty: "", price: "", img, link });
   });
 
-  const debugPart = debug
-    ? {
-        tried,
-        container_matched: usedContainer,
-        item_selector_used: itemSelectorUsed,
-        item_count: $items.length,
-        first_item_html: $items.first().html() || null,
-      }
-    : undefined;
+  const debugPart = debug ? {
+    tried, container_matched: usedContainer, item_selector_used: itemSelectorUsed,
+    item_count: $items.length, first_item_html: $items.first().html() || null
+  } : undefined;
 
   return { items, debugPart };
 }
 
+// ---------------- adapter helpers ----------------
 function chooseAdapter({ url, $, html, hintType, host }) {
   if (hintType) {
     const t = String(hintType).toLowerCase();
-    if (["shopware", "woocommerce", "shopify", "magento"].includes(t)) return "template";
+    if (t === "shopware" || t === "woocommerce" || t === "shopify" || t === "magento") return "template";
     if (t === "memoryking") return "memoryking";
   }
   if (/(^|\. )memoryking\.de$/i.test(host)) return "memoryking";
 
   const det = detectStructure(html || $);
-  if (det?.type && ["Shopware", "WooCommerce", "Shopify", "Magento"].includes(det.type)) return "template";
+  if (det && det.type) {
+    if (det.type === "Shopware" || det.type === "WooCommerce" || det.type === "Shopify" || det.type === "Magento") {
+      return "template";
+    }
+  }
   return "generic";
 }
 
 function callTemplateParse(html, url, opts) {
   try {
-    if (templateParser && typeof templateParser.parse === "function") return templateParser.parse(loadHtml(html), url, opts);
-    if (typeof templateParser === "function") return templateParser({ html, url, ...(opts || {}) });
+    if (templateParser && typeof templateParser.parse === "function") {
+      return templateParser.parse(loadHtml(html), url, opts);
+    }
+    if (typeof templateParser === "function") {
+      return templateParser({ html, url, ...(opts || {}) });
+    }
   } catch {}
   return Promise.resolve([]);
 }
-
 function getParseCatalog() {
-  return templateParser && typeof templateParser.parseCatalog === "function" ? templateParser.parseCatalog : null;
+  return templateParser && typeof templateParser.parseCatalog === "function"
+    ? templateParser.parseCatalog
+    : null;
 }
-
-function loadHtml(html) {
-  return cheerio.load(html, { decodeEntities: false });
-}
+function loadHtml(html) { return cheerio.load(html, { decodeEntities: false }); }
 
 async function callUniversalWithHtml(url, html, { limit, debug }) {
   try {
@@ -281,6 +265,7 @@ async function callUniversalWithHtml(url, html, { limit, debug }) {
   return null;
 }
 
+// ---------------- extraction pipeline for LIST ----------------
 async function runExtractListPage({ url, html, limit = 50, debug = false, hintType = "" }) {
   const $full = cheerio.load(html, { decodeEntities: false });
 
@@ -289,7 +274,7 @@ async function runExtractListPage({ url, html, limit = 50, debug = false, hintTy
   let debugPart;
 
   // 0) sinotronic
-  if (sinotronic.test?.(url)) {
+  if (sinotronic.test && sinotronic.test(url)) {
     const out = sinotronic.parse($full, url, { limit, debug });
     items = out.items || [];
     if (debug) debugPart = out.debugPart;
@@ -298,13 +283,7 @@ async function runExtractListPage({ url, html, limit = 50, debug = false, hintTy
 
   // 1) choose adapter
   if (!items.length) {
-    const host = (() => {
-      try {
-        return new URL(url).host;
-      } catch {
-        return "";
-      }
-    })();
+    const host = (() => { try { return new URL(url).host; } catch { return ""; } })();
     const which = chooseAdapter({ url, $: $full, html, hintType, host });
 
     if (which === "memoryking") {
@@ -312,11 +291,11 @@ async function runExtractListPage({ url, html, limit = 50, debug = false, hintTy
       let mmItems = Array.isArray(out) ? out : out.items || out.products || [];
       if (debug && !debugPart) debugPart = out?.debugPart;
 
-      if (!mmItems?.length) {
+      if (!mmItems || mmItems.length === 0) {
         const tOut = await callTemplateParse(html, url, { limit, debug });
         mmItems = Array.isArray(tOut) ? tOut : tOut?.items || tOut?.products || [];
 
-        if (!mmItems?.length) {
+        if (!mmItems || mmItems.length === 0) {
           const u = await callUniversalWithHtml(url, html, { limit, debug });
           mmItems = Array.isArray(u) ? u : u?.items || u?.products || [];
           used = "universal-fallback";
@@ -327,52 +306,41 @@ async function runExtractListPage({ url, html, limit = 50, debug = false, hintTy
         used = "memoryking";
       }
       items = mmItems || [];
-    } else if (which === "template") {
+    }
+    else if (which === "template") {
       const tOut = await callTemplateParse(html, url, { limit, debug });
       items = Array.isArray(tOut) ? tOut : tOut?.items || tOut?.products || [];
       used = "template";
 
-      if (!items?.length) {
+      if (!items || items.length === 0) {
         const u = await callUniversalWithHtml(url, html, { limit, debug });
         const cand = Array.isArray(u) ? u : u?.items || u?.products || [];
-        if (cand?.length) {
-          items = cand;
-          used = "universal-fallback";
-        }
+        if (cand && cand.length) { items = cand; used = "universal-fallback"; }
       }
-    } else {
+    }
+    else if (which === "generic") {
       const tOut = await callTemplateParse(html, url, { limit, debug });
       let tmp = Array.isArray(tOut) ? tOut : tOut?.items || tOut?.products || [];
-      if (tmp?.length) {
-        items = tmp;
-        used = "template-try";
-      }
+      if (tmp && tmp.length) { items = tmp; used = "template-try"; }
 
       if (!items.length) {
         const u = await callUniversalWithHtml(url, html, { limit, debug });
         const cand = Array.isArray(u) ? u : u?.items || u?.products || [];
-        if (cand?.length) {
-          items = cand;
-          used = "universal";
-        }
+        if (cand && cand.length) { items = cand; used = "universal"; }
       }
     }
   }
 
-  // 2) detectRoot + genericLinksParser (root-scoped)
+  // 2) root-scope 兜底
   if (!items.length) {
-    const rootInfo = await detectRoot({ $: $full });
-    const $rootNode = $full(rootInfo.selector).first();
+    const rootInfo = await detectRoot({ $: cheerio.load(html, { decodeEntities:false }) });
+    const $full2 = cheerio.load(html, { decodeEntities:false });
+    const $rootNode = $full2(rootInfo.selector).first();
     const rootHtml = $rootNode.length ? $rootNode.html() : "";
     const $rootOnly = cheerio.load(rootHtml || "", { decodeEntities: false });
 
-    const parsedFromRoot = await genericLinksParser({
-      $: $rootOnly,
-      url,
-      scope: "rootOnly",
-    });
-
-    if (parsedFromRoot?.products?.length) {
+    const parsedFromRoot = await genericLinksParser({ $: $rootOnly, url, scope: "rootOnly" });
+    if (parsedFromRoot && parsedFromRoot.products && parsedFromRoot.products.length) {
       items = parsedFromRoot.products.map((p) => ({
         sku: p.sku || p.title || "",
         title: p.title || "",
@@ -384,7 +352,6 @@ async function runExtractListPage({ url, html, limit = 50, debug = false, hintTy
         moq: p.moq || "",
         desc: p.desc || "",
       }));
-
       used = (parsedFromRoot.adapter || "") + "+rootScope";
       debugPart = {
         ...(debugPart || {}),
@@ -398,7 +365,7 @@ async function runExtractListPage({ url, html, limit = 50, debug = false, hintTy
     }
   }
 
-  // 3) 兜底
+  // 3) 旧 generic 兜底
   if (!items.length) {
     const out = genericExtract($full, url, { limit, debug });
     items = out.items || [];
@@ -409,6 +376,7 @@ async function runExtractListPage({ url, html, limit = 50, debug = false, hintTy
   return { items, adapter_used: used, debugPart };
 }
 
+// ---------------- parseHandler ----------------
 const router = Router();
 
 const parseHandler = async (req, res) => {
@@ -426,14 +394,13 @@ const parseHandler = async (req, res) => {
     if (!url) return res.status(400).json({ ok: false, error: "missing url" });
 
     const limit = Math.max(1, parseInt(qp.limit ?? 50, 10) || 50);
-    const imgMode = String(qp.img || "").toLowerCase(); // base64 | ''
+    const imgMode = String(qp.img || "").toLowerCase(); // "base64"
     const imgCount = Math.max(0, parseInt(qp.imgCount ?? 0, 10) || 0);
 
     const rawDebug = qp.debug ?? qp.debug1 ?? qp.debug_1;
-    const wantDebug = ["1", "true", "yes", "on"].includes(String(rawDebug ?? "").toLowerCase());
-
+    const wantDebug = ["1","true","yes","on"].includes(String(rawDebug ?? "").toLowerCase());
     hintType = (qp.t || qp.type || "").toString();
-    const useBrowser = ["1", "true", "yes", "on"].includes(String(qp.useBrowser || qp.browser || "").toLowerCase());
+    const useBrowser = ["1","true","yes","on"].includes(String(qp.useBrowser || qp.browser || "").toLowerCase());
 
     await __snap("parse:enter", { url, limit, t: qp.t });
     DEBUG_ENV && console.log("[struct]", "parse:start", { url, hintType, useBrowser });
@@ -441,60 +408,59 @@ const parseHandler = async (req, res) => {
     let items = [];
     let adapter_used = "";
     let html = "";
-    let debugFetch;
-    let debugPart;
+    let debugFetch = undefined;
+    let debugPart = undefined;
 
-    // A) Browser DOM （如可用）
+    // A) 浏览器
     if (useBrowser && chromium && getParseCatalog()) {
       const browser = await chromium.launch({ headless: true });
       const page = await browser.newPage({ userAgent: UA_DESKTOP, viewport: { width: 1366, height: 900 } });
+
       try {
         const r = await getParseCatalog()(page, url, hintType || "");
-        const list = r && Array.isArray(r.products) ? r.products : [];
-        if (list.length) {
-          items = list.map((p) => ({
-            sku: p.sku || "",
+        const browProducts = r && Array.isArray(r.products) ? r.products : [];
+        if (browProducts.length) {
+          items = browProducts.map((p) => ({
+            sku:   p.sku || "",
             title: p.title || p.name || "",
-            url: p.url || p.link || "",
-            link: p.link || p.url || "",
-            img: p.image || p.img || (Array.isArray(p.imgs) ? p.imgs[0] : ""),
+            url:   p.url || p.link || "",
+            link:  p.link || p.url || "",
+            img:   p.image || p.img || (Array.isArray(p.imgs) ? p.imgs[0] : ""),
             price: p.price || "",
             currency: p.currency || "",
-            moq: p.moq || p.minQty || "",
-            desc: p.desc || p.description || "",
+            moq:   p.moq || p.minQty || "",
+            desc:  p.desc || p.description || "",
           }));
           adapter_used = hintType || "browser-dom";
         }
-      } catch {}
-      try {
-        await page.close();
-      } catch {}
-      try {
-        await browser.close();
-      } catch {}
+      } catch { /* ignore */ }
+
+      try { await page.close(); } catch {}
+      try { await browser.close(); } catch {}
     }
 
-    // B) Cheerio + root 流程
+    // B) Cheerio + root
     if (!items.length) {
       const ensured = await ensureFetchHtml(url, wantDebug, hintType);
       html = ensured.html;
       debugFetch = ensured.debugFetch;
 
-      if (!html) throw Object.assign(new Error("crawlPages: fetchHtml is required"), { code: "FETCH_EMPTY" });
+      if (!html) {
+        throw Object.assign(new Error("crawlPages: fetchHtml is required"), { code: "FETCH_EMPTY" });
+      }
 
+      // Step 1: 结构判别
       let pageType = "other";
       let structDebug = null;
       try {
         const det = await detectStructure(url, html, hintType || "");
-        if (det?.type) pageType = String(det.type || "").toLowerCase();
+        if (det && det.type) pageType = String(det.type || "").toLowerCase();
         structDebug = det || null;
       } catch (e) {
         console.warn("[catalog] detectStructure error:", e?.message || e);
       }
 
-      try {
-        await snapshot("structureDetector", { url, pageType, structDebug });
-      } catch {}
+      try { await snapshot("structureDetector", { url, pageType, structDebug }); } catch {}
 
       if (html.length > MAX_TEXT_LEN || pageType === "other") {
         logger.warn?.(`[catalog] Skip non-list page or oversized page: type=${pageType}, len=${html.length}`);
@@ -513,14 +479,14 @@ const parseHandler = async (req, res) => {
 
       try {
         const preClass = classify(url, html);
-        if (!hintType && preClass?.adapterHint) hintType = preClass.platform;
-        try {
-          await snapshot("pre-classify", { url, preClass });
-        } catch {}
+        if (!hintType && preClass && preClass.adapterHint) {
+          hintType = preClass.platform;
+        }
+        try { await snapshot("pre-classify", { url, preClass }); } catch {}
       } catch {}
     }
 
-    // 图片 base64（前 N 张）
+    // 图片转 base64（可选）
     if (imgMode === "base64" && items.length && imgCount > 0) {
       const N = Math.min(imgCount, items.length);
       await Promise.all(
@@ -535,7 +501,7 @@ const parseHandler = async (req, res) => {
       );
     }
 
-    // === 统一归一化（等价于 server.js: toTablePayload） ===
+    // === 统一输出结构（保持 products & items 供调试） ===
     const products = (items || []).map((it) => ({
       sku: it.sku || it.code || "",
       title: it.title || it.desc || "",
@@ -549,24 +515,25 @@ const parseHandler = async (req, res) => {
     }));
 
     const fieldsRate = computeFieldsRate(products || []);
-    const wantSnapshot = ["1", "true", "yes", "on"].includes(String(qp.snapshot || qp.debug || "").toLowerCase());
+    const wantSnapshot = ["1","true","yes","on"].includes(String(qp.snapshot || qp.debug || "").toLowerCase());
 
+    // === compatibility normalizer for frontend table ===
     function normRow(it = {}) {
       const u = String(it.url ?? it.link ?? "");
       return {
-        sku: String(it.sku ?? ""),
+        sku:   String(it.sku   ?? ""),
         title: String(it.title ?? ""),
-        img: String(it.img ?? ""),
-        desc: String(it.desc ?? ""),
-        moq: String(it.moq ?? ""),
+        img:   String(it.img   ?? ""),
+        desc:  String(it.desc  ?? ""),
+        moq:   String(it.moq   ?? ""),
         price: String(it.price ?? ""),
-        url: u,
-        link: u,
+        url:   u,
+        link:  u, // 前端有时读 link
       };
     }
 
-    const baseRows =
-      (Array.isArray(products) && products.length ? products : Array.isArray(items) ? items : []) || [];
+    // 优先 products，回退 items
+    const baseRows = Array.isArray(products) && products.length ? products : (Array.isArray(items) ? items : []);
     const rows = baseRows.map(normRow);
 
     const payload = {
@@ -574,18 +541,17 @@ const parseHandler = async (req, res) => {
       url,
       count: rows.length,
       adapter: adapter_used || "generic",
-      items: rows,
-      data: rows,
-      list: rows,
-      rows,
+      items: rows, // 兼容：items
+      data:  rows, // 兼容：data
+      list:  rows, // 兼容：list
+      rows,       // 兼容：rows（前端最常用）
     };
-    if (wantSnapshot) payload.fieldsRate = fieldsRate;
 
+    if (wantSnapshot) payload.fieldsRate = fieldsRate;
     return res.json(payload);
+
   } catch (err) {
-    logger.error(
-      `[route/catalog.parse] ERROR url=${req?.body?.url || req?.query?.url} -> ${err?.code || ""} ${err?.message || err}`
-    );
+    logger.error(`[route/catalog.parse] ERROR url=${req?.body?.url || req?.query?.url} -> ${err?.message || err}`);
     try {
       await errorCollector.note(err, {
         route: "catalog.parse",
@@ -599,28 +565,22 @@ const parseHandler = async (req, res) => {
         error: err?.message || String(err),
       });
     } catch {}
+
     return res.status(200).json({ ok: false, error: String(err?.message || err) });
   }
 };
 
-// 路由
-const router = Router();
-router.all("/parse", parseHandler);
-router.all("/catalog", parseHandler);
-router.all("/api/catalog", parseHandler);
+// --- 路由注册（**只声明一次 router**）
+router.all("/parse", parseHandler);        // /v1/api/catalog/parse
+router.all("/catalog", parseHandler);      // /v1/api/catalog 兼容
+router.all("/api/catalog", parseHandler);  // /v1/api/catalog 兼容
 
-// 健康探针（四别名对齐）
+// 探针：GET /v1/api/catalog/_probe
 router.get("/_probe", (_req, res) => {
-  const rows = [{ sku: "demo", title: "probe ok", url: "#", img: "", desc: "", moq: "", price: "" }];
+  const rows = [{ sku:"demo", title:"probe ok", url:"#", img:"", desc:"", moq:"", price:"" }];
   res.json({
-    ok: true,
-    url: "/_probe",
-    count: rows.length,
-    adapter: "probe",
-    items: rows,
-    data: rows,
-    list: rows,
-    rows,
+    ok:true, url:"/_probe", count:rows.length, adapter:"probe",
+    items:rows, data:rows, list:rows, rows
   });
 });
 
