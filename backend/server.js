@@ -96,6 +96,63 @@ app.use((_, res, next) => { res.setHeader("Vary", "Origin"); next(); });
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
 
+
+
+// --- 图片代理与 base64 服务 ---
+// GET /v1/api/image?url=...&format=raw|base64
+// - raw    ：直接二进制透传，前端 <img> 兜底加载
+// - base64 ：返回 { ok, base64, contentType }，ExcelJS 用于内嵌
+const routerImage = express.Router();
+
+routerImage.get("/image", async (req, res) => {
+  const url = String(req.query.url || "").trim();
+  const format = String(req.query.format || "raw").toLowerCase();
+
+  if (!url) {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    return res.status(400).json({ ok: false, error: "missing url" });
+  }
+
+  try {
+    const r = await axios.get(url, {
+      responseType: "arraybuffer",
+      timeout: 20000,
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36",
+        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        "Accept-Language": "de,en;q=0.9,zh;q=0.8",
+        "Referer": url,
+      },
+      validateStatus: () => true,
+      maxRedirects: 5,
+    });
+
+    const buf = Buffer.from(r.data || []);
+    const ct = String(r.headers["content-type"] || "application/octet-stream");
+
+    if (format === "base64") {
+      res.setHeader("Access-Control-Allow-Origin", "*");
+      return res.json({
+        ok: r.status >= 200 && r.status < 400,
+        base64: buf.toString("base64"),
+        contentType: ct,
+        status: r.status,
+      });
+    }
+
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Content-Type", ct || "application/octet-stream");
+    res.setHeader("Cache-Control", "public, max-age=86400, immutable");
+    return res.status(r.status || 200).send(buf);
+  } catch (e) {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    return res.status(200).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+// 统一挂载
+app.use("/v1/api", routerImage);
+
 // load router lazily to avoid cyclic/declaration issues
 // --- legacy aliases: must be registered BEFORE catalogRouter mounts ---
 const { default: catalogRouter } = await import("./routes/catalog.js");
@@ -123,39 +180,7 @@ app.get("/v1/catalog/_probe", (_req, res) => {
   });
 });
 
-app.get("/v1/api/image", async (req, res) => {
-  const url = String(req.query.url || "").trim();
-  const format = String(req.query.format || "").toLowerCase();
-  if (!url) return res.status(400).send("missing url");
-  try {
-    const r = await axios.get(url, {
-      responseType: "arraybuffer",
-      timeout: 20000,
-      headers: {
-        "User-Agent": UA,
-        "Accept": "image/avif,image/webp,image/*,*/*;q=0.8",
-        "Accept-Language": "de,en;q=0.8,zh;q=0.6",
-        "Referer": new URL(url).origin + "/",
-      },
-      validateStatus: (s) => s >= 200 && s < 400,
-    });
-
-    const ct = r.headers["content-type"] || "image/jpeg";
-    if (format === "base64") {
-      const base64 = Buffer.from(r.data).toString("base64");
-      return res.json({ ok: true, contentType: ct, base64: `data:${ct};base64,${base64}` });
-    }
-
-    res.set("Content-Type", ct);
-    res.set("Cache-Control", "public, max-age=604800");
-    res.send(r.data);
-  } catch (e) {
-    res.status(502).send("image fetch failed");
-  }
-});
-app.get("/v1/api/image64", (req, res) => {
-  // 把原 query 合并上 format=base64，然后改写成 /v1/api/image 的路径再交给路由器
-  const params = new URLSearchParams({ ...req.query, format: "base64" });
+// [image endpoints replaced by routerImage below]
   req.url = `/v1/api/image?${params.toString()}`;
   app._router.handle(req, res, () => {});
 });
@@ -1256,3 +1281,6 @@ app.get("/v1/catalog.json", __handleCatalogParse);
 const PORT = Number(process.env.PORT || 10000);
 
 app.listen(PORT, () => console.log(`[mvp2-backend] listening on :${PORT}`));
+ 
+
+
