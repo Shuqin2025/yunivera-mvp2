@@ -180,11 +180,6 @@ app.get("/v1/catalog/_probe", (_req, res) => {
   });
 });
 
-// [image endpoints replaced by routerImage below]
-  req.url = `/v1/api/image?${params.toString()}`;
-  app._router.handle(req, res, () => {});
-});
-
 function abs(base, maybe) {
   if (!maybe) return "";
   try {
