@@ -81,7 +81,18 @@ globalThis.toTablePayload = toTablePayload;
 
 // --- app init & middlewares ---
 const app = express();
-app.use(cors());
+app.use(cors({
+  origin: [
+    /^(https?:\/\/)?(www\.)?yunivera\.com$/i,
+    /^(https?:\/\/)?localhost(:\d+)?$/i,
+    /^(https?:\/\/)?[a-z0-9\-]+\.onrender\.com$/i
+  ],
+  methods: ["GET","POST","OPTIONS"],
+  allowedHeaders: ["Content-Type","Accept"],
+  credentials: false,
+}));
+app.options("*", cors());
+app.use((_, res, next) => { res.setHeader("Vary", "Origin"); next(); });
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
 
