@@ -353,15 +353,13 @@ async function runExtractListPage({ url, html, limit = 50, debug = false, hintTy
         desc: p.desc || "",
       }));
       used = (parsedFromRoot.adapter || "") + "+rootScope";
-      debugPart = {
-        ...(debugPart || {}),
-        rootLocator: {
-          selector: rootInfo.selector,
-          confidence: rootInfo.confidence,
-          reason: rootInfo.reason,
-          probes: rootInfo.probes,
-        },
+      let debugPart2 = {
+        selector: rootInfo.selector,
+        confidence: rootInfo.confidence,
+        reason: rootInfo.reason,
+        probes: rootInfo.probes,
       };
+      debugPart = { ...(debugPart || {}), rootLocator: debugPart2 };
     }
   }
 
@@ -377,9 +375,8 @@ async function runExtractListPage({ url, html, limit = 50, debug = false, hintTy
 }
 
 
-
 // ---------------- memoryking enrichment (detail fetch) ----------------
-async function enrichMemorykingItems(items, { max = 30, timeout = 12000 } = {}) {
+async function enrichMemorykingItems(items, { max = 50, timeout = 12000 } = {}) {
   const targets = (Array.isArray(items) ? items : []).filter(x => /memoryking\.de/i.test(String(x?.url || x?.link || ""))).slice(0, max);
 
   await Promise.allSettled(targets.map(async (it) => {
@@ -399,16 +396,13 @@ async function enrichMemorykingItems(items, { max = 30, timeout = 12000 } = {}) 
 
       const $ = cheerio.load(res.data || "");
 
-      // og:image 优先
       let img = $('meta[property="og:image"]').attr('content')
         || $('img#productImage, .product-image img').attr('src')
         || '';
-
       if (img && !/^https?:\/\//i.test(img)) {
         try { img = new URL(img, 'https://www.memoryking.de').toString(); } catch {}
       }
 
-      // 详情页里找 Artikelnummer / sku
       let sku =
         $('[itemprop="sku"]').attr('content') ||
         $('[data-sku]').attr('data-sku') ||
@@ -422,8 +416,11 @@ async function enrichMemorykingItems(items, { max = 30, timeout = 12000 } = {}) 
         } catch {}
       }
 
-      if (img) it.img = it.img || img;
-      if (sku) it.sku = it.sku || sku;
+      const imgIsWeak = !it.img || /loader\.svg|placeholder|spacer\.gif/i.test(String(it.img));
+      if (img && imgIsWeak) it.img = img;
+
+      const skuIsWeak = !it.sku || !/\d/.test(String(it.sku));
+      if (sku && skuIsWeak) it.sku = sku;
 
     } catch (e) {
       try { console.warn('[enrichMemoryking] fail:', (it && it.url) || (it && it.link) || '', String(e).slice(0, 120)); } catch {}
@@ -432,6 +429,7 @@ async function enrichMemorykingItems(items, { max = 30, timeout = 12000 } = {}) 
 
   return items;
 }
+
 // ---------------- parseHandler ----------------
 const router = Router();
 
@@ -510,7 +508,7 @@ const parseHandler = async (req, res) => {
       let structDebug = null;
       try {
         const det = await detectStructure(url, html, hintType || "");
-        if (det && det.type) pageType = String(det.type || "").toLowerCase();
+        if (det and det.type) pageType = String(det.type || "").toLowerCase();
         structDebug = det || null;
       } catch (e) {
         console.warn("[catalog] detectStructure error:", e?.message || e);
@@ -540,6 +538,15 @@ const parseHandler = async (req, res) => {
         }
         try { await snapshot("pre-classify", { url, preClass }); } catch {}
       } catch {}
+    }
+
+    // （关键）Memoryking 详情富化：在映射 rows 之前做
+    if (/memoryking\.de/i.test(url) && Array.isArray(items) && items.length) {
+      try {
+        await enrichMemorykingItems(items, { max: Math.min(items.length, 50), timeout: 12000 });
+      } catch (e) {
+        console.warn("[catalog.parse] enrichMemorykingItems failed:", e?.message || e);
+      }
     }
 
     // 图片转 base64（可选）
@@ -572,10 +579,6 @@ const parseHandler = async (req, res) => {
 
     const fieldsRate = computeFieldsRate(products || []);
     const wantSnapshot = ["1","true","yes","on"].includes(String(qp.snapshot || qp.debug || "").toLowerCase());
-    // Memoryking: enrich items with detail page (sku + img)
-    if (/memoryking\.de/i.test(url) && Array.isArray(items) && items.length) {
-      try { await enrichMemorykingItems(items, { max: Math.min(items.length, 50) }); } catch {}
-    }
 
     // === compatibility normalizer for frontend table ===
 // 兼容不同源字段名：sku/img/desc/link/url/moq/price
@@ -610,23 +613,25 @@ function deriveSku(it = {}) {
   return firstToken || "";
 }
 
+// --- 强化：弱 SKU 与占位图兜底 ---
 function normRow(it = {}) {
   const link = String(it.link ?? it.url ?? "");
-  // 先拿已有/补过的，再判断是否“弱 SKU”（不含数字）
+
+  // 1) SKU：先取 deriveSku；若不含数字 => 用 URL 尾段；仍弱 => 标题首词
   let sku0 = deriveSku(it);
-  if (!\d/.test(String(sku0 || ""))) {
+  if (!/\d/.test(String(sku0 || ""))) {
     try {
       const tail = (new URL(link)).pathname.split('/').filter(Boolean).pop() || "";
-      const fromUrl = tail.replace(/\.(html?|php)$/i, '');
+      const fromUrl = tail.replace(/\.(html?|php)$/i, "");
       if (fromUrl) sku0 = fromUrl;
     } catch {}
-    if (!\d/.test(String(sku0 || ""))) {
-      const first = String(it.title || "").trim().split(/\\s+/)[0] || "";
+    if (!/\d/.test(String(sku0 || ""))) {
+      const first = String(it.title || "").trim().split(/\s+/)[0] || "";
       if (first) sku0 = first;
     }
   }
 
-  // 图片占位兜底：loader.svg/placeholder/spacer.gif 时，尝试用 imgs[] 里的第一个非占位图
+  // 2) 图片：若是占位图（loader.svg/placeholder/spacer.gif），优先从 imgs[] 里挑第一张非占位
   let img0 = pickImg(it);
   const isPlaceholder = /loader\.svg|placeholder|spacer\.gif/i.test(String(img0 || ""));
   if (isPlaceholder && Array.isArray(it.imgs)) {
