@@ -353,15 +353,13 @@ async function runExtractListPage({ url, html, limit = 50, debug = false, hintTy
         desc: p.desc || "",
       }));
       used = (parsedFromRoot.adapter || "") + "+rootScope";
-      debugPart = {
-        ...(debugPart || {}),
-        rootLocator: {
-          selector: rootInfo.selector,
-          confidence: rootInfo.confidence,
-          reason: rootInfo.reason,
-          probes: rootInfo.probes,
-        },
+      let debugPart2 = {
+        selector: rootInfo.selector,
+        confidence: rootInfo.confidence,
+        reason: rootInfo.reason,
+        probes: rootInfo.probes,
       };
+      debugPart = { ...(debugPart || {}), rootLocator: debugPart2 };
     }
   }
 
@@ -540,6 +538,15 @@ const parseHandler = async (req, res) => {
         }
         try { await snapshot("pre-classify", { url, preClass }); } catch {}
       } catch {}
+    }
+
+    // （关键）Memoryking 详情富化：在映射 rows 之前做
+    if (/memoryking\.de/i.test(url) && Array.isArray(items) && items.length) {
+      try {
+        await enrichMemorykingItems(items, { max: Math.min(items.length, 50), timeout: 12000 });
+      } catch (e) {
+        console.warn("[catalog.parse] enrichMemorykingItems failed:", e?.message || e);
+      }
     }
 
     // 图片转 base64（可选）
