@@ -376,6 +376,62 @@ async function runExtractListPage({ url, html, limit = 50, debug = false, hintTy
   return { items, adapter_used: used, debugPart };
 }
 
+
+// ---------------- memoryking enrichment (detail fetch) ----------------
+async function enrichMemorykingItems(items, { max = 50, timeout = 12000 } = {}) {
+  const targets = (Array.isArray(items) ? items : []).filter(x => /memoryking\.de/i.test(String(x?.url || x?.link || ""))).slice(0, max);
+
+  await Promise.allSettled(targets.map(async (it) => {
+    try {
+      const pageUrl = String(it.url || it.link || "");
+      if (!pageUrl) return;
+
+      const res = await axios.get(pageUrl, {
+        timeout,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122 Safari/537.36',
+          'Accept-Language': 'de,en;q=0.8,zh;q=0.6',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+        },
+        validateStatus: () => true,
+      });
+
+      const $ = cheerio.load(res.data || "");
+
+      let img = $('meta[property="og:image"]').attr('content')
+        || $('img#productImage, .product-image img').attr('src')
+        || '';
+      if (img && !/^https?:\/\//i.test(img)) {
+        try { img = new URL(img, 'https://www.memoryking.de').toString(); } catch {}
+      }
+
+      let sku =
+        $('[itemprop="sku"]').attr('content') ||
+        $('[data-sku]').attr('data-sku') ||
+        ($('table, .product-details, .data, body').text().match(/Artikel(?:nummer|[-\s]?Nr\.?)[\s:：]*([A-Z0-9\-_.]+)/i)?.[1]) ||
+        '';
+
+      if (!sku) {
+        try {
+          const tail = (new URL(pageUrl)).pathname.split('/').filter(Boolean).pop() || '';
+          sku = tail.replace(/\.(html?|php)$/i, '').slice(0, 64);
+        } catch {}
+      }
+
+      const imgIsWeak = !it.img || /loader\.svg|placeholder|spacer\.gif/i.test(String(it.img));
+      if (img && imgIsWeak) it.img = img;
+
+      const skuIsWeak = !it.sku || !/\d/.test(String(it.sku));
+      if (sku && skuIsWeak) it.sku = sku;
+
+    } catch (e) {
+      try { console.warn('[enrichMemoryking] fail:', (it && it.url) || (it && it.link) || '', String(e).slice(0, 120)); } catch {}
+    }
+  }));
+
+  return items;
+}
+
 // ---------------- parseHandler ----------------
 const router = Router();
 
