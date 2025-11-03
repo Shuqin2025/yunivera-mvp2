@@ -556,6 +556,12 @@ const parseHandler = async (req, res) => {
         })
       );
     }
+    // 先对 memoryking 做详情富化（补 og:image / sku），再去做标准化映射
+    if (/memoryking\.de/i.test(url) && Array.isArray(items) && items.length) {
+      try { await enrichMemorykingItems(items, { max: Math.min(items.length, 50) }); } catch {}
+    }
+
+
 
     // === 统一输出结构（保持 products & items 供调试） ===
     const products = (items || []).map((it) => ({
@@ -572,12 +578,7 @@ const parseHandler = async (req, res) => {
 
     const fieldsRate = computeFieldsRate(products || []);
     const wantSnapshot = ["1","true","yes","on"].includes(String(qp.snapshot || qp.debug || "").toLowerCase());
-    // Memoryking: enrich items with detail page (sku + img)
-    if (/memoryking\.de/i.test(url) && Array.isArray(items) && items.length) {
-      try { await enrichMemorykingItems(items, { max: Math.min(items.length, 50) }); } catch {}
-    }
-
-    // === compatibility normalizer for frontend table ===
+// === compatibility normalizer for frontend table ===
 // 兼容不同源字段名：sku/img/desc/link/url/moq/price
 function pickImg(it = {}) {
   return String(
@@ -612,8 +613,21 @@ function deriveSku(it = {}) {
 
 function normRow(it = {}) {
   const link = String(it.link ?? it.url ?? "");
+  // 先拿已有/补过的，再判断是否“弱 SKU”（不含数字）
+  let sku0 = deriveSku(it);
+  if (!/\d/.test(String(sku0 || ""))) {
+    try {
+      const tail = (new URL(link)).pathname.split('/').filter(Boolean).pop() || "";
+      const fromUrl = tail.replace(/\.(html?|php)$/i, '');
+      if (fromUrl) sku0 = fromUrl;
+    } catch {}
+    if (!/\d/.test(String(sku0 || ""))) {
+      const first = String(it.title || "").trim().split(/\s+/)[0] || "";
+      if (first) sku0 = first;
+    }
+  }
   return {
-    sku:   deriveSku(it),
+    sku:   sku0,
     title: String(it.title ?? ""),
     img:   pickImg(it),
     desc:  String(it.desc ?? it.description ?? ""),
