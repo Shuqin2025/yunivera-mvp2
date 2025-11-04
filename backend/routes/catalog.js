@@ -1,4 +1,4 @@
-// backend/routes/catalog.js
+/// backend/routes/catalog.js
 // 统一 /parse 输出结构到 rows/data/list/items（含 link/url）
 // 保留适配器 + 兜底，并与 server.js 的 toTablePayload 规范一致
 
