@@ -397,8 +397,16 @@ async function enrichMemorykingItems(items, { max = 50, timeout = 12000 } = {}) 
       const $ = cheerio.load(res.data || "");
 
       let img = $('meta[property="og:image"]').attr('content')
-        || $('img#productImage, .product-image img').attr('src')
+        || $('img#productImage, .product-image img, .product-slider img, picture img').attr('src')
         || '';
+      // MK_SRCSET_FALLBACK
+      if (!img) {
+        const srcset = $('source[srcset], img[srcset]').attr('srcset') || '';
+        if (srcset) {
+          const first = srcset.split(',')[0].trim().split(' ')[0];
+          if (first) img = first;
+        }
+      }
       if (img && !/^https?:\/\//i.test(img)) {
         try { img = new URL(img, 'https://www.memoryking.de').toString(); } catch {}
       }
@@ -712,3 +720,4 @@ router.get("/_probe", (_req, res) => {
 });
 
 export default router;
+
