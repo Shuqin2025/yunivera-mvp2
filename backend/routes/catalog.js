@@ -444,7 +444,18 @@ const parseHandler = async (req, res) => {
     const DEBUG_ENV = process.env.DEBUG === "1" || process.env.DEBUG === "true";
 
     const url = String(qp.url || "").trim();
-    logger.debug(`[route/catalog.parse] url=${url} size=${qp.size ?? ""}`);
+    
+    // --- adapter hint fallback by host (when t not provided) ---
+    let t = (qp.t || qp.type || "").toString().trim();
+    try {
+      const urlHost = new URL(url).hostname;
+      if (!t) {
+        if (/(^|\.)memoryking\.de$/i.test(urlHost)) t = "memoryking";
+        else if (/s-impuls-shop\.de$/i.test(urlHost)) t = "generic-cards";
+      }
+      if (t) hintType = t;
+    } catch {}
+logger.debug(`[route/catalog.parse] url=${url} size=${qp.size ?? ""}`);
     if (!url) return res.status(400).json({ ok: false, error: "missing url" });
 
     const limit = Math.max(1, parseInt(qp.limit ?? 50, 10) || 50);
