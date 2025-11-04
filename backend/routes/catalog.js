@@ -508,7 +508,7 @@ const parseHandler = async (req, res) => {
       let structDebug = null;
       try {
         const det = await detectStructure(url, html, hintType || "");
-        if (det && det.type) pageType = String(det.type || "").toLowerCase();
+        if (det and det.type) pageType = String(det.type || "").toLowerCase();
         structDebug = det || null;
       } catch (e) {
         console.warn("[catalog] detectStructure error:", e?.message || e);
@@ -613,9 +613,15 @@ function deriveSku(it = {}) {
   return firstToken || "";
 }
 
+// --- 绝对化工具 ---
+function abs(base, maybe) {
+  if (!maybe) return "";
+  try { return new URL(maybe, base).href; } catch { return String(maybe); }
+}
 // --- 强化：弱 SKU 与占位图兜底 ---
-function normRow(it = {}) {
-  const link = String(it.link ?? it.url ?? "");
+function normRow(baseUrl, it = {}) {
+  const linkRaw = String(it.link ?? it.url ?? "");
+  const link = abs(baseUrl, linkRaw);
 
   // 1) SKU：先取 deriveSku；若不含数字 => 用 URL 尾段；仍弱 => 标题首词
   let sku0 = deriveSku(it);
@@ -639,6 +645,8 @@ function normRow(it = {}) {
     if (alt) img0 = String(alt);
   }
 
+  img0 = abs(baseUrl, img0);
+
   return {
     sku:   sku0,
     title: String(it.title ?? ""),
@@ -651,7 +659,7 @@ function normRow(it = {}) {
   };
 }
 
-const rows = Array.isArray(items) ? items.map(normRow) : [];
+const rows = Array.isArray(items) ? items.map((it) => normRow(url, it)) : [];
 
 const payload = {
   ok: true,
@@ -701,4 +709,3 @@ router.get("/_probe", (_req, res) => {
 });
 
 export default router;
-
