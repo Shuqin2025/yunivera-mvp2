@@ -508,7 +508,7 @@ const parseHandler = async (req, res) => {
       let structDebug = null;
       try {
         const det = await detectStructure(url, html, hintType || "");
-        if (det and det.type) pageType = String(det.type || "").toLowerCase();
+        if (det && det.type) pageType = String(det.type || "").toLowerCase();
         structDebug = det || null;
       } catch (e) {
         console.warn("[catalog] detectStructure error:", e?.message || e);
@@ -701,3 +701,5 @@ router.get("/_probe", (_req, res) => {
 });
 
 export default router;
+
+
