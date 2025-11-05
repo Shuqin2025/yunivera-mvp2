@@ -109,7 +109,6 @@ routerImage.get("/image", async (req, res) => {
   const format = String(req.query.format || "raw").toLowerCase();
 
   if (!url) {
-    res.setHeader("Access-Control-Allow-Origin", "*");
     return res.status(400).json({ ok: false, error: "missing url" });
   }
 
@@ -131,7 +130,6 @@ routerImage.get("/image", async (req, res) => {
     const ct = String(r.headers["content-type"] || "application/octet-stream");
 
     if (format === "base64") {
-      res.setHeader("Access-Control-Allow-Origin", "*");
       return res.json({
         ok: r.status >= 200 && r.status < 400,
         base64: buf.toString("base64"),
@@ -140,17 +138,16 @@ routerImage.get("/image", async (req, res) => {
       });
     }
 
-    res.setHeader("Access-Control-Allow-Origin", "*");
     res.setHeader("Content-Type", ct || "application/octet-stream");
     res.setHeader("Cache-Control", "public, max-age=86400, immutable");
     return res.status(r.status || 200).send(buf);
   } catch (e) {
-    res.setHeader("Access-Control-Allow-Origin", "*");
     return res.status(200).json({ ok: false, error: String(e?.message || e) });
   }
 });
 
 // 统一挂载
+app.use("/v1/api/image", routerImage);
 app.use("/v1/api", routerImage);
 
 // load router lazily to avoid cyclic/declaration issues
@@ -1276,5 +1273,4 @@ app.get("/v1/catalog.json", __handleCatalogParse);
 const PORT = Number(process.env.PORT || 10000);
 
 app.listen(PORT, () => console.log(`[mvp2-backend] listening on :${PORT}`));
-
  
