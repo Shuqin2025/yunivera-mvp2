@@ -222,7 +222,7 @@ function readListBox($, $box, origin) {
 
   const url = absolutize(href, origin);
 
-  let img = bestFromImgNode($, $box.find("img").first(), origin);
+  let img = bestFromImgNode($, $box.find("img").first(), origin); /* MK_PATCH_SRCSET */
   if (!img) {
     const html = $box.html() || "";
     const extra = scrapeImgsFromHtml(html, origin).filter(u => !/loader\.svg/i.test(u));
