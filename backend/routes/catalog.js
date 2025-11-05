@@ -414,7 +414,7 @@ async function enrichMemorykingItems(items, { max = 50, timeout = 12000 } = {}) 
       let sku =
         $('[itemprop="sku"]').attr('content') ||
         $('[data-sku]').attr('data-sku') ||
-        ($('table, .product-details, .data, body').text().match(/Artikel(?:nummer|[-\s]?Nr\.?)[\s:：]*([A-Z0-9\-_.]+)/i)?.[1]) ||
+        ($('table, .product-details, .data, body').text().match(/(?:Artikel(?:nummer|[-\s]?Nr\.?|\s*No\.?|\s*Number)|Hersteller[-\s]?Nr\.?|Item\s*No\.?)[\s:：]*([A-Z0-9\-_.]+)/i)?.[1]) ||
         '';
 
       if (!sku) {
@@ -720,4 +720,3 @@ router.get("/_probe", (_req, res) => {
 });
 
 export default router;
-
