@@ -414,7 +414,7 @@ async function enrichMemorykingItems(items, { max = 50, timeout = 12000 } = {}) 
       let sku =
         $('[itemprop="sku"]').attr('content') ||
         $('[data-sku]').attr('data-sku') ||
-        ($('table, .product-details, .data, body').text().match(/(?:Artikel(?:nummer|[-\s]?Nr\.?|\s*No\.?|\s*Number)|Hersteller[-\s]?Nr\.?|Item\s*No\.?)[\s:：]*([A-Z0-9\-_.]+)/i)?.[1]) ||
+        ($('table, .product-details, .data, body').text().match(/Artikel(?:nummer|[-\s]?Nr\.?)[\s:：]*([A-Z0-9\-_.]+)/i)?.[1]) ||
         '';
 
       if (!sku) {
@@ -424,7 +424,7 @@ async function enrichMemorykingItems(items, { max = 50, timeout = 12000 } = {}) 
         } catch {}
       }
 
-      const imgIsWeak = !it.img || /loader\.svg|placeholder|spacer\.gif/i.test(String(it.img));
+      const imgIsWeak = !it.img || /loader\.svg|placeholder|spacer\.gif|logo|transparent|imagecache/i.test(String(it.img));
       if (img && imgIsWeak) it.img = img;
 
       const skuIsWeak = !it.sku || !/\d/.test(String(it.sku));
@@ -652,9 +652,9 @@ function normRow(it = {}) {
 
   // 2) 图片：若是占位图（loader.svg/placeholder/spacer.gif），优先从 imgs[] 里挑第一张非占位
   let img0 = pickImg(it);
-  const isPlaceholder = /loader\.svg|placeholder|spacer\.gif/i.test(String(img0 || ""));
+  const isPlaceholder = /loader\.svg|placeholder|spacer\.gif|logo|transparent|imagecache/i.test(String(img0 || ""));
   if (isPlaceholder && Array.isArray(it.imgs)) {
-    const alt = it.imgs.find(x => x && !/loader\.svg|placeholder|spacer\.gif/i.test(String(x)));
+    const alt = it.imgs.find(x => x && !/loader\.svg|placeholder|spacer\.gif|logo|transparent|imagecache/i.test(String(x)));
     if (alt) img0 = String(alt);
   }
 
