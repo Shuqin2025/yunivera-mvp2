@@ -436,6 +436,9 @@ async function enrichMemorykingItems(items, { max = 60, timeout = 12000 } = {}) 
   }));
 
   return items;
+
+// Alias for compatibility with tooling: same behavior, different name
+export async function enrichMemoryking(items, opts) { return enrichMemorykingItems(items, opts); }
 }
 
 // ---------------- parseHandler ----------------
@@ -725,3 +728,4 @@ router.get("/_probe", (_req, res) => {
 });
 
 export default router;
+
