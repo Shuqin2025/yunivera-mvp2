@@ -147,7 +147,6 @@ routerImage.get("/image", async (req, res) => {
 });
 
 // 统一挂载
-app.use("/v1/api/image", routerImage);
 app.use("/v1/api", routerImage);
 
 // load router lazily to avoid cyclic/declaration issues
