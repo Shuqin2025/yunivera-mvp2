@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: yunivera-gateway
+    env: node
+    plan: free
+    buildCommand: |
+      apt-get update && apt-get install -y wget gnupg ca-certificates &&       npm ci &&       npx playwright install --with-deps chromium
+    startCommand: node backend-server.js
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PLAYWRIGHT_BROWSERS_PATH
+        value: 0
+      - key: PLAYWRIGHT_SKIP_VALIDATE_HOST_REQUIREMENTS
+        value: "true"
