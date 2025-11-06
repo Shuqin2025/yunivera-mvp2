@@ -19,10 +19,14 @@ router.get("/", async (req, res) => {
   const format = String(req.query.format || "base64").toLowerCase();
 
   const setCORS = () => {
-    const o = req.headers.origin;
-    if (o) res.setHeader("Access-Control-Allow-Origin", o);
-    res.setHeader("Vary", "Origin");
-  };
+  const o = req.headers.origin;
+  const existing = res.getHeader && res.getHeader("Access-Control-Allow-Origin");
+  // If global CORS already set it, don't set again (avoid multiple values)
+  if (!existing && o) {
+    res.setHeader("Access-Control-Allow-Origin", o);
+  }
+  res.setHeader("Vary", "Origin");
+};
 
   if (!url) {
     setCORS();
