@@ -1226,6 +1226,42 @@ app.get("/v1/catalog.json", __handleCatalogParse);
 
 const PORT = Number(process.env.PORT || 10000);
 
+
+// ✅ 新增图片代理 API 路由
+app.get('/v1/api/image', async (req, res) => {
+  try {
+    const imageUrl = req.query.url;
+    const format = req.query.format || 'base64';
+    if (!imageUrl) return res.status(400).send('Missing image URL');
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+
+    const response = await fetch(imageUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/119 Safari/537.36',
+      },
+      signal: controller.signal
+    });
+    clearTimeout(timeout);
+
+    if (!response.ok) throw new Error(`Failed to fetch image: ${response.statusText}`);
+
+    const contentType = response.headers.get('content-type') || 'image/jpeg';
+    const buffer = await response.buffer();
+
+    if (format === 'raw') {
+      res.set('Content-Type', contentType);
+      res.send(buffer);
+    } else {
+      const base64 = buffer.toString('base64');
+      res.set('Content-Type', 'text/plain');
+      res.send(`data:${contentType};base64,${base64}`);
+    }
+  } catch (err) {
+    console.error('[图片代理失败]', err);
+    res.status(500).send('Image proxy error: ' + err.message);
+  }
+});
+
 app.listen(PORT, () => console.log(`[mvp2-backend] listening on :${PORT}`));
-
-
