@@ -98,7 +98,7 @@ app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
 
 // 图片路由（只挂载一次，避免多层 /image 或重复 CORS）
-app.use("/v1/api/image", imageRouter);
+app.use("/v1/api/image", (req, res, next) => { try { res.removeHeader("Access-Control-Allow-Origin"); } catch {} next(); }, imageRouter);
 
 
 
