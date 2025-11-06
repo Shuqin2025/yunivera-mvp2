@@ -376,7 +376,7 @@ async function runExtractListPage({ url, html, limit = 50, debug = false, hintTy
 
 
 // ---------------- memoryking enrichment (detail fetch) ----------------
-async function enrichMemorykingItems(items, { max = 50, timeout = 12000 } = {}) {
+async function enrichMemorykingItems(items, { max = 60, timeout = 12000 } = {}) {
   const targets = (Array.isArray(items) ? items : []).filter(x => /memoryking\.de/i.test(String(x?.url || x?.link || ""))).slice(0, max);
 
   await Promise.allSettled(targets.map(async (it) => {
@@ -560,9 +560,14 @@ logger.debug(`[route/catalog.parse] url=${url} size=${qp.size ?? ""}`);
     }
 
     // （关键）Memoryking 详情富化：在映射 rows 之前做
-    if (/memoryking\.de/i.test(url) && Array.isArray(items) && items.length) {
+    // 统一 host 判定
+    let baseUrl = String(url || "");
+    let __host = "";
+    try { __host = new URL(baseUrl).hostname.toLowerCase(); } catch {}
+
+    if (/(^|\.)memoryking\.de$/i.test(__host) && Array.isArray(items) && items.length) {
       try {
-        await enrichMemorykingItems(items, { max: Math.min(items.length, 50), timeout: 12000 });
+        await enrichMemorykingItems(items, { max: Math.min(items.length, 60), timeout: 12000 });
       } catch (e) {
         console.warn("[catalog.parse] enrichMemorykingItems failed:", e?.message || e);
       }
