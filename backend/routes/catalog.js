@@ -232,7 +232,7 @@ async function parseMemorykingCatalog(listUrl, limit = 50) {
     });
     const $ = cheerio.load(res.data || "");
     const items = [];
-    $('.product--box, .product--listing .product--box').).each((i, el) => {
+    $('.product--box, .product--listing .product--box').each((i, el) => {
       if (items.length >= limit) return false;
       const title = String($(el).find('.product--title').text() || "").trim();
       const href  = $(el).find('a.product--image, a.product--title').attr('href') || "";
