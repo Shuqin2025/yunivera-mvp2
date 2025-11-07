@@ -4,7 +4,22 @@ import cors from "cors";
 import axios from "axios";
 // --- UA: single source of truth ---
 import * as cheerio from "cheerio";
+import ExcelJS from "exceljs";
 import imageRouter from "./routes/image.js";
+
+async function responseToBuffer(response) {
+  if (typeof response.arrayBuffer === 'function') {
+    const ab = await response.arrayBuffer();
+    return Buffer.from(ab);
+  }
+  if (typeof response.buffer === 'function') {
+    return await response.buffer();
+  }
+  const chunks = [];
+  for await (const c of response.body) chunks.push(Buffer.from(c));
+  return Buffer.concat(chunks);
+}
+
 const UA =
   process.env.SCRAPER_UA ||
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
@@ -1248,7 +1263,7 @@ app.get('/v1/api/image', async (req, res) => {
     if (!response.ok) throw new Error(`Failed to fetch image: ${response.statusText}`);
 
     const contentType = response.headers.get('content-type') || 'image/jpeg';
-    const buffer = await response.buffer();
+    const buffer = await responseToBuffer(response);
 
     if (format === 'raw') {
       res.set('Content-Type', contentType);
@@ -1264,4 +1279,52 @@ app.get('/v1/api/image', async (req, res) => {
   }
 });
 
+
+// === MEMORYKING: extract Artikelnummer ===
+app.get('/v1/api/memoryking/code', async (req, res) => {
+  try {
+    const url = String(req.query.url || '').trim();
+    if (!url) return res.status(400).send('Missing url');
+
+    const r = await fetch(url, { headers: { 'User-Agent': UA, 'Accept-Language': 'de,en;q=0.8' } });
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const html = await r.text();
+
+    const m = html.match(/Artikel(?:nummer|[-\s]?Nr\.?):\s*<\/td>\s*<td[^>]*>(.*?)<\/td>/i);
+    const code = m ? (m[1] || '').replace(/<[^>]+>/g, '').trim() : null;
+    if (!code) return res.status(404).send('Code not found');
+    res.json({ code });
+  } catch (err) {
+    console.error('[CodeExtractor]', err?.message || err);
+    res.status(500).send('Failed to fetch product code');
+  }
+});
+
+// === Excel export demo using ExcelJS ===
+app.get('/v1/api/export', async (req, res) => {
+  try {
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Catalog');
+    sheet.addRow(['Product Name', 'Image']);
+
+    const imageUrl = 'https://www.memoryking.de/media/image/91/3a/4f/123456789.jpg';
+    const r = await fetch(imageUrl, { headers: { 'User-Agent': UA } });
+    if (!r.ok) throw new Error(`Image fetch failed with status ${r.status}`);
+    const buf = await responseToBuffer(r);
+
+    const imgId = workbook.addImage({ buffer: buf, extension: 'jpeg' });
+    sheet.addImage(imgId, 'B2:C10');
+    sheet.getCell('A2').value = 'Sample Product';
+
+    res.setHeader('Content-Type','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition','attachment; filename="export.xlsx"');
+
+    await workbook.xlsx.write(res);
+    res.end();
+  } catch (err) {
+    console.error('[ExportExcel]', err?.message || err);
+    res.status(500).send('Export failed');
+  }
+});
 app.listen(PORT, () => console.log(`[mvp2-backend] listening on :${PORT}`));
+
