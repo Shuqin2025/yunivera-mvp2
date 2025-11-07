@@ -1337,6 +1337,14 @@ app.get('/v1/api/export', async (req, res) => {
     if (!listUrl) return res.status(400).send('Missing url');
 
     const { items = [] } = await parseUniversalCatalog(listUrl, limit, { debug: false });
+    
+app.get('/v1/api/export-xlsx', async (req, res) => {
+  try {
+    const listUrl = String(req.query.url || "").trim();
+    const limit = Math.min(parseInt(req.query.limit || "50", 10) || 50, 200);
+    if (!listUrl) return res.status(400).send('Missing url');
+
+    const { items = [] } = await parseUniversalCatalog(listUrl, limit, { debug: false });
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet('Catalog');
     sheet.addRow(['Title', 'Link', 'Image']);
@@ -1371,7 +1379,50 @@ app.get('/v1/api/export', async (req, res) => {
     res.status(500).send('Export failed');
   }
 });
+
+
+// === Excel export (POST): frontend sends { items, withImages } ===
+app.post('/v1/api/export-xlsx', async (req, res) => {
+  try {
+    const items = Array.isArray(req.body?.items) ? req.body.items : [];
+    const withImages = !!req.body?.withImages;
+    if (!items.length) return res.status(400).send('Missing items');
+
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Catalog');
+    sheet.addRow(['Title', 'Link', 'Image']);
+
+    const base = `${req.protocol}://${req.get('host')}`;
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i] || {};
+      const rowIdx = i + 2;
+      sheet.getCell(`A${rowIdx}`).value = String(it.title || '');
+      sheet.getCell(`B${rowIdx}`).value = String(it.url || it.link || '');
+
+      if (withImages) {
+        const imgUrl = String(it.img || '').trim();
+        if (imgUrl) {
+          try {
+            const proxy = `${base}/v1/api/image?format=raw&url=${encodeURIComponent(imgUrl)}`;
+            const r = await axios.get(proxy, { responseType: 'arraybuffer', timeout: 20000 });
+            const contentType = String(r.headers['content-type'] || 'image/jpeg');
+            const ext = /png/i.test(contentType) ? 'png' : /webp/i.test(contentType) ? 'webp' : /gif/i.test(contentType) ? 'gif' : 'jpeg';
+            const imageId = workbook.addImage({ buffer: Buffer.from(r.data), extension: ext });
+            sheet.addImage(imageId, { tl: { col: 2, row: rowIdx - 1 }, ext: { width: 120, height: 120 } });
+          } catch (e) {
+            console.warn('[export-xlsx POST] image insert failed:', imgUrl, e?.message || e);
+          }
+        }
+      }
+    }
+
+    res.setHeader('Content-Type','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition','attachment; filename="export.xlsx"');
+    await workbook.xlsx.write(res);
+    res.end();
+  } catch (err) {
+    console.error('[ExportExcel POST]', err?.message || err);
+    res.status(500).send('Export failed');
+  }
+});
 app.listen(PORT, () => console.log(`[mvp2-backend] listening on :${PORT}`));
-
-
-
