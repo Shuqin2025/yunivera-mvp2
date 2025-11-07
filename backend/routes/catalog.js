@@ -217,6 +217,34 @@ function genericExtract($, baseUrl, { limit = 50, debug = false } = {}) {
   return { items, debugPart };
 }
 
+
+
+// ---------------- memoryking fallback parser (simple list) ----------------
+async function parseMemorykingCatalog(listUrl, limit = 50) {
+  try {
+    const res = await axios.get(listUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36',
+        'Referer': listUrl
+      },
+      timeout: 20000,
+      validateStatus: () => true
+    });
+    const $ = cheerio.load(res.data || "");
+    const items = [];
+    $('.product--box, .product--listing .product--box').).each((i, el) => {
+      if (items.length >= limit) return false;
+      const title = String($(el).find('.product--title').text() || "").trim();
+      const href  = $(el).find('a.product--image, a.product--title').attr('href') || "";
+      const link  = href && /^https?:/i.test(href) ? href : (href ? new URL(href, listUrl).href : "");
+      let img = $(el).find('img').attr('data-src') || $(el).find('img').attr('src') || "";
+      if (img && img.includes(' ')) { img = img.split(',')[0].trim().split(' ')[0]; }
+      img = img && /^https?:/i.test(img) ? img : (img ? new URL(img, listUrl).href : "");
+      if (title && link) items.push({ title, url: link, link, img, sku:"", price:"", currency:"", moq:"" });
+    });
+    return items;
+  } catch { return []; }
+}
 // ---------------- adapter helpers ----------------
 function chooseAdapter({ url, $, html, hintType, host }) {
   if (hintType) {
@@ -306,6 +334,12 @@ async function runExtractListPage({ url, html, limit = 50, debug = false, hintTy
         used = "memoryking";
       }
       items = mmItems || [];
+      if (!items.length && /memoryking\.de/i.test(url)) {
+        try {
+          const mk = await parseMemorykingCatalog(url, limit);
+          if (Array.isArray(mk) && mk.length) { items = mk; used = 'memoryking-fallback'; }
+        } catch {}
+      }
     }
     else if (which === "template") {
       const tOut = await callTemplateParse(html, url, { limit, debug });
