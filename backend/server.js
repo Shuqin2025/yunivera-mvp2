@@ -818,6 +818,32 @@ async function parseBeamerDetail(detailUrl) {
   }];
 }
 
+
+
+// ========== [1] 添加 MEMORYKING 抓取函数 ==========
+// MEMORYKING 专用采集函数（列表页）- 兜底简化版
+async function parseMemorykingCatalog(listUrl) {
+  try {
+    const res = await axios.get(listUrl, {
+      headers: { 'User-Agent': UA, 'Referer': listUrl },
+      timeout: 20000,
+      validateStatus: s => s >= 200 && s < 400
+    });
+    const $ = cheerio.load(res.data || "");
+    const items = [];
+    $('.product--box, .product--listing .product--box').each((i, el) => {
+      const title = String($(el).find('.product--title').text() || "").trim();
+      const href  = $(el).find('a.product--image, a.product--title').attr('href') || "";
+      const link  = href && /^https?:/i.test(href) ? href : (href ? new URL(href, listUrl).href : "");
+      let img = $(el).find('img').attr('data-src') || $(el).find('img').attr('src') || "";
+      if (img && img.includes(' ')) { img = img.split(',')[0].trim().split(' ')[0]; }
+      img = img && /^https?:/i.test(img) ? img : (img ? new URL(img, listUrl).href : "");
+
+      if (title && link) { items.push({ title, url: link, img, sku: "", price: "", currency: "", moq: "", source: 'memoryking' }); }
+    });
+    return items;
+  } catch { return []; }
+}
 /* ──────────────────────────── 统一入口 ──────────────────────────── */
 async function parseUniversalCatalog(
   listUrl,
@@ -837,7 +863,10 @@ async function parseUniversalCatalog(
       const $ = cheerio.load(html, { decodeEntities: false });
       // NOTE: parseMemoryking should exist in your adapters. If absent, generic flow still works.
       const parseMemoryking = (await import("./adapters/memoryking.js")).default;
-      const items = await parseMemoryking({ $, url: listUrl, rawHtml: html, limit, debug });
+      let items = await parseMemoryking({ $, url: listUrl, rawHtml: html, limit, debug });
+      if (!Array.isArray(items) || items.length === 0) {
+        try { items = await parseMemorykingCatalog(listUrl); adapter = 'memoryking/fallback'; } catch {}
+      }
       return { items, adapter };
     }
 
@@ -1300,25 +1329,41 @@ app.get('/v1/api/memoryking/code', async (req, res) => {
   }
 });
 
-// === Excel export demo using ExcelJS ===
+// === Excel export: parse list URL then embed images via image proxy ===
 app.get('/v1/api/export', async (req, res) => {
   try {
+    const listUrl = String(req.query.url || "").trim();
+    const limit = Math.min(parseInt(req.query.limit || "50", 10) || 50, 200);
+    if (!listUrl) return res.status(400).send('Missing url');
+
+    const { items = [] } = await parseUniversalCatalog(listUrl, limit, { debug: false });
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet('Catalog');
-    sheet.addRow(['Product Name', 'Image']);
+    sheet.addRow(['Title', 'Link', 'Image']);
 
-    const imageUrl = 'https://www.memoryking.de/media/image/91/3a/4f/123456789.jpg';
-    const r = await fetch(imageUrl, { headers: { 'User-Agent': UA } });
-    if (!r.ok) throw new Error(`Image fetch failed with status ${r.status}`);
-    const buf = await responseToBuffer(r);
+    const base = `${req.protocol}://${req.get('host')}`;
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i] || {};
+      const rowIdx = i + 2;
+      sheet.getCell(`A${rowIdx}`).value = String(it.title || '');
+      sheet.getCell(`B${rowIdx}`).value = String(it.url || it.link || '');
 
-    const imgId = workbook.addImage({ buffer: buf, extension: 'jpeg' });
-    sheet.addImage(imgId, 'B2:C10');
-    sheet.getCell('A2').value = 'Sample Product';
+      const imgUrl = String(it.img || '').trim();
+      if (!imgUrl) continue;
+      try {
+        const proxy = `${base}/v1/api/image?format=raw&url=${encodeURIComponent(imgUrl)}`;
+        const r = await axios.get(proxy, { responseType: 'arraybuffer', timeout: 20000 });
+        const contentType = String(r.headers['content-type'] || 'image/jpeg');
+        const ext = /png/i.test(contentType) ? 'png' : /webp/i.test(contentType) ? 'webp' : /gif/i.test(contentType) ? 'gif' : 'jpeg';
+        const imageId = workbook.addImage({ buffer: Buffer.from(r.data), extension: ext });
+        sheet.addImage(imageId, { tl: { col: 2, row: rowIdx - 1 }, ext: { width: 120, height: 120 } });
+      } catch (e) {
+        console.warn('[export] image insert failed:', imgUrl, e?.message || e);
+      }
+    }
 
     res.setHeader('Content-Type','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition','attachment; filename="export.xlsx"');
-
     await workbook.xlsx.write(res);
     res.end();
   } catch (err) {
@@ -1327,4 +1372,6 @@ app.get('/v1/api/export', async (req, res) => {
   }
 });
 app.listen(PORT, () => console.log(`[mvp2-backend] listening on :${PORT}`));
+
+
 
