@@ -1273,7 +1273,7 @@ const PORT = Number(process.env.PORT || 10000);
 
 
 // ✅ 新增图片代理 API 路由
-app.get('/v1/api/image', async (req, res) => {
+const _imageHandler = async (req, res) => {
   try {
     const imageUrl = req.query.url;
     const format = req.query.format || 'base64';
@@ -1307,7 +1307,9 @@ app.get('/v1/api/image', async (req, res) => {
     console.error('[图片代理失败]', err);
     res.status(500).send('Image proxy error: ' + err.message);
   }
-});
+};
+app.get('/v1/api/image', _imageHandler);
+app.get('/v1/image', _imageHandler);
 
 
 // === MEMORYKING: extract Artikelnummer ===
@@ -1333,7 +1335,7 @@ app.get('/v1/api/memoryking/code', async (req, res) => {
 // === Excel export: parse list URL then embed images via image proxy ===
 
 // === Excel export: parse list URL then embed images via image proxy ===
-app.get('/v1/api/export', async (req, res) => {
+const _exportHandlerGET = async (req, res) => {
   try {
     const listUrl = String(req.query.url || "").trim();
     const limit = Math.min(parseInt(req.query.limit || "50", 10) || 50, 200);
@@ -1367,10 +1369,12 @@ app.get('/v1/api/export', async (req, res) => {
     console.error('[ExportExcel]', err?.message || err);
     res.status(500).send('Export failed');
   }
-});
+};
+app.get('/v1/api/export', _exportHandlerGET);
+app.get('/v1/export', _exportHandlerGET);
 
 // === Excel export (GET alias) ===
-app.get('/v1/api/export-xlsx', async (req, res) => {
+const _exportXGet = async (req, res) => {
   try {
     const listUrl = String(req.query.url || "").trim();
     const limit = Math.min(parseInt(req.query.limit || "50", 10) || 50, 200);
@@ -1404,9 +1408,11 @@ app.get('/v1/api/export-xlsx', async (req, res) => {
     console.error('[ExportExcel GET]', err?.message || err);
     res.status(500).send('Export failed');
   }
-});
+};
+app.get('/v1/api/export-xlsx', _exportXGet);
+app.get('/v1/export-xlsx', _exportXGet);
 
-app.post('/v1/api/export-xlsx', async (req, res) => {
+const _exportXPost = async (req, res) => {
   try {
     const items = Array.isArray(req.body?.items) ? req.body.items : [];
     const withImages = !!req.body?.withImages;
@@ -1448,5 +1454,7 @@ app.post('/v1/api/export-xlsx', async (req, res) => {
     console.error('[ExportExcel POST]', err?.message || err);
     res.status(500).send('Export failed');
   }
-});
+};
+app.post('/v1/api/export-xlsx', _exportXPost);
+app.post('/v1/export-xlsx', _exportXPost);
 app.listen(PORT, () => console.log(`[mvp2-backend] listening on :${PORT}`));
