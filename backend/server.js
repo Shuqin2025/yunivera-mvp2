@@ -123,8 +123,6 @@ app.use("/v1/api/image", (req, res, next) => { try { res.removeHeader("Access-Co
 // --- legacy aliases: must be registered BEFORE catalogRouter mounts ---
 const { default: catalogRouter } = await import("./routes/catalog.js");
 app.use("/v1/api/catalog", catalogRouter);
-app.use("/v1/api", catalogRouter);
-
 // health check
 app.get("/v1/health", (_req, res) => res.status(200).json({ ok: true }));
 app.get("/v1/api/health", (_req, res) => res.status(200).json({ ok: true }));
