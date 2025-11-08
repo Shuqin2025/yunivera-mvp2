@@ -97,7 +97,7 @@ const PRIMARY_AREAS = [
 ];
 
 const PRICE_RE = /(?:^|[^\d])(?:(?:€|CHF|PLN|zł|zł\.?|₺|£|\$)\s*)?\d{1,3}(?:[.\s]\d{3})*(?:[,\.\s]\d{2})\s*(?:€|CHF|PLN|zł|zł\.?|₺|£|\$)?/i;
-const NAV_WORDS = ["home","start","audio","video","strom","multimedia","b-run","solar","computer","about","news","contact","company","message","industry","network","impressum","privacy","datenschutz","agb","catalog","katalog","categories","marken","brands","solutions","services","download","downloads","support","produkte","produkteübersicht","sitemap","unternehmensprofil","company-profile","certificate","certificates","quality","about-us"];
+const NAV_WORDS = ["home","start","audio","video","strom","multimedia","b-run","solar","computer"];
 
 function sameOrigin(a, b) {
   try {
@@ -130,17 +130,12 @@ function cleanTitle(txt) {
 function pickImg($el) {
   const $img = $el.find("img").first();
   if ($img.length) {
-    const srcset = $img.attr("srcset") || $img.attr("data-srcset") || "";
-    const list = srcset.split(",").map(s => s.trim().split(/\s+/)[0]).filter(Boolean);
-    const ds = $img.attr("data-src") || "";
-    const s  = $img.attr("src") || "";
-    const cand = [...list, ds, s].filter(Boolean);
-    const prefer = cand.find(u => /\.(jpe?g|png|gif)(\?|$)/i.test(u));
-    return prefer || cand[0] || "";
+    const srcset = $img.attr("srcset") || $img.attr("data-srcset");
+    if (srcset) return srcset.split(",")[0].trim().split(/\s+/)[0];
+    return $img.attr("data-src") || $img.attr("src") || "";
   }
   return "";
 }
-
 
 function nearText($, $el) {
   const txt = $el.text().replace(/\s+/g, " ").trim();
