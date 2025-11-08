@@ -65,7 +65,8 @@ function bestFromImgNode($, $img, origin) {
     if (/\.webp(?:$|\?)/i.test(u)) s += 5;
     return s;
   };
-  return list.sort((a,b)=>score(b)-score(a))[0];
+  const jp = list.find(u=>/\.(jpe?g|png)(?:$|\?)/i.test(u));
+  return jp || list.sort((a,b)=>score(b)-score(a))[0];
 }
 
 function scrapeImgsFromHtml(html, origin) {
