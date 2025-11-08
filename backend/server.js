@@ -5,8 +5,9 @@ import axios from "axios";
 // --- UA: single source of truth ---
 import * as cheerio from "cheerio";
 import ExcelJS from "exceljs";
-import imageRouter from "./routes/image.js"; 
-import genericLinksParser from './lib/modules/parsers/genericLinksParser.js';
+import imageRouter from "./routes/image.js";
+// ✅ 改成真实存在的路径：
+import genericLinksParser from "./lib/parsers/genericLinksParser.js";
 
 async function responseToBuffer(response) {
   if (typeof response.arrayBuffer === 'function') {
