@@ -141,3 +141,15 @@ module.exports = {
   validateEAN13,
   validateEAN8,
 };
+
+/** Added named exports to satisfy adapters */
+export function extractFromHtml($, $scope) {
+  try { return typeof _extractFromHtml === 'function' ? _extractFromHtml($, $scope) : {}; } catch { return {}; }
+}
+export function pickBestId(candidates = {}) {
+  try {
+    const arr = Object.entries(candidates).map(([k,v]) => ({ key:k, id:String(v||"").trim() })).filter(x=>x.id);
+    arr.sort((a,b)=>b.id.length - a.id.length);
+    return arr[0] || { key:"", id:"" };
+  } catch { return { key:"", id:"" }; }
+}
