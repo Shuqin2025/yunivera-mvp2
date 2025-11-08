@@ -1,4 +1,6 @@
-// backend/lib/modules/artikelExtractor.js
+// backend/lib/modules/artikelExtractor.js (ESM clean version)
+// Extract EAN-13/8 and SKU-like strings from HTML/text and pick the best identifier.
+
 const LABELS = [
   // de
   /artikel[-\s]?nr\.?/i, /art\.\s?nr\.?/i, /hersteller[-\s]?nr\.?/i,
@@ -40,7 +42,7 @@ function extractEANs(text) {
 
   // 1) 带标签的 EAN
   EAN_LABELS.forEach(lbl => {
-    const re = new RegExp(`${lbl.source}\\s*[:：]?\\s*([0-9]{8}|[0-9]{13})`, 'ig');
+    const re = new RegExp(`${lbl.source}\s*[:：]?\s*([0-9]{8}|[0-9]{13})`, 'ig');
     let m;
     while ((m = re.exec(t))) {
       const c = m[1];
@@ -68,7 +70,7 @@ function extractSKUs(text) {
 
   // 1) 标签 + 值
   LABELS.forEach(lbl => {
-    const re = new RegExp(`${lbl.source}\\s*[:：]?\\s*([A-Za-z0-9._\\-\\/]{3,})`, 'ig');
+    const re = new RegExp(`${lbl.source}\s*[:：]?\s*([A-Za-z0-9._\-\/]{3,})`, 'ig');
     let m;
     while ((m = re.exec(t))) {
       const v = m[1].replace(/[,;)\]}]+$/, ''); // 末尾收尾符
@@ -78,25 +80,22 @@ function extractSKUs(text) {
     }
   });
 
-  // 2) URL 段中的候选（如 /sku/ABC-123 或 ?sku=ABC-123）
+  // 2) URL 段中的候选（如 ?sku=ABC-123）
   const urlRe = /\b(?:sku|art(?:ikel)?-?nr|pn|p\/n|part(?:no|number)?)=([A-Za-z0-9._\-\/]{3,})/ig;
   let m2;
   while ((m2 = urlRe.exec(t))) out.add(m2[1]);
   return Array.from(out);
 }
 
-function extractFromText(text) {
+export function extractFromText(text) {
   const eans = extractEANs(text);
   const skus = extractSKUs(text);
   return { eans, skus };
 }
 
-function extractFromHtml($, root) {
-  // 在 HTML 中找常见位置
+export function extractFromHtml($, root) {
   const $root = root ? $(root) : $.root();
-
-  // 组装一个“搜索文本池”
-  let bag = [];
+  const bag = [];
 
   // 1) 常见详情区域
   $root.find(`
@@ -120,11 +119,10 @@ function extractFromHtml($, root) {
   return extractFromText(text);
 }
 
-// 挑一个“最稳”的唯一编号：优先 EAN(13/8) → SKU(最像料号/含字母或连字符)
-function pickBestId({ eans = [], skus = [] } = {}) {
+// 挑一个“最稳”的唯一编号：优先 EAN(13/8) → SKU(更像料号者)
+export function pickBestId({ eans = [], skus = [] } = {}) {
   if (eans.length) return { id: eans[0], type: eans[0].length === 13 ? 'EAN13' : 'EAN8' };
   if (skus.length) {
-    // 简单排序：含字母/连字符优先，长度适中优先
     const sorted = skus.slice().sort((a, b) => {
       const score = s => (/[A-Za-z]/.test(s) ? 2 : 0) + (/-|_/.test(s) ? 1 : 0) - Math.abs(10 - s.length) * 0.1;
       return score(b) - score(a);
@@ -134,18 +132,4 @@ function pickBestId({ eans = [], skus = [] } = {}) {
   return { id: '', type: '' };
 }
 
-
-/** Added named exports to satisfy adapters */
-export function extractFromHtml($, $scope) {
-  try { return typeof _extractFromHtml === 'function' ? _extractFromHtml($, $scope) : {}; } catch { return {}; }
-}
-export function pickBestId(candidates = {}) {
-  try {
-    const arr = Object.entries(candidates).map(([k,v]) => ({ key:k, id:String(v||"").trim() })).filter(x=>x.id);
-    arr.sort((a,b)=>b.id.length - a.id.length);
-    return arr[0] || { key:"", id:"" };
-  } catch { return { key:"", id:"" }; }
-}
-// ---- ESM exports (added) ----
-export { extractFromHtml, extractFromText, pickBestId };
 export default { extractFromHtml, extractFromText, pickBestId };
