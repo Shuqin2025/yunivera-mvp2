@@ -221,6 +221,18 @@ function extFromContentType(ct = "") {
 }
 
 async function fetchImageBuffer(imgUrl) {
+  // Proxy-first to normalize content-type for Excel embedding
+  try {
+    const base = `${globalThis.thisReqProtocol || 'https'}://${globalThis.thisReqHost || ''}`;
+    const proxy = `${base}/v1/api/image?format=raw&url=${encodeURIComponent(imgUrl)}`;
+    const resp = await axios.get(proxy, { responseType: "arraybuffer", timeout: 15000, validateStatus: s => s>=200 && s<400 });
+    const ct = String(resp.headers["content-type"] || "");
+    if (/(jpeg|jpg|png|gif)/i.test(ct)) {
+      const ext = /png/i.test(ct) ? "png" : /gif/i.test(ct) ? "gif" : "jpeg";
+      return { buffer: Buffer.from(resp.data), extension: ext };
+    }
+  } catch {}
+
   const origin = (() => { try { return new URL(imgUrl).origin; } catch { return undefined; } })();
 
   // 1) axios direct
@@ -230,7 +242,7 @@ async function fetchImageBuffer(imgUrl) {
       headers: {
         "User-Agent": UA,
         "Referer": origin || imgUrl,
-        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8"
+        "Accept": "image/avif,image/jpeg,image/png,image/*,*/*;q=0.8"
       },
       timeout: 15000,
       validateStatus: (s) => s >= 200 && s < 400
