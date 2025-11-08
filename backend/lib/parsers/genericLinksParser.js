@@ -1,19 +1,23 @@
-// backend/lib/parsers/genericLinksParser.js (STANDALONE VERSION)
-// This version inlines helpers so it does NOT import ../modules/parsingUtils.js
-// Drop-in replacement to fix ERR_MODULE_NOT_FOUND on parsingUtils.js
+// backend/adapters/genericLinksParser.js
+// Express 路由模块（ESM），提供 POST /adapters/generic-links
+// 请求体：{ url: string, html?: string, scope?: string }
+// 若未传 html，则会按 url 抓取页面；最终返回 parseGenericLinks() 的结构化结果。
 
-import { URL } from "url";
+import express from "express";
+import * as cheerio from "cheerio";
 import loggerBase from "../logger.js";
+
+// Node 18+ 自带 fetch；兼容性兜底
+const fetchFn = globalThis.fetch ?? (await import("node-fetch")).default;
 const logger = loggerBase || console;
 
-// ===== Inlined helpers (cleanText, absolutize, splitSkuAndName, normalizePrice) =====
+const router = express.Router();
+
+// ===== 辅助函数（与旧 parser 同源，做了路由化与方法收口） =====
 
 function cleanText(s = "") {
   try {
-    return String(s)
-      .replace(/\s+/g, " ")
-      .replace(/[\u00A0\u200B\u200C\u200D]+/g, " ")
-      .trim();
+    return String(s).replace(/\s+/g, " ").replace(/[\u00A0\u200B\u200C\u200D]+/g, " ").trim();
   } catch {
     return s || "";
   }
@@ -35,9 +39,7 @@ function splitSkuAndName(raw = "") {
   const s = cleanText(raw);
   if (!s) return { sku: "", rest: "" };
   const m = s.match(/^([A-Za-z0-9._\-\/]+)\s+(.+)$/);
-  if (m) {
-    return { sku: m[1], rest: m[2] };
-  }
+  if (m) return { sku: m[1], rest: m[2] };
   return { sku: s, rest: "" };
 }
 
@@ -63,16 +65,11 @@ function normalizePrice(str = "") {
     }
   }
   if (!numeric && tokens.length) numeric = tokens[tokens.length - 1] || "";
-  if (numeric.includes(",") && !numeric.includes(".")) {
-    numeric = numeric.replace(",", ".");
-  } else if ((numeric.match(/\./g) || []).length > 1) {
-    numeric = numeric.replace(/\.(?=\d{3}(\D|$))/g, "");
-  }
+  if (numeric.includes(",") && !numeric.includes(".")) numeric = numeric.replace(",", ".");
+  else if ((numeric.match(/\./g) || []).length > 1) numeric = numeric.replace(/\.(?=\d{3}(\D|$))/g, "");
   const final = numeric.match(/-?\d+(\.\d+)?/);
   return { price: final ? final[0] : "", currency: currency || "" };
 }
-
-// ===== Parser constants & helpers =====
 
 const MAX_RESULTS = 200;
 const MIN_PRIMARY_HITS = 6;
@@ -104,12 +101,9 @@ const NAV_WORDS = ["home","start","audio","video","strom","multimedia","b-run","
 
 function sameOrigin(a, b) {
   try {
-    const A = new URL(a);
-    const B = new URL(b);
+    const A = new URL(a); const B = new URL(b);
     return A.origin === B.origin;
-  } catch {
-    return false;
-  }
+  } catch { return false; }
 }
 
 function isAssetHref(href) {
@@ -124,13 +118,11 @@ function includesAny(haystack, words) {
 function cleanTitle(txt) {
   if (!txt) return "";
   let t = txt.replace(/\s+/g, " ").trim();
-
   t = t.replace(/\b(add to cart|in den warenkorb|jetzt kaufen|buy now)\b/gi, "");
   t = t
     .replace(/\b(home|start|audio|video|strom|multimedia|b-run|solar)\b/gi, " ")
     .replace(/\s+/g, " ")
     .trim();
-
   if (t.length > 140) t = t.slice(0, 140).trim();
   return t;
 }
@@ -139,15 +131,8 @@ function pickImg($el) {
   const $img = $el.find("img").first();
   if ($img.length) {
     const srcset = $img.attr("srcset") || $img.attr("data-srcset");
-    if (srcset) {
-      const first = srcset.split(",")[0].trim().split(/\s+/)[0];
-      return first;
-    }
-    return (
-      $img.attr("data-src") ||
-      $img.attr("src") ||
-      ""
-    );
+    if (srcset) return srcset.split(",")[0].trim().split(/\s+/)[0];
+    return $img.attr("data-src") || $img.attr("src") || "";
   }
   return "";
 }
@@ -161,34 +146,26 @@ function scoreHref(href, text) {
   let score = 0;
   const sHref = (href || "").toLowerCase();
   const sTxt = (text || "").toLowerCase();
-
   if (PRODUCTY_HINTS.some((h) => sHref.includes(h))) score += 3;
   if (PRICE_RE.test(sTxt)) score += 2;
   if (includesAny(sTxt, NAV_WORDS)) score -= 2;
   if (/(?:\/p\/|\/pd\/|\/detail|\/details|\/produkt|\/product)/.test(sHref)) score += 2;
   if (isAssetHref(sHref) || sHref.startsWith("#")) score -= 3;
-
   return score;
 }
 
 function looksLikeJunk(text, hrefAbs, pageUrl) {
   if (!sameOrigin(pageUrl, hrefAbs)) return true;
   if (isAssetHref(hrefAbs)) return true;
-
   const lower = (text || "").toLowerCase();
   if (includesAny(lower, JUNK_KEYWORDS)) return true;
-
   const hp = hrefAbs.toLowerCase();
   if (/(impressum|privacy|datenschutz|agb|terms|policy|kontakt|contact|login|account|register)/.test(hp)) return true;
   return false;
 }
 
 function absUrl(base, href) {
-  try {
-    return new URL(href, base).toString();
-  } catch {
-    return null;
-  }
+  try { return new URL(href, base).toString(); } catch { return null; }
 }
 
 function extractPriceFrom($, $scope) {
@@ -198,14 +175,10 @@ function extractPriceFrom($, $scope) {
 }
 
 function uniqBy(arr, keyFn) {
-  const seen = new Set();
-  const out = [];
+  const seen = new Set(); const out = [];
   for (const it of arr) {
     const k = keyFn(it);
-    if (!seen.has(k)) {
-      seen.add(k);
-      out.push(it);
-    }
+    if (!seen.has(k)) { seen.add(k); out.push(it); }
   }
   return out;
 }
@@ -218,7 +191,6 @@ function finalize(products, pageUrl) {
       const priceInfo = normalizePrice(p.price || "");
       const urlAbs = absolutize(p.url || p.link || "", pageUrl);
       const imgAbs = absolutize(p.img || "", pageUrl);
-
       return {
         sku: sku || "",
         title: rest || titleClean,
@@ -233,12 +205,10 @@ function finalize(products, pageUrl) {
     .slice(0, MAX_RESULTS);
 }
 
-// ---------- extraction strategies ----------
-
+// —— 抽取策略 —— //
 async function parseByPrimaryAreas($, pageUrl, log) {
   const items = [];
   const areas = PRIMARY_AREAS.join(",");
-
   $(areas).each((_, area) => {
     const $area = $(area);
     const cards = $area.find(`
@@ -246,7 +216,6 @@ async function parseByPrimaryAreas($, pageUrl, log) {
       li, article, .grid__item, .box, .tile
     `);
     if (!cards.length) return;
-
     cards.each((__, card) => {
       const $card = $(card);
       let $a = $card.find("a[href]").filter((i, a) => {
@@ -254,7 +223,6 @@ async function parseByPrimaryAreas($, pageUrl, log) {
         return !href.startsWith("#");
       }).first();
       if (!$a.length) return;
-
       const hrefAbs = absUrl(pageUrl, $a.attr("href"));
       if (!hrefAbs) return;
 
@@ -272,47 +240,31 @@ async function parseByPrimaryAreas($, pageUrl, log) {
         $card.find("[data-price]").attr("data-price") ||
         extractPriceFrom($, $card);
 
-      items.push({
-        url: hrefAbs,
-        title,
-        price,
-        img: pickImg($card),
-      });
+      items.push({ url: hrefAbs, title, price, img: pickImg($card) });
     });
   });
-
   log.debug?.(`[generic-links] primary areas extracted: ${items.length}`);
   return items;
 }
 
 async function parseByDeepAnchors($, pageUrl, log) {
   const candidates = [];
-
   $("a[href]").each((_, a) => {
     const $a = $(a);
     const rawHref = $a.attr("href") || "";
     const hrefAbs = absUrl(pageUrl, rawHref);
     if (!hrefAbs) return;
 
-    const text = cleanTitle(
-      $a.attr("title") || $a.text() || $a.find("img").attr("alt") || ""
-    );
+    const text = cleanTitle($a.attr("title") || $a.text() || $a.find("img").attr("alt") || "");
     if (!text) return;
     if (looksLikeJunk(text, hrefAbs, pageUrl)) return;
 
     const $card = $a.closest("article, li, .card, .product, .product-card, .productbox, .grid__item, .tile, .box");
     const price = $card.length ? extractPriceFrom($, $card) : "";
-
     const s = scoreHref(hrefAbs, `${text} ${price}`);
     if (s <= 0) return;
 
-    candidates.push({
-      url: hrefAbs,
-      title: text,
-      price,
-      score: s,
-      img: pickImg($card.length ? $card : $a),
-    });
+    candidates.push({ url: hrefAbs, title: text, price, score: s, img: pickImg($card.length ? $card : $a) });
   });
 
   const unique = uniqBy(candidates, (it) => it.url);
@@ -322,12 +274,10 @@ async function parseByDeepAnchors($, pageUrl, log) {
   return top;
 }
 
-// ---------- main ----------
-
-export default async function genericLinksParser(ctx) {
-  const { $, url: pageUrl, scope } = ctx;
-  const log = ctx.logger || logger;
-
+// —— 核心解析：对外方法 —— //
+export async function parseGenericLinks({ html, url: pageUrl, scope }) {
+  const log = logger;
+  const $ = cheerio.load(html, { decodeEntities: true });
   try {
     let items = await parseByPrimaryAreas($, pageUrl, log);
     if (items.length < MIN_PRIMARY_HITS) {
@@ -335,31 +285,59 @@ export default async function genericLinksParser(ctx) {
       const deep = await parseByDeepAnchors($, pageUrl, log);
       items = uniqBy([...items, ...deep], (it) => it.url);
     }
-
     const products = finalize(items, pageUrl);
     log.info?.(`[generic-links] done for ${pageUrl} (scope=${scope || "full"}) => ${products.length} items`);
-
     if (!products.length) {
       log.warn?.("[links] NoProductFound in generic-links parser");
       log.warn?.(`[NoProductFound] ${pageUrl} (generic-links scope=${scope || "full"})`);
     }
-
-    return {
-      ok: true,
-      adapter: "generic-links",
-      url: pageUrl,
-      count: products.length,
-      products,
-    };
+    return { ok: true, adapter: "generic-links", url: pageUrl, count: products.length, products };
   } catch (e) {
     log.error?.(`[generic-links] error on ${pageUrl}: ${e.message}`);
-    return {
-      ok: false,
-      adapter: "generic-links",
-      url: pageUrl,
-      count: 0,
-      products: [],
-      error: e.message,
-    };
+    return { ok: false, adapter: "generic-links", url: pageUrl, count: 0, products: [], error: e.message };
   }
 }
+
+// —— 路由：POST /adapters/generic-links —— //
+router.post("/generic-links", express.json({ limit: "1mb" }), async (req, res) => {
+  try {
+    const { url, html: htmlFromBody, scope } = req.body || {};
+    if (!url && !htmlFromBody) {
+      return res.status(400).json({ ok: false, error: "url 或 html 至少提供一个" });
+    }
+
+    let pageUrl = url;
+    let html = htmlFromBody;
+
+    if (!html) {
+      if (!/^https?:\/\//i.test(url)) {
+        return res.status(400).json({ ok: false, error: "无效的 URL" });
+      }
+      const r = await fetchFn(url, {
+        headers: {
+          "user-agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36",
+          "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        },
+      });
+      if (!r.ok) {
+        return res.status(502).json({ ok: false, error: `抓取失败：HTTP ${r.status}` });
+      }
+      html = await r.text();
+      pageUrl = r.url || url;
+    }
+
+    const result = await parseGenericLinks({ html, url: pageUrl, scope });
+    res.status(result.ok ? 200 : 500).json(result);
+  } catch (err) {
+    logger.error?.(`[/adapters/generic-links] ${err?.stack || err?.message}`);
+    res.status(500).json({ ok: false, error: err?.message || "UNKNOWN" });
+  }
+});
+
+export default router;
+
+// —— 可选：让主应用轻松挂载 ——
+// 在 app.js 里：
+//   import genericLinksRouter from "./adapters/genericLinksParser.js";
+//   app.use("/adapters", genericLinksRouter);
