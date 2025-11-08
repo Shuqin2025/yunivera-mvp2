@@ -5,7 +5,9 @@
  */
 
 import * as cheerio from "cheerio";
-import { extractFromHtml, pickBestId } from "../lib/modules/artikelExtractor.js";
+import * as artikel from "../lib/modules/artikelExtractor.js";
+const extractFromHtml = artikel.extractFromHtml || (artikel.default && artikel.default.extractFromHtml);
+const pickBestId = artikel.pickBestId || (artikel.default && artikel.default.pickBestId);
 import { pickBestImageFromImgNode as pickBestImage, absolutize as __abs } from "../lib/modules/crawler.js";
 import { fetchHtml } from "../lib/http.js";
 
