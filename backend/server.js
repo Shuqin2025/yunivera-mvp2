@@ -1275,37 +1275,53 @@ const PORT = Number(process.env.PORT || 10000);
 // ✅ 新增图片代理 API 路由
 const _imageHandler = async (req, res) => {
   try {
-    const imageUrl = req.query.url;
-    const format = req.query.format || 'base64';
-    if (!imageUrl) return res.status(400).send('Missing image URL');
+    const imageUrl = String(req.query.url || "");
+    const format = String(req.query.format || "base64");
+    if (!imageUrl) return res.status(400).send("Missing image URL");
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10000);
+    async function fetchOnce(preferJpeg = False) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 12000);
+      try {
+        const r = await fetch(imageUrl, {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+            "Accept": preferJpeg ? "image/avif,image/jpeg,image/png,*/*" : "image/avif,image/webp,image/jpeg,image/png,*/*",
+            "Referer": new URL(imageUrl).origin + "/"
+          },
+          signal: controller.signal
+        });
+        return r;
+      } finally { clearTimeout(timeout); }
+    }
 
-    const response = await fetch(imageUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/119 Safari/537.36',
-      },
-      signal: controller.signal
-    });
-    clearTimeout(timeout);
+    let response = await fetchOnce(false);
+    let contentType = response.headers.get("content-type") || "application/octet-stream";
 
-    if (!response.ok) throw new Error(`Failed to fetch image: ${response.statusText}`);
+    if (/webp/i.test(contentType)) {
+      try {
+        const alt = await fetchOnce(true);
+        if (alt && alt.ok) {
+          response = alt;
+          contentType = alt.headers.get("content-type") || contentType;
+        }
+      } catch {}
+    }
 
-    const contentType = response.headers.get('content-type') || 'image/jpeg';
+    if (!response.ok) throw new Error(`Failed to fetch image: ${response.status} ${response.statusText}`);
     const buffer = await responseToBuffer(response);
 
-    if (format === 'raw') {
-      res.set('Content-Type', contentType);
-      res.send(buffer);
+    if (format === "raw") {
+      res.set("Content-Type", contentType);
+      return res.send(buffer);
     } else {
-      const base64 = buffer.toString('base64');
-      res.set('Content-Type', 'text/plain');
-      res.send(`data:${contentType};base64,${base64}`);
+      const base64 = buffer.toString("base64");
+      res.set("Content-Type", "text/plain");
+      return res.send(`data:${contentType};base64,${base64}`);
     }
   } catch (err) {
-    console.error('[图片代理失败]', err);
-    res.status(500).send('Image proxy error: ' + err.message);
+    console.error("[image proxy]", err?.message || err);
+    res.status(500).send("Image proxy error: " + (err?.message || "UNKNOWN"));
   }
 };
 app.get('/v1/api/image', _imageHandler);
@@ -1344,6 +1360,9 @@ const _exportHandlerGET = async (req, res) => {
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet('Catalog');
     sheet.addRow(['Title', 'Link', 'Image']);
+sheet.getColumn(1).width = 48;
+sheet.getColumn(2).width = 12;
+sheet.getColumn(3).width = 18;
     const base = `${req.protocol}://${req.get('host')}`;
     for (let i = 0; i < items.length; i++) {
       const it = items[i] || {};
@@ -1383,6 +1402,9 @@ const _exportXGet = async (req, res) => {
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet('Catalog');
     sheet.addRow(['Title', 'Link', 'Image']);
+sheet.getColumn(1).width = 48;
+sheet.getColumn(2).width = 12;
+sheet.getColumn(3).width = 18;
     const base = `${req.protocol}://${req.get('host')}`;
     for (let i = 0; i < items.length; i++) {
       const it = items[i] || {};
@@ -1421,6 +1443,9 @@ const _exportXPost = async (req, res) => {
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet('Catalog');
     sheet.addRow(['Title', 'Link', 'Image']);
+sheet.getColumn(1).width = 48;
+sheet.getColumn(2).width = 12;
+sheet.getColumn(3).width = 18;
 
     const base = `${req.protocol}://${req.get('host')}`;
     for (let i = 0; i < items.length; i++) {
