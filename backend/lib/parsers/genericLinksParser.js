@@ -141,7 +141,6 @@ function pickImg($el) {
   return "";
 }
 
-}
 
 function nearText($, $el) {
   const txt = $el.text().replace(/\s+/g, " ").trim();
