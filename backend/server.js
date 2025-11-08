@@ -1,4 +1,4 @@
-import { detectStructure } from './lib/structureDetector.js';
+ import { detectStructure } from './lib/structureDetector.js';
 import express from "express";
 import cors from "cors";
 import axios from "axios";
@@ -6,8 +6,7 @@ import axios from "axios";
 import * as cheerio from "cheerio";
 import ExcelJS from "exceljs";
 import imageRouter from "./routes/image.js";
-// ✅ 改成真实存在的路径：
-import genericLinksParser from "./lib/parsers/genericLinksParser.js";
+import genericLinksParser from './adapters/genericLinksParser.js';
 
 async function responseToBuffer(response) {
   if (typeof response.arrayBuffer === 'function') {
@@ -868,7 +867,47 @@ async function parseUniversalCatalog(
       if (!Array.isArray(items) || items.length === 0) {
         try { items = await parseMemorykingCatalog(listUrl); adapter = 'memoryking/fallback'; } catch {}
       }
-      return { items, adapter };
+      
+      // Enhance: fetch detail pages to fill SKU & better image for first few items
+      try {
+        let fixed = 0;
+        for (let i = 0; i < Math.min(items.length, 30); i++) {
+          const it = items[i] || {};
+          if ((!it || !it.url) || (it.sku && it.sku.trim())) continue;
+          try {
+            const html2 = await fetchHtml(it.url);
+            const $2 = cheerio.load(typeof html2 === 'string' ? html2 : (html2?.html || ''), { decodeEntities: false });
+            let sku = '';
+            const bodyTxt = $2('body').text();
+            const m1 = bodyTxt && bodyTxt.match(/(?:Artikel\s*[-–—]?\s*Nr|Artikelnummer|Art\.\s*[-–—]?\s*Nr)\.?\s*[:#]?\s*([A-Za-z0-9._\-\/]+)/i);
+            if (m1 && m1[1]) sku = m1[1].trim();
+            if (!sku) {
+              $2('script[type="application/ld+json"]').each((_i, el) => {
+                try {
+                  const data = JSON.parse($2(el).contents().text() || "{}");
+                  const walk = (o) => {
+                    if (!o || typeof o !== "object") return "";
+                    const v = o.sku || o.mpn || o.productID || o.productId || "";
+                    if (v) return String(v);
+                    if (Array.isArray(o)) for (const x of o) { const r = walk(x); if (r) return r; }
+                    for (const k of Object.keys(o)) { const r = walk(o[k]); if (r) return r; }
+                    return "";
+                  };
+                  const v = walk(data);
+                  if (v) { sku = String(v); }
+                } catch {}
+              });
+            }
+            if (sku) { it.sku = sku; fixed++; }
+            if (!it.img) {
+              const og = $2('meta[property="og:image"]').attr('content') || '';
+              if (og) it.img = og;
+            }
+          } catch {}
+        }
+        if (fixed) console.log('[memoryking] enriched SKU for', fixed, 'items');
+      } catch {}
+    
     }
 
     // （示例）其它专用适配器保持不动
@@ -1273,59 +1312,41 @@ const PORT = Number(process.env.PORT || 10000);
 
 
 // ✅ 新增图片代理 API 路由
-const _imageHandler = async (req, res) => {
+app.get('/v1/api/image', async (req, res) => {
   try {
-    const imageUrl = String(req.query.url || "");
-    const format = String(req.query.format || "base64");
-    if (!imageUrl) return res.status(400).send("Missing image URL");
+    const imageUrl = req.query.url;
+    const format = req.query.format || 'base64';
+    if (!imageUrl) return res.status(400).send('Missing image URL');
 
-    async function fetchOnce(preferJpeg = False) {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 12000);
-      try {
-        const r = await fetch(imageUrl, {
-          headers: {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
-            "Accept": preferJpeg ? "image/avif,image/jpeg,image/png,*/*" : "image/avif,image/webp,image/jpeg,image/png,*/*",
-            "Referer": new URL(imageUrl).origin + "/"
-          },
-          signal: controller.signal
-        });
-        return r;
-      } finally { clearTimeout(timeout); }
-    }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
 
-    let response = await fetchOnce(false);
-    let contentType = response.headers.get("content-type") || "application/octet-stream";
+    const response = await fetch(imageUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/119 Safari/537.36',
+      },
+      signal: controller.signal
+    });
+    clearTimeout(timeout);
 
-    if (/webp/i.test(contentType)) {
-      try {
-        const alt = await fetchOnce(true);
-        if (alt && alt.ok) {
-          response = alt;
-          contentType = alt.headers.get("content-type") || contentType;
-        }
-      } catch {}
-    }
+    if (!response.ok) throw new Error(`Failed to fetch image: ${response.statusText}`);
 
-    if (!response.ok) throw new Error(`Failed to fetch image: ${response.status} ${response.statusText}`);
+    const contentType = response.headers.get('content-type') || 'image/jpeg';
     const buffer = await responseToBuffer(response);
 
-    if (format === "raw") {
-      res.set("Content-Type", contentType);
-      return res.send(buffer);
+    if (format === 'raw') {
+      res.set('Content-Type', contentType);
+      res.send(buffer);
     } else {
-      const base64 = buffer.toString("base64");
-      res.set("Content-Type", "text/plain");
-      return res.send(`data:${contentType};base64,${base64}`);
+      const base64 = buffer.toString('base64');
+      res.set('Content-Type', 'text/plain');
+      res.send(`data:${contentType};base64,${base64}`);
     }
   } catch (err) {
-    console.error("[image proxy]", err?.message || err);
-    res.status(500).send("Image proxy error: " + (err?.message || "UNKNOWN"));
+    console.error('[图片代理失败]', err);
+    res.status(500).send('Image proxy error: ' + err.message);
   }
-};
-app.get('/v1/api/image', _imageHandler);
-app.get('/v1/image', _imageHandler);
+});
 
 
 // === MEMORYKING: extract Artikelnummer ===
@@ -1351,7 +1372,7 @@ app.get('/v1/api/memoryking/code', async (req, res) => {
 // === Excel export: parse list URL then embed images via image proxy ===
 
 // === Excel export: parse list URL then embed images via image proxy ===
-const _exportHandlerGET = async (req, res) => {
+app.get('/v1/api/export', async (req, res) => {
   try {
     const listUrl = String(req.query.url || "").trim();
     const limit = Math.min(parseInt(req.query.limit || "50", 10) || 50, 200);
@@ -1360,40 +1381,43 @@ const _exportHandlerGET = async (req, res) => {
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet('Catalog');
     sheet.addRow(['Title', 'Link', 'Image']);
-sheet.getColumn(1).width = 48;
-sheet.getColumn(2).width = 12;
-sheet.getColumn(3).width = 18;
+    sheet.getColumn(1).width = 48;
+    sheet.getColumn(2).width = 12;
+    sheet.getColumn(3).width = 18;
     const base = `${req.protocol}://${req.get('host')}`;
     for (let i = 0; i < items.length; i++) {
       const it = items[i] || {};
       const rowIdx = i + 2;
+      sheet.getRow(rowIdx).height = 96;
       sheet.getCell(`A${rowIdx}`).value = String(it.title || '');
-      sheet.getCell(`B${rowIdx}`).value = String(it.url || it.link || '');
+      const linkUrl = String(it.url || it.link || '');
+      sheet.getCell(`B${rowIdx}`).value = linkUrl ? { text: 'Open', hyperlink: linkUrl } : '';
       const imgUrl = String(it.img || '').trim();
       if (!imgUrl) continue;
       try {
         const proxy = `${base}/v1/api/image?format=raw&url=${encodeURIComponent(imgUrl)}`;
         const r = await axios.get(proxy, { responseType: 'arraybuffer', timeout: 20000 });
-        const contentType = String(r.headers['content-type'] || 'image/jpeg');
-        const ext = /png/i.test(contentType) ? 'png' : /webp/i.test(contentType) ? 'webp' : /gif/i.test(contentType) ? 'gif' : 'jpeg';
+        const ct = String(r.headers['content-type'] || 'image/jpeg');
+        if (!/(jpeg|jpg|png|gif)/i.test(ct)) continue;
+        const ext = /png/i.test(ct) ? 'png' : /gif/i.test(ct) ? 'gif' : 'jpeg';
         const imageId = workbook.addImage({ buffer: Buffer.from(r.data), extension: ext });
-        sheet.addImage(imageId, { tl: { col: 2, row: rowIdx - 1 }, ext: { width: 120, height: 120 } });
-      } catch (e) { console.warn('[export] image insert failed:', imgUrl, e?.message || e); }
+        sheet.addImage(imageId, { tl: { col: 2, row: rowIdx - 1 }, ext: { width: 120, height: 90 } });
+      } catch (e) {
+        console.warn('[export] image insert failed:', imgUrl, e?.message || e);
+      }
     }
-    res.setHeader('Content-Type','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition','attachment; filename="export.xlsx"');
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition', 'attachment; filename="catalog.xlsx"');
     await workbook.xlsx.write(res);
     res.end();
   } catch (err) {
-    console.error('[ExportExcel]', err?.message || err);
-    res.status(500).send('Export failed');
+    console.error('[export]', err);
+    res.status(500).send(String(err?.message || err));
   }
-};
-app.get('/v1/api/export', _exportHandlerGET);
-app.get('/v1/export', _exportHandlerGET);
+});
 
 // === Excel export (GET alias) ===
-const _exportXGet = async (req, res) => {
+app.get('/v1/api/export-xlsx', async (req, res) => {
   try {
     const listUrl = String(req.query.url || "").trim();
     const limit = Math.min(parseInt(req.query.limit || "50", 10) || 50, 200);
@@ -1402,9 +1426,6 @@ const _exportXGet = async (req, res) => {
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet('Catalog');
     sheet.addRow(['Title', 'Link', 'Image']);
-sheet.getColumn(1).width = 48;
-sheet.getColumn(2).width = 12;
-sheet.getColumn(3).width = 18;
     const base = `${req.protocol}://${req.get('host')}`;
     for (let i = 0; i < items.length; i++) {
       const it = items[i] || {};
@@ -1430,11 +1451,9 @@ sheet.getColumn(3).width = 18;
     console.error('[ExportExcel GET]', err?.message || err);
     res.status(500).send('Export failed');
   }
-};
-app.get('/v1/api/export-xlsx', _exportXGet);
-app.get('/v1/export-xlsx', _exportXGet);
+});
 
-const _exportXPost = async (req, res) => {
+app.post('/v1/api/export-xlsx', async (req, res) => {
   try {
     const items = Array.isArray(req.body?.items) ? req.body.items : [];
     const withImages = !!req.body?.withImages;
@@ -1443,9 +1462,6 @@ const _exportXPost = async (req, res) => {
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet('Catalog');
     sheet.addRow(['Title', 'Link', 'Image']);
-sheet.getColumn(1).width = 48;
-sheet.getColumn(2).width = 12;
-sheet.getColumn(3).width = 18;
 
     const base = `${req.protocol}://${req.get('host')}`;
     for (let i = 0; i < items.length; i++) {
@@ -1479,8 +1495,5 @@ sheet.getColumn(3).width = 18;
     console.error('[ExportExcel POST]', err?.message || err);
     res.status(500).send('Export failed');
   }
-};
-app.post('/v1/api/export-xlsx', _exportXPost);
-app.post('/v1/export-xlsx', _exportXPost);
+});
 app.listen(PORT, () => console.log(`[mvp2-backend] listening on :${PORT}`));
-
