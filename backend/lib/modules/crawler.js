@@ -1,48 +1,50 @@
 // backend/lib/modules/crawler.js
 import axios from 'axios';
 
-/** Make URL absolute against an origin */
+/** Absolutize URL against an origin */
 export function absolutize(u, origin) {
   if (!u) return '';
   if (/^https?:\/\//i.test(u)) return u;
   if (u.startsWith('//')) return 'https:' + u;
   try {
-    const o = new URL(origin || 'https://example.com');
-    if (u.startsWith('/')) return o.origin + u;
-    return o.origin + '/' + u.replace(/^\.?\//, '');
-  } catch { return u; }
+    const base = new URL(origin || 'https://example.com');
+    if (u.startsWith('/')) return base.origin + u;
+    return new URL(u, base).href;
+  } catch { return String(u || ''); }
 }
 
 export function splitSrcset(s) {
   return (s || '').split(',').map(x => x.trim().split(/\s+/)[0]).filter(Boolean);
 }
 
-/** Prefer jpg/png over webp when multiple sources exist */
+/** Prefer jpg/png over webp when multiple candidates exist */
 export function pickBestImageFromImgNode($, $img, origin) {
   if (!$img || !$img.length) return '';
   const bag = new Set();
   const push = (v) => { if (v) bag.add(absolutize(v, origin)); };
 
+  // lazy attrs first
   push($img.attr('data-src'));
   splitSrcset($img.attr('data-srcset')).forEach(push);
   push($img.attr('data-fallbacksrc'));
+  // then standard attrs
   splitSrcset($img.attr('srcset')).forEach(push);
   push($img.attr('src'));
+  // <picture><source srcset>
   $img.closest('picture').find('source[srcset]').each((_i, el) => {
     splitSrcset(el.attribs?.srcset || '').forEach(push);
   });
 
-  const list = [...bag].filter(u => /\.(?:jpe?g|png|webp)(?:$|\?)/i.test(u) && !/loader\.svg/i.test(u));
+  const list = [...bag].filter(u => /\.(?:jpe?g|png|webp|gif)(?:$|\?)/i.test(u) && !/loader\.svg/i.test(u));
   if (!list.length) return '';
-  const prefer = list.find(u => /\.(?:jpe?g|png)(?:$|\?)/i.test(u));
+  const prefer = list.find(u => /\.(?:jpe?g|png|gif)(?:$|\?)/i.test(u));
   if (prefer) return prefer;
-  // try naive extension swap
   const fromWebp = list.find(u => /\.webp(?:$|\?)/i.test(u));
   if (fromWebp) return fromWebp.replace(/\.webp(\?|$)/i, '.jpg$1');
   return list[0];
 }
 
-/** Fetch image bytes with JPEG-preferred Accept header (better for Excel embed) */
+/** Fetch image with JPEG-preferred Accept header; return {buffer, contentType, extension} */
 export async function fetchImagePreferJpeg(url, timeout = 15000) {
   const resp = await axios.get(url, {
     responseType: 'arraybuffer',
