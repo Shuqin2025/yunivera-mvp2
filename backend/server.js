@@ -11,9 +11,6 @@ let genericLinksParser;
 try { genericLinksParser = (await import('./lib/parsers/genericLinksParser.js')).default; }
 catch { try { genericLinksParser = (await import('./parsers/genericLinksParser.js')).default; }
 catch { genericLinksParser = (await import('./adapters/genericLinksParser.js')).default; } }
-app.use('/v1/api/generic', genericLinksParser);
-app.use('/v1/generic', genericLinksParser);
-
 async function responseToBuffer(response) {
   if (typeof response.arrayBuffer === 'function') {
     const ab = await response.arrayBuffer();
@@ -119,6 +116,8 @@ app.use((_, res, next) => { res.setHeader("Vary", "Origin"); next(); });
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
 
+app.use('/v1/api/generic', genericLinksParser);
+app.use('/v1/generic', genericLinksParser);
 // 图片路由（只挂载一次，避免多层 /image 或重复 CORS）
 app.use("/v1/api/image", (req, res, next) => { try { res.removeHeader("Access-Control-Allow-Origin"); } catch {} next(); }, imageRouter);
 // --- 图片代理由 routes/image.js 提供 ---
@@ -1286,6 +1285,8 @@ app.get('/v1/api/image', async (req, res) => {
     const response = await fetch(imageUrl, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/119 Safari/537.36',
+        'Accept': 'image/avif,image/jpeg,image/png,image/*;q=0.8',
+        'Referer': new URL(imageUrl).origin + '/'
       },
       signal: controller.signal
     });
