@@ -134,13 +134,6 @@ function pickBestId({ eans = [], skus = [] } = {}) {
   return { id: '', type: '' };
 }
 
-module.exports = {
-  extractFromHtml,
-  extractFromText,
-  pickBestId,
-  validateEAN13,
-  validateEAN8,
-};
 
 /** Added named exports to satisfy adapters */
 export function extractFromHtml($, $scope) {
@@ -153,3 +146,6 @@ export function pickBestId(candidates = {}) {
     return arr[0] || { key:"", id:"" };
   } catch { return { key:"", id:"" }; }
 }
+// ---- ESM exports (added) ----
+export { extractFromHtml, extractFromText, pickBestId };
+export default { extractFromHtml, extractFromText, pickBestId };
