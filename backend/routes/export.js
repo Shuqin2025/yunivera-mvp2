@@ -7,6 +7,7 @@ import { Router } from "express";
 import ExcelJS from "exceljs";
 import axios from "axios";
 import pLimit from "p-limit";
+import { fetchImagePreferJpeg } from "../lib/modules/crawler.js";
 
 const router = Router();
 const UA =
@@ -221,56 +222,22 @@ function extFromContentType(ct = "") {
 }
 
 async function fetchImageBuffer(imgUrl) {
-  // Proxy-first to normalize content-type for Excel embedding
+  if (!imgUrl) return null;
   try {
     const base = `${globalThis.thisReqProtocol || 'https'}://${globalThis.thisReqHost || ''}`;
     const proxy = `${base}/v1/api/image?format=raw&url=${encodeURIComponent(imgUrl)}`;
     const resp = await axios.get(proxy, { responseType: "arraybuffer", timeout: 15000, validateStatus: s => s>=200 && s<400 });
     const ct = String(resp.headers["content-type"] || "");
     if (/(jpeg|jpg|png|gif)/i.test(ct)) {
-      const ext = /png/i.test(ct) ? "png" : /gif/i.test(ct) ? "gif" : "jpeg";
-      return { buffer: Buffer.from(resp.data), extension: ext };
+      const extension = /png/i.test(ct) ? "png" : /gif/i.test(ct) ? "gif" : "jpeg";
+      return { buffer: Buffer.from(resp.data), extension };
     }
   } catch {}
-
-  const origin = (() => { try { return new URL(imgUrl).origin; } catch { return undefined; } })();
-
-  // 1) axios direct
   try {
-    const resp = await axios.get(imgUrl, {
-      responseType: "arraybuffer",
-      headers: {
-        "User-Agent": UA,
-        "Referer": origin || imgUrl,
-        "Accept": "image/avif,image/jpeg,image/png,image/*,*/*;q=0.8"
-      },
-      timeout: 15000,
-      validateStatus: (s) => s >= 200 && s < 400
-    });
-    const ext = extFromContentType(resp.headers["content-type"]);
-    return { buffer: Buffer.from(resp.data), extension: ext };
+    const x = await fetchImagePreferJpeg(imgUrl, 15000);
+    if (x && /(jpeg|jpg|png|gif)/i.test(String(x.extension))) return { buffer: x.buffer, extension: x.extension };
   } catch {}
-  // 2) Playwright fallback (optional)
-  try {
-    const { chromium } = await import("playwright");
-    const browser = await chromium.launch({ headless: true });
-    try {
-      const page = await browser.newPage({ userAgent: UA });
-      const arr = await page.evaluate(async (url) => {
-        const r = await fetch(url, { credentials: "omit" });
-        if (!r.ok) throw new Error("HTTP " + r.status);
-        const ab = await r.arrayBuffer();
-        return Array.from(new Uint8Array(ab));
-      }, imgUrl);
-      const extGuess = imgUrl.split("?")[0].split(".").pop()?.toLowerCase() || "";
-      const extension = ["png","jpg","jpeg","webp","gif"].includes(extGuess) ? extGuess : "png";
-      return { buffer: Buffer.from(Uint8Array.from(arr)), extension };
-    } finally {
-      await browser.close();
-    }
-  } catch {
-    throw new Error("IMAGE_FETCH_FAILED");
-  }
+  return null;
 }
 
 /* ---------------- workbook builder ---------------- */
