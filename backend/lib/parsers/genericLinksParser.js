@@ -97,7 +97,7 @@ const PRIMARY_AREAS = [
 ];
 
 const PRICE_RE = /(?:^|[^\d])(?:(?:€|CHF|PLN|zł|zł\.?|₺|£|\$)\s*)?\d{1,3}(?:[.\s]\d{3})*(?:[,\.\s]\d{2})\s*(?:€|CHF|PLN|zł|zł\.?|₺|£|\$)?/i;
-const NAV_WORDS = ["home","start","audio","video","strom","multimedia","b-run","solar","computer","about","news","contact","company","message","industry","network","impressum","privacy","datenschutz","agb","catalog","katalog","categories","marken","brands","solutions","services","download","downloads","support","produkte","produkteübersicht"];
+const NAV_WORDS = ["home","start","audio","video","strom","multimedia","b-run","solar","computer","about","news","contact","company","message","industry","network","impressum","privacy","datenschutz","agb","catalog","katalog","categories","marken","brands","solutions","services","download","downloads","support","produkte","produkteübersicht","sitemap","unternehmensprofil","company-profile","certificate","certificates","quality","about-us"];
 
 function sameOrigin(a, b) {
   try {
