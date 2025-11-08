@@ -6,6 +6,7 @@ import axios from "axios";
 import * as cheerio from "cheerio";
 import ExcelJS from "exceljs";
 import imageRouter from "./routes/image.js";
+import genericLinksParser from './adapters/genericLinksParser.js';
 
 async function responseToBuffer(response) {
   if (typeof response.arrayBuffer === 'function') {
@@ -114,6 +115,7 @@ app.use(express.urlencoded({ extended: true }));
 
 // 图片路由（只挂载一次，避免多层 /image 或重复 CORS）
 app.use("/v1/api/image", (req, res, next) => { try { res.removeHeader("Access-Control-Allow-Origin"); } catch {} next(); }, imageRouter);
+app.use("/v1/api/generic", genericLinksParser);
 
 
 
