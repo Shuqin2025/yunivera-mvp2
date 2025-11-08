@@ -6,11 +6,9 @@ import axios from "axios";
 import * as cheerio from "cheerio";
 import ExcelJS from "exceljs";
 import imageRouter from "./routes/image.js";
-// --- robust resolver for genericLinksParser (works across repo layouts) ---
-let genericLinksParser;
-try { genericLinksParser = (await import('./lib/parsers/genericLinksParser.js')).default; }
-catch { try { genericLinksParser = (await import('./parsers/genericLinksParser.js')).default; }
-catch { genericLinksParser = (await import('./adapters/genericLinksParser.js')).default; } }
+// ✅ 改成真实存在的路径：
+import genericLinksParser from "./lib/parsers/genericLinksParser.js";
+
 async function responseToBuffer(response) {
   if (typeof response.arrayBuffer === 'function') {
     const ab = await response.arrayBuffer();
@@ -116,10 +114,12 @@ app.use((_, res, next) => { res.setHeader("Vary", "Origin"); next(); });
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true }));
 
-app.use('/v1/api/generic', genericLinksParser);
-app.use('/v1/generic', genericLinksParser);
 // 图片路由（只挂载一次，避免多层 /image 或重复 CORS）
 app.use("/v1/api/image", (req, res, next) => { try { res.removeHeader("Access-Control-Allow-Origin"); } catch {} next(); }, imageRouter);
+app.use("/v1/api/generic", genericLinksParser);
+
+
+
 // --- 图片代理由 routes/image.js 提供 ---
 // 统一挂载（见下方）
 // load router lazily to avoid cyclic/declaration issues
@@ -1273,43 +1273,59 @@ const PORT = Number(process.env.PORT || 10000);
 
 
 // ✅ 新增图片代理 API 路由
-app.get('/v1/api/image', async (req, res) => {
+const _imageHandler = async (req, res) => {
   try {
-    const imageUrl = req.query.url;
-    const format = req.query.format || 'base64';
-    if (!imageUrl) return res.status(400).send('Missing image URL');
+    const imageUrl = String(req.query.url || "");
+    const format = String(req.query.format || "base64");
+    if (!imageUrl) return res.status(400).send("Missing image URL");
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10000);
+    async function fetchOnce(preferJpeg = False) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 12000);
+      try {
+        const r = await fetch(imageUrl, {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+            "Accept": preferJpeg ? "image/avif,image/jpeg,image/png,*/*" : "image/avif,image/webp,image/jpeg,image/png,*/*",
+            "Referer": new URL(imageUrl).origin + "/"
+          },
+          signal: controller.signal
+        });
+        return r;
+      } finally { clearTimeout(timeout); }
+    }
 
-    const response = await fetch(imageUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/119 Safari/537.36',
-        'Accept': 'image/avif,image/jpeg,image/png,image/*;q=0.8',
-        'Referer': new URL(imageUrl).origin + '/'
-      },
-      signal: controller.signal
-    });
-    clearTimeout(timeout);
+    let response = await fetchOnce(false);
+    let contentType = response.headers.get("content-type") || "application/octet-stream";
 
-    if (!response.ok) throw new Error(`Failed to fetch image: ${response.statusText}`);
+    if (/webp/i.test(contentType)) {
+      try {
+        const alt = await fetchOnce(true);
+        if (alt && alt.ok) {
+          response = alt;
+          contentType = alt.headers.get("content-type") || contentType;
+        }
+      } catch {}
+    }
 
-    const contentType = response.headers.get('content-type') || 'image/jpeg';
+    if (!response.ok) throw new Error(`Failed to fetch image: ${response.status} ${response.statusText}`);
     const buffer = await responseToBuffer(response);
 
-    if (format === 'raw') {
-      res.set('Content-Type', contentType);
-      res.send(buffer);
+    if (format === "raw") {
+      res.set("Content-Type", contentType);
+      return res.send(buffer);
     } else {
-      const base64 = buffer.toString('base64');
-      res.set('Content-Type', 'text/plain');
-      res.send(`data:${contentType};base64,${base64}`);
+      const base64 = buffer.toString("base64");
+      res.set("Content-Type", "text/plain");
+      return res.send(`data:${contentType};base64,${base64}`);
     }
   } catch (err) {
-    console.error('[图片代理失败]', err);
-    res.status(500).send('Image proxy error: ' + err.message);
+    console.error("[image proxy]", err?.message || err);
+    res.status(500).send("Image proxy error: " + (err?.message || "UNKNOWN"));
   }
-});
+};
+app.get('/v1/api/image', _imageHandler);
+app.get('/v1/image', _imageHandler);
 
 
 // === MEMORYKING: extract Artikelnummer ===
@@ -1335,7 +1351,7 @@ app.get('/v1/api/memoryking/code', async (req, res) => {
 // === Excel export: parse list URL then embed images via image proxy ===
 
 // === Excel export: parse list URL then embed images via image proxy ===
-app.get('/v1/api/export', async (req, res) => {
+const _exportHandlerGET = async (req, res) => {
   try {
     const listUrl = String(req.query.url || "").trim();
     const limit = Math.min(parseInt(req.query.limit || "50", 10) || 50, 200);
@@ -1344,21 +1360,30 @@ app.get('/v1/api/export', async (req, res) => {
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet('Catalog');
     sheet.addRow(['Title', 'Link', 'Image']);
+    sheet.getColumn(1).width = 48;
+    sheet.getColumn(2).width = 12;
+    sheet.getColumn(3).width = 22;
+sheet.getColumn(1).width = 48;
+sheet.getColumn(2).width = 12;
+sheet.getColumn(3).width = 18;
     const base = `${req.protocol}://${req.get('host')}`;
     for (let i = 0; i < items.length; i++) {
       const it = items[i] || {};
       const rowIdx = i + 2;
       sheet.getCell(`A${rowIdx}`).value = String(it.title || '');
-      sheet.getCell(`B${rowIdx}`).value = String(it.url || it.link || '');
+      const linkUrl = String(it.url || it.link || '');
+      sheet.getCell(`B${rowIdx}`).value = linkUrl ? { text: 'Open', hyperlink: linkUrl } : '';
       const imgUrl = String(it.img || '').trim();
       if (!imgUrl) continue;
       try {
         const proxy = `${base}/v1/api/image?format=raw&url=${encodeURIComponent(imgUrl)}`;
         const r = await axios.get(proxy, { responseType: 'arraybuffer', timeout: 20000 });
         const contentType = String(r.headers['content-type'] || 'image/jpeg');
-        const ext = /png/i.test(contentType) ? 'png' : /webp/i.test(contentType) ? 'webp' : /gif/i.test(contentType) ? 'gif' : 'jpeg';
+        if (!/(jpeg|jpg|png|gif)/i.test(contentType)) { continue; }
+        const ext = /png/i.test(contentType) ? 'png' : /gif/i.test(contentType) ? 'gif' : 'jpeg';
         const imageId = workbook.addImage({ buffer: Buffer.from(r.data), extension: ext });
-        sheet.addImage(imageId, { tl: { col: 2, row: rowIdx - 1 }, ext: { width: 120, height: 120 } });
+        sheet.getRow(rowIdx).height = 96;
+      sheet.addImage(imageId, { tl: { col: 2, row: rowIdx - 1 }, ext: { width: 120, height: 96 } });
       } catch (e) { console.warn('[export] image insert failed:', imgUrl, e?.message || e); }
     }
     res.setHeader('Content-Type','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
@@ -1369,10 +1394,12 @@ app.get('/v1/api/export', async (req, res) => {
     console.error('[ExportExcel]', err?.message || err);
     res.status(500).send('Export failed');
   }
-});
+};
+app.get('/v1/api/export', _exportHandlerGET);
+app.get('/v1/export', _exportHandlerGET);
 
 // === Excel export (GET alias) ===
-app.get('/v1/api/export-xlsx', async (req, res) => {
+const _exportXGet = async (req, res) => {
   try {
     const listUrl = String(req.query.url || "").trim();
     const limit = Math.min(parseInt(req.query.limit || "50", 10) || 50, 200);
@@ -1381,21 +1408,30 @@ app.get('/v1/api/export-xlsx', async (req, res) => {
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet('Catalog');
     sheet.addRow(['Title', 'Link', 'Image']);
+    sheet.getColumn(1).width = 48;
+    sheet.getColumn(2).width = 12;
+    sheet.getColumn(3).width = 22;
+sheet.getColumn(1).width = 48;
+sheet.getColumn(2).width = 12;
+sheet.getColumn(3).width = 18;
     const base = `${req.protocol}://${req.get('host')}`;
     for (let i = 0; i < items.length; i++) {
       const it = items[i] || {};
       const rowIdx = i + 2;
       sheet.getCell(`A${rowIdx}`).value = String(it.title || '');
-      sheet.getCell(`B${rowIdx}`).value = String(it.url || it.link || '');
+      const linkUrl = String(it.url || it.link || '');
+      sheet.getCell(`B${rowIdx}`).value = linkUrl ? { text: 'Open', hyperlink: linkUrl } : '';
       const imgUrl = String(it.img || '').trim();
       if (!imgUrl) continue;
       try {
         const proxy = `${base}/v1/api/image?format=raw&url=${encodeURIComponent(imgUrl)}`;
         const r = await axios.get(proxy, { responseType: 'arraybuffer', timeout: 20000 });
         const contentType = String(r.headers['content-type'] || 'image/jpeg');
-        const ext = /png/i.test(contentType) ? 'png' : /webp/i.test(contentType) ? 'webp' : /gif/i.test(contentType) ? 'gif' : 'jpeg';
+        if (!/(jpeg|jpg|png|gif)/i.test(contentType)) { continue; }
+        const ext = /png/i.test(contentType) ? 'png' : /gif/i.test(contentType) ? 'gif' : 'jpeg';
         const imageId = workbook.addImage({ buffer: Buffer.from(r.data), extension: ext });
-        sheet.addImage(imageId, { tl: { col: 2, row: rowIdx - 1 }, ext: { width: 120, height: 120 } });
+        sheet.getRow(rowIdx).height = 96;
+      sheet.addImage(imageId, { tl: { col: 2, row: rowIdx - 1 }, ext: { width: 120, height: 96 } });
       } catch (e) { console.warn('[export-xlsx GET] image insert failed:', imgUrl, e?.message || e); }
     }
     res.setHeader('Content-Type','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
@@ -1406,9 +1442,11 @@ app.get('/v1/api/export-xlsx', async (req, res) => {
     console.error('[ExportExcel GET]', err?.message || err);
     res.status(500).send('Export failed');
   }
-});
+};
+app.get('/v1/api/export-xlsx', _exportXGet);
+app.get('/v1/export-xlsx', _exportXGet);
 
-app.post('/v1/api/export-xlsx', async (req, res) => {
+const _exportXPost = async (req, res) => {
   try {
     const items = Array.isArray(req.body?.items) ? req.body.items : [];
     const withImages = !!req.body?.withImages;
@@ -1417,13 +1455,20 @@ app.post('/v1/api/export-xlsx', async (req, res) => {
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet('Catalog');
     sheet.addRow(['Title', 'Link', 'Image']);
+    sheet.getColumn(1).width = 48;
+    sheet.getColumn(2).width = 12;
+    sheet.getColumn(3).width = 22;
+sheet.getColumn(1).width = 48;
+sheet.getColumn(2).width = 12;
+sheet.getColumn(3).width = 18;
 
     const base = `${req.protocol}://${req.get('host')}`;
     for (let i = 0; i < items.length; i++) {
       const it = items[i] || {};
       const rowIdx = i + 2;
       sheet.getCell(`A${rowIdx}`).value = String(it.title || '');
-      sheet.getCell(`B${rowIdx}`).value = String(it.url || it.link || '');
+      const linkUrl = String(it.url || it.link || '');
+      sheet.getCell(`B${rowIdx}`).value = linkUrl ? { text: 'Open', hyperlink: linkUrl } : '';
 
       if (withImages) {
         const imgUrl = String(it.img || '').trim();
@@ -1432,9 +1477,11 @@ app.post('/v1/api/export-xlsx', async (req, res) => {
             const proxy = `${base}/v1/api/image?format=raw&url=${encodeURIComponent(imgUrl)}`;
             const r = await axios.get(proxy, { responseType: 'arraybuffer', timeout: 20000 });
             const contentType = String(r.headers['content-type'] || 'image/jpeg');
-            const ext = /png/i.test(contentType) ? 'png' : /webp/i.test(contentType) ? 'webp' : /gif/i.test(contentType) ? 'gif' : 'jpeg';
+        if (!/(jpeg|jpg|png|gif)/i.test(contentType)) { continue; }
+        const ext = /png/i.test(contentType) ? 'png' : /gif/i.test(contentType) ? 'gif' : 'jpeg';
             const imageId = workbook.addImage({ buffer: Buffer.from(r.data), extension: ext });
-            sheet.addImage(imageId, { tl: { col: 2, row: rowIdx - 1 }, ext: { width: 120, height: 120 } });
+            sheet.getRow(rowIdx).height = 96;
+      sheet.addImage(imageId, { tl: { col: 2, row: rowIdx - 1 }, ext: { width: 120, height: 96 } });
           } catch (e) {
             console.warn('[export-xlsx POST] image insert failed:', imgUrl, e?.message || e);
           }
@@ -1450,5 +1497,8 @@ app.post('/v1/api/export-xlsx', async (req, res) => {
     console.error('[ExportExcel POST]', err?.message || err);
     res.status(500).send('Export failed');
   }
-});
+};
+app.post('/v1/api/export-xlsx', _exportXPost);
+app.post('/v1/export-xlsx', _exportXPost);
 app.listen(PORT, () => console.log(`[mvp2-backend] listening on :${PORT}`));
+
