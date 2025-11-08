@@ -42,8 +42,7 @@ function absolutize(u, origin) {
 const splitSrcset = (s) =>
   (s || "").split(",").map(x => x.trim().split(/\s+/)[0]).filter(Boolean);
 
-function bestFromImgNode($, $img, origin) { return pickBestImage($, $img, origin); }
-
+function bestFromImgNode($, $img, origin) { return pickImg($, $img, origin); }
 function scrapeImgsFromHtml(html, origin) {
   if (!html) return [];
   const out = new Set();
