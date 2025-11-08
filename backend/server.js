@@ -1,4 +1,4 @@
- import { detectStructure } from './lib/structureDetector.js';
+import { detectStructure } from './lib/structureDetector.js';
 import express from "express";
 import cors from "cors";
 import axios from "axios";
@@ -6,7 +6,13 @@ import axios from "axios";
 import * as cheerio from "cheerio";
 import ExcelJS from "exceljs";
 import imageRouter from "./routes/image.js";
-import genericLinksParser from './adapters/genericLinksParser.js';
+// --- robust resolver for genericLinksParser (works across repo layouts) ---
+let genericLinksParser;
+try { genericLinksParser = (await import('./lib/parsers/genericLinksParser.js')).default; }
+catch { try { genericLinksParser = (await import('./parsers/genericLinksParser.js')).default; }
+catch { genericLinksParser = (await import('./adapters/genericLinksParser.js')).default; } }
+app.use('/v1/api/generic', genericLinksParser);
+app.use('/v1/generic', genericLinksParser);
 
 async function responseToBuffer(response) {
   if (typeof response.arrayBuffer === 'function') {
@@ -115,10 +121,6 @@ app.use(express.urlencoded({ extended: true }));
 
 // 图片路由（只挂载一次，避免多层 /image 或重复 CORS）
 app.use("/v1/api/image", (req, res, next) => { try { res.removeHeader("Access-Control-Allow-Origin"); } catch {} next(); }, imageRouter);
-app.use("/v1/api/generic", genericLinksParser);
-
-
-
 // --- 图片代理由 routes/image.js 提供 ---
 // 统一挂载（见下方）
 // load router lazily to avoid cyclic/declaration issues
@@ -867,47 +869,7 @@ async function parseUniversalCatalog(
       if (!Array.isArray(items) || items.length === 0) {
         try { items = await parseMemorykingCatalog(listUrl); adapter = 'memoryking/fallback'; } catch {}
       }
-      
-      // Enhance: fetch detail pages to fill SKU & better image for first few items
-      try {
-        let fixed = 0;
-        for (let i = 0; i < Math.min(items.length, 30); i++) {
-          const it = items[i] || {};
-          if ((!it || !it.url) || (it.sku && it.sku.trim())) continue;
-          try {
-            const html2 = await fetchHtml(it.url);
-            const $2 = cheerio.load(typeof html2 === 'string' ? html2 : (html2?.html || ''), { decodeEntities: false });
-            let sku = '';
-            const bodyTxt = $2('body').text();
-            const m1 = bodyTxt && bodyTxt.match(/(?:Artikel\s*[-–—]?\s*Nr|Artikelnummer|Art\.\s*[-–—]?\s*Nr)\.?\s*[:#]?\s*([A-Za-z0-9._\-\/]+)/i);
-            if (m1 && m1[1]) sku = m1[1].trim();
-            if (!sku) {
-              $2('script[type="application/ld+json"]').each((_i, el) => {
-                try {
-                  const data = JSON.parse($2(el).contents().text() || "{}");
-                  const walk = (o) => {
-                    if (!o || typeof o !== "object") return "";
-                    const v = o.sku || o.mpn || o.productID || o.productId || "";
-                    if (v) return String(v);
-                    if (Array.isArray(o)) for (const x of o) { const r = walk(x); if (r) return r; }
-                    for (const k of Object.keys(o)) { const r = walk(o[k]); if (r) return r; }
-                    return "";
-                  };
-                  const v = walk(data);
-                  if (v) { sku = String(v); }
-                } catch {}
-              });
-            }
-            if (sku) { it.sku = sku; fixed++; }
-            if (!it.img) {
-              const og = $2('meta[property="og:image"]').attr('content') || '';
-              if (og) it.img = og;
-            }
-          } catch {}
-        }
-        if (fixed) console.log('[memoryking] enriched SKU for', fixed, 'items');
-      } catch {}
-    
+      return { items, adapter };
     }
 
     // （示例）其它专用适配器保持不动
@@ -1381,38 +1343,30 @@ app.get('/v1/api/export', async (req, res) => {
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet('Catalog');
     sheet.addRow(['Title', 'Link', 'Image']);
-    sheet.getColumn(1).width = 48;
-    sheet.getColumn(2).width = 12;
-    sheet.getColumn(3).width = 18;
     const base = `${req.protocol}://${req.get('host')}`;
     for (let i = 0; i < items.length; i++) {
       const it = items[i] || {};
       const rowIdx = i + 2;
-      sheet.getRow(rowIdx).height = 96;
       sheet.getCell(`A${rowIdx}`).value = String(it.title || '');
-      const linkUrl = String(it.url || it.link || '');
-      sheet.getCell(`B${rowIdx}`).value = linkUrl ? { text: 'Open', hyperlink: linkUrl } : '';
+      sheet.getCell(`B${rowIdx}`).value = String(it.url || it.link || '');
       const imgUrl = String(it.img || '').trim();
       if (!imgUrl) continue;
       try {
         const proxy = `${base}/v1/api/image?format=raw&url=${encodeURIComponent(imgUrl)}`;
         const r = await axios.get(proxy, { responseType: 'arraybuffer', timeout: 20000 });
-        const ct = String(r.headers['content-type'] || 'image/jpeg');
-        if (!/(jpeg|jpg|png|gif)/i.test(ct)) continue;
-        const ext = /png/i.test(ct) ? 'png' : /gif/i.test(ct) ? 'gif' : 'jpeg';
+        const contentType = String(r.headers['content-type'] || 'image/jpeg');
+        const ext = /png/i.test(contentType) ? 'png' : /webp/i.test(contentType) ? 'webp' : /gif/i.test(contentType) ? 'gif' : 'jpeg';
         const imageId = workbook.addImage({ buffer: Buffer.from(r.data), extension: ext });
-        sheet.addImage(imageId, { tl: { col: 2, row: rowIdx - 1 }, ext: { width: 120, height: 90 } });
-      } catch (e) {
-        console.warn('[export] image insert failed:', imgUrl, e?.message || e);
-      }
+        sheet.addImage(imageId, { tl: { col: 2, row: rowIdx - 1 }, ext: { width: 120, height: 120 } });
+      } catch (e) { console.warn('[export] image insert failed:', imgUrl, e?.message || e); }
     }
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', 'attachment; filename="catalog.xlsx"');
+    res.setHeader('Content-Type','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition','attachment; filename="export.xlsx"');
     await workbook.xlsx.write(res);
     res.end();
   } catch (err) {
-    console.error('[export]', err);
-    res.status(500).send(String(err?.message || err));
+    console.error('[ExportExcel]', err?.message || err);
+    res.status(500).send('Export failed');
   }
 });
 
