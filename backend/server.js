@@ -6,7 +6,7 @@ import axios from "axios";
 import * as cheerio from "cheerio";
 import ExcelJS from "exceljs";
 import imageRouter from "./routes/image.js";
-import genericLinksParser from './adapters/genericLinksParser.js';
+import genericLinksParser from './lib/modules/parsers/genericLinksParser.js';
 
 async function responseToBuffer(response) {
   if (typeof response.arrayBuffer === 'function') {
