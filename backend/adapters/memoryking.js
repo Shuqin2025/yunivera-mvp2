@@ -6,7 +6,7 @@
 
 import * as cheerio from "cheerio";
 import { extractFromHtml, pickBestId } from "../lib/modules/artikelExtractor.js";
-import { pickBestImageFromImgNode as __pickBest, absolutize as __abs } from "../lib/modules/crawler.js";
+import { pickBestImageFromImgNode as pickBestImage, absolutize as __abs } from "../lib/modules/crawler.js";
 import { fetchHtml } from "../lib/http.js";
 
 /* ---------------- 工具 ---------------- */
@@ -40,9 +40,7 @@ function absolutize(u, origin) {
 const splitSrcset = (s) =>
   (s || "").split(",").map(x => x.trim().split(/\s+/)[0]).filter(Boolean);
 
-function bestFromImgNode($, $img, origin) {
-  return __pickBest($, $img, origin);
-}
+function bestFromImgNode($, $img, origin) { return pickBestImage($, $img, origin); }
 
 function scrapeImgsFromHtml(html, origin) {
   if (!html) return [];
