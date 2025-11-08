@@ -5,6 +5,8 @@
  */
 
 import * as cheerio from "cheerio";
+import { extractFromHtml, pickBestId } from "../lib/modules/artikelExtractor.js";
+import { pickBestImageFromImgNode as __pickBest, absolutize as __abs } from "../lib/modules/crawler.js";
 import { fetchHtml } from "../lib/http.js";
 
 /* ---------------- 工具 ---------------- */
@@ -39,34 +41,7 @@ const splitSrcset = (s) =>
   (s || "").split(",").map(x => x.trim().split(/\s+/)[0]).filter(Boolean);
 
 function bestFromImgNode($, $img, origin) {
-  if (!$img || !$img.length) return "";
-  const bag = new Set();
-  const push = (v) => { if (v) bag.add(absolutize(v, origin)); };
-
-  // 懒加载字段覆盖
-  push($img.attr("data-src"));
-  splitSrcset($img.attr("data-srcset")).forEach(push);
-  push($img.attr("data-fallbacksrc"));
-  splitSrcset($img.attr("srcset")).forEach(push);
-  push($img.attr("src"));
-  $img.closest("picture").find("source[srcset]").each((_i, el) => {
-    splitSrcset(el.attribs?.srcset || "").forEach(push);
-  });
-
-  const list = [...bag].filter(u =>
-    /\.(?:jpe?g|png|webp)(?:$|\?)/i.test(u) && !/loader\.svg/i.test(u)
-  );
-  if (!list.length) return "";
-  const score = (u) => {
-    let s = 0;
-    const m = u.match(/(\d{2,4})x(\d{2,4})/);
-    if (m) s += Math.min(parseInt(m[1],10), parseInt(m[2],10));
-    if (/800x800|700x700|600x600/.test(u)) s += 100;
-    if (/\.webp(?:$|\?)/i.test(u)) s += 5;
-    return s;
-  };
-  const jp = list.find(u=>/\.(jpe?g|png)(?:$|\?)/i.test(u));
-  return jp || list.sort((a,b)=>score(b)-score(a))[0];
+  return __pickBest($, $img, origin);
 }
 
 function scrapeImgsFromHtml(html, origin) {
