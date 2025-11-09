@@ -20,3 +20,9 @@ r.use('/pdf', pdf);
 r.use('/health', health);
 
 export default r;
+
+
+/** ---- legacy aliases ---- */
+r.get('/image', (req, res, next) => { req.url = '/api/image' + (req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : ''); next(); });
+r.get('/export-xlsx', (req, res, next) => { req.url = '/api/export-xlsx' + (req.url.includes('?') ? req.url.slice(req.url.indexOf('?')) : ''); next(); });
+r.get('/catalog/_probe', (req, res, next) => { req.url = '/api/catalog/_probe'; next(); });
