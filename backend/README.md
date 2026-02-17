@@ -1,3 +1,3 @@
-# Regulatory Freeze Notice
+# Strategic Pause Notice
 
-⚠️ This repository is currently under a Regulatory Freeze pending patent review and AI safety governance alignment.
+⚠️ This repository is currently under a Strategic Pause while governance alignment and infrastructure restructuring are completed.
