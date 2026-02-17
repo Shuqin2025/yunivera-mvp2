@@ -1,7 +1,7 @@
 GOVERNANCE STATUS UPDATE
 Yunivera System
 Version: 2.0
-Effective Date: [Insert Date]
+Effective Date: 17.02.2026
 Status: Strategic Pause (Internal Development Phase)
 1. Overview
 Yunivera is currently operating under a Strategic Pause framework.
