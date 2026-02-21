@@ -11,7 +11,11 @@
  *
  * IMPORTANT: It NEVER deletes your raw data; it only changes the middle representation.
  */
-const { buildCompressionManifestV1, buildEvidenceAnchor, makeEvidenceId } = require("./manifestBuilder");
+import { createRequire } from "module";
+const require = createRequire(import.meta.url);
+
+const { buildCompressionManifestV1, buildEvidenceAnchor, makeEvidenceId } =
+  require("./manifestBuilder.js");
 
 /** tweakable thresholds */
 const DEFAULTS = {
