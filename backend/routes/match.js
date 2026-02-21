@@ -3,17 +3,27 @@ import express from 'express';
 import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import Ajv from "ajv";
+import addFormats from "ajv-formats";
 
 // ✅ [新增] 在 ESM 文件里使用 CommonJS 模块
 import { createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const { compressBundle } = require('../lib/modules/semanticCompression/semanticCompressor.js');
+// ---------------- Manifest schema validator (draft-07) ----------------
+const ajv = new Ajv({ allErrors: true, strict: false });
+addFormats(ajv);
+
+// match.js 位于 backend/routes/，schema 位于 backend/lib/schemas/
 
 const router = express.Router();
 
 // 计算当前目录（ESM 兼容）
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const manifestSchemaPath = path.join(__dirname, "..", "lib", "schemas", "compression_manifest_v1.schema.json");
+const manifestSchema = JSON.parse(fs.readFileSync(manifestSchemaPath, "utf-8"));
+const validateManifest = ajv.compile(manifestSchema);
 
 // 数据文件
 const dataDir = path.join(__dirname, '..', 'data');
@@ -155,12 +165,20 @@ router.post('/match/find', (req, res) => {
 }),
     };
 
-    const { compressed_bundle, compression_manifest } = compressBundle({
+  const { compressed_bundle, compression_manifest } = compressBundle({
   requestId: matchedBundle.requestId,
   schemaVersion: matchedBundle.schemaVersion,
   engineVersion: 'semanticCompressor@0.1.0',
   matchedBundle,
-});
+});    
+const ok = validateManifest(compression_manifest);
+if (!ok) {
+  return res.status(500).json({
+    error: "manifest_contract_violation",
+    message: "compression_manifest does not match v1 schema",
+    details: validateManifest.errors || [],
+  });
+}
    res.json({ items: scored, compressed_bundle, compression_manifest });
   } catch (e) {
     console.error('[match/find] error:', e);
