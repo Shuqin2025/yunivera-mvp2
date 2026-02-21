@@ -7,6 +7,7 @@ import * as cheerio from "cheerio";
 import ExcelJS from "exceljs";
 import imageRouter from "./routes/image.js";
 import matchRouter from "./routes/match.js";
+import reasonRouter from "./routes/reason.js";
 // --- robust resolver for genericLinksParser (works across repo layouts) ---
 let genericLinksParser;
 try { genericLinksParser = (await import('./lib/parsers/genericLinksParser.js')).default; }
@@ -122,6 +123,7 @@ app.use('/v1/generic', genericLinksParser);
 // 图片路由（只挂载一次，避免多层 /image 或重复 CORS）
 app.use("/v1/api/image", (req, res, next) => { try { res.removeHeader("Access-Control-Allow-Origin"); } catch {} next(); }, imageRouter);
 app.use("/v1/api", matchRouter);
+app.use("/v1/api", reasonRouter);
 // --- 图片代理由 routes/image.js 提供 ---
 // 统一挂载（见下方）
 // load router lazily to avoid cyclic/declaration issues
