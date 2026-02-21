@@ -1,0 +1,358 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://example.org/schemas/compression_manifest_v1.schema.json",
+  "title": "Compression Manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "manifestVersion",
+    "requestId",
+    "schemaVersion",
+    "engineVersion",
+    "createdAt",
+    "hashes",
+    "summary",
+    "items"
+  ],
+  "properties": {
+    "manifestVersion": {
+      "type": "string",
+      "pattern": "^1\\.0$"
+    },
+    "requestId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "schemaVersion": {
+      "type": "string",
+      "minLength": 1
+    },
+    "engineVersion": {
+      "type": "string",
+      "minLength": 1
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "hashes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "inputBundleHash",
+        "compressedBundleHash"
+      ],
+      "properties": {
+        "inputBundleHash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "compressedBundleHash": {
+          "type": "string",
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "itemsIn",
+        "itemsOut",
+        "fieldsCanonicalized",
+        "conflictsResolved",
+        "fieldsDroppedLowConfidence",
+        "avgLossScore"
+      ],
+      "properties": {
+        "itemsIn": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "itemsOut": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "fieldsCanonicalized": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "conflictsResolved": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "fieldsDroppedLowConfidence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "avgLossScore": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "itemId",
+          "fieldChanges",
+          "evidenceAnchors",
+          "lossTotals"
+        ],
+        "properties": {
+          "itemId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "fieldChanges": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "field",
+                "decision",
+                "beforeCandidates",
+                "afterCanonical",
+                "loss",
+                "rationale"
+              ],
+              "properties": {
+                "field": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "decision": {
+                  "type": "string",
+                  "enum": [
+                    "canonicalize",
+                    "dedupe",
+                    "conflict_resolve",
+                    "drop_low_confidence",
+                    "pass_through"
+                  ]
+                },
+                "beforeCandidates": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "value",
+                      "confidence",
+                      "source",
+                      "evidenceId"
+                    ],
+                    "properties": {
+                      "value": {},
+                      "confidence": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1
+                      },
+                      "source": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "evidenceId": {
+                        "type": "string",
+                        "minLength": 1
+                      }
+                    }
+                  }
+                },
+                "afterCanonical": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "value",
+                    "confidence",
+                    "source"
+                  ],
+                  "properties": {
+                    "value": {},
+                    "confidence": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "source": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  }
+                },
+                "loss": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "score",
+                    "type"
+                  ],
+                  "properties": {
+                    "score": {
+                      "type": "number",
+                      "minimum": 0,
+                      "maximum": 1
+                    },
+                    "type": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "notes": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "rationale": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          },
+          "evidenceAnchors": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "evidenceId",
+                "source",
+                "origin",
+                "locator",
+                "snippetHash",
+                "confidenceContribution"
+              ],
+              "properties": {
+                "evidenceId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "source": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "origin": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "url",
+                    "fetchedAt"
+                  ],
+                  "properties": {
+                    "url": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "fetchedAt": {
+                      "type": "string",
+                      "format": "date-time"
+                    }
+                  }
+                },
+                "locator": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "type"
+                  ],
+                  "properties": {
+                    "type": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "key": {
+                      "type": "string"
+                    },
+                    "xpath": {
+                      "type": "string"
+                    },
+                    "css": {
+                      "type": "string"
+                    },
+                    "jsonPath": {
+                      "type": "string"
+                    },
+                    "regexId": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "snippetHash": {
+                  "type": "string",
+                  "pattern": "^sha256:[0-9a-f]{64}$"
+                },
+                "confidenceContribution": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                }
+              }
+            }
+          },
+          "lossTotals": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "fieldLossScoreSum",
+              "fieldCount",
+              "avgFieldLoss"
+            ],
+            "properties": {
+              "fieldLossScoreSum": {
+                "type": "number",
+                "minimum": 0
+              },
+              "fieldCount": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "avgFieldLoss": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1
+              }
+            }
+          }
+        }
+      }
+    },
+    "ops": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "op",
+          "at",
+          "stats"
+        ],
+        "properties": {
+          "op": {
+            "type": "string",
+            "minLength": 1
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "stats": {
+            "type": "object"
+          },
+          "ruleId": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}
