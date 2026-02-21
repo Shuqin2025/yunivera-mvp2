@@ -15,7 +15,7 @@ import { createRequire } from "module";
 const require = createRequire(import.meta.url);
 
 const { buildCompressionManifestV1, buildEvidenceAnchor, makeEvidenceId } =
-  require("./manifestBuilder.js");
+  require("./manifestBuilder.cjs");
 
 /** tweakable thresholds */
 const DEFAULTS = {
@@ -273,4 +273,4 @@ function inferDecision(beforeCandidates, afterCanonical) {
   return "canonicalize";
 }
 
-module.exports = { compressBundle };
+export { compressBundle };
