@@ -4,6 +4,11 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
+// ✅ [新增] 在 ESM 文件里使用 CommonJS 模块
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
+const { compressBundle } = require('../lib/modules/semanticCompression/semanticCompressor.js');
+
 const router = express.Router();
 
 // 计算当前目录（ESM 兼容）
@@ -83,13 +88,34 @@ router.post('/match/find', (req, res) => {
     let items = [];
     try {
       items = JSON.parse(fs.readFileSync(catalogPath, 'utf-8') || '[]');
-    } catch { items = []; }
+    } catch {
+      items = [];
+    }
 
     const scored = items
       .map((it) => ({ ...it, score: scoreItem(queryTokens, it) }))
       .sort((a, b) => (b.score || 0) - (a.score || 0));
 
-    res.json({ items: scored });
+    // ✅ [新增] 生成 compression_manifest（只做“接线验证版”，不改变现有 items）
+    const matchedBundle = {
+      requestId: `match-${Date.now()}`,
+      schemaVersion: '1.0',
+      source: { url, fetchedAt: new Date().toISOString() },
+      items: scored.map((it, idx) => ({
+        itemId: it.id || it.url || it.name || String(idx),
+        raw: it,
+        normalized: {}, // 现在先空着：后续会换成真实结构化字段
+      })),
+    };
+
+    const { compression_manifest } = compressBundle({
+      requestId: matchedBundle.requestId,
+      schemaVersion: matchedBundle.schemaVersion,
+      engineVersion: 'semanticCompressor@0.1.0',
+      matchedBundle,
+    });
+
+    res.json({ items: scored, compression_manifest });
   } catch (e) {
     console.error('[match/find] error:', e);
     res.status(500).json({ items: [], error: 'match_find_failed' });
