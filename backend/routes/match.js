@@ -101,21 +101,67 @@ router.post('/match/find', (req, res) => {
       requestId: `match-${Date.now()}`,
       schemaVersion: '1.0',
       source: { url, fetchedAt: new Date().toISOString() },
-      items: scored.map((it, idx) => ({
-        itemId: it.id || it.url || it.name || String(idx),
-        raw: it,
-        normalized: {}, // 现在先空着：后续会换成真实结构化字段
-      })),
+      items: scored.map((it, idx) => {
+  const itemId = it.id || it.url || it.name || String(idx);
+
+  // ✅ 最小“通用目录字段”（任何目录都适用）
+  const normalized = {
+    id: itemId,
+    title: it.name || '',
+    url: it.url || '',
+    summary: it.description || '',
+    source: 'catalog',
+  };
+
+  // ✅ 可选：电商/商品目录字段（有则填，没有就空着，不影响）
+  // 尽量从常见位置找：it.sku / it.params.sku
+  const sku = it.sku || (it.params && (it.params.sku || it.params.SKU)) || '';
+  if (sku) normalized.sku = String(sku).trim();
+
+  // price：可能是 it.price 或 it.params.price（你现在 PDF 导出里用 it.price，所以优先 it.price）
+  const priceRaw = it.price ?? (it.params && (it.params.price || it.params.unitPrice));
+  if (priceRaw !== undefined && priceRaw !== null && priceRaw !== '') {
+    normalized.price = { amount: priceRaw, currency: 'EUR' }; // currency 先默认 EUR，后续可从站点/字段识别
+  }
+
+  // ✅ evidence（最小证据锚点）：先把“来源字段”写出来
+  // semanticCompressor 会用 evidence.field 来生成候选（目前它重点看 sku 和 price.amount）
+  const evidence = [];
+  if (normalized.sku) {
+    evidence.push({
+      field: 'sku',
+      source: 'catalog',
+      snippet: String(normalized.sku),
+      confidence: 0.70,
+      locator: { type: 'catalog_field', key: 'sku' },
+    });
+  }
+  if (normalized.price && normalized.price.amount !== undefined) {
+    evidence.push({
+      field: 'price.amount',
+      source: 'catalog',
+      snippet: String(normalized.price.amount),
+      confidence: 0.70,
+      locator: { type: 'catalog_field', key: 'price' },
+    });
+  }
+
+  return {
+    itemId,
+    raw: it,
+    normalized,
+    evidence,
+  };
+}),
     };
 
-    const { compression_manifest } = compressBundle({
-      requestId: matchedBundle.requestId,
-      schemaVersion: matchedBundle.schemaVersion,
-      engineVersion: 'semanticCompressor@0.1.0',
-      matchedBundle,
-    });
-
-    res.json({ items: scored, compression_manifest });
+    const { compressed_bundle, compression_manifest } = compressBundle({
+  requestId: matchedBundle.requestId,
+  schemaVersion: matchedBundle.schemaVersion,
+  engineVersion: 'semanticCompressor@0.1.0',
+  matchedBundle,
+});
+   res.json({ items: scored, compressed_bundle, compression_manifest });
   } catch (e) {
     console.error('[match/find] error:', e);
     res.status(500).json({ items: [], error: 'match_find_failed' });
