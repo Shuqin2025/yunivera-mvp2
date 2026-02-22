@@ -15,3 +15,8 @@ build/
 .vscode/
 *.log
 backend/data/
+.githooks/
+install-hooks.ps1
+sync.ps1
+sync-pro.ps1
+.idea/
