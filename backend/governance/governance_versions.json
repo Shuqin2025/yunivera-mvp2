@@ -1,0 +1,13 @@
+{
+  "governance_stack_version": "0.1.0",
+
+  "ruleset_version": "0.1.0",
+  "trace_schema_version": "1.0",
+  "governance_report_version": "1.0",
+  "semantic_schema_registry_version": "1.0",
+  "decision_schema_version": "1.0",
+
+  "policy_engine_version": "0.1.0",
+
+  "notes": "This file records the governance contract versions used during system execution."
+}

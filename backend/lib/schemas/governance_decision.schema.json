@@ -1,0 +1,70 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "ssge://schemas/governance_decision.schema.json",
+  "title": "SSGE Governance Decision Schema v1",
+  "type": "object",
+  "required": [
+    "decision_version",
+    "decision_id",
+    "timestamp",
+    "rules_triggered",
+    "action",
+    "mode",
+    "risk_level"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "decision_version": {
+      "type": "string",
+      "pattern": "^1\\.0$"
+    },
+    "decision_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "rules_triggered": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "action": {
+      "type": "string",
+      "enum": [
+        "allow",
+        "require_review",
+        "block_output",
+        "add_disclaimer",
+        "log_only"
+      ]
+    },
+    "mode": {
+      "type": "string",
+      "enum": [
+        "active",
+        "shadow"
+      ]
+    },
+    "risk_level": {
+      "type": "string",
+      "enum": [
+        "low",
+        "medium",
+        "high",
+        "critical"
+      ]
+    },
+    "confidence_adjustment": {
+      "type": "number",
+      "minimum": -1,
+      "maximum": 1
+    },
+    "notes": {
+      "type": "string"
+    }
+  }
+}

@@ -1,0 +1,203 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "ssge://schemas/governance_report.schema.json",
+  "title": "SSGE Governance Report Schema v1",
+  "type": "object",
+  "required": [
+    "report_version",
+    "report_id",
+    "generated_at",
+    "input",
+    "system_context",
+    "risk_assessment",
+    "rules_triggered",
+    "actions_taken",
+    "governance_trace",
+    "compliance_notes"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "report_version": {
+      "type": "string",
+      "pattern": "^1\\.0$"
+    },
+    "report_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "generated_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "input": {
+      "type": "object",
+      "required": ["input_id"],
+      "additionalProperties": false,
+      "properties": {
+        "input_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_url": {
+          "type": "string"
+        },
+        "input_type": {
+          "type": "string",
+          "enum": ["url", "document", "image", "api", "manual", "mixed"]
+        }
+      }
+    },
+    "system_context": {
+      "type": "object",
+      "required": ["engine", "engine_version", "governance_mode"],
+      "additionalProperties": false,
+      "properties": {
+        "engine": {
+          "type": "string",
+          "minLength": 1
+        },
+        "engine_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "governance_mode": {
+          "type": "string",
+          "enum": ["active", "shadow", "inactive"]
+        },
+        "ruleset_version": {
+          "type": "string"
+        },
+        "schema_version": {
+          "type": "string"
+        }
+      }
+    },
+    "risk_assessment": {
+      "type": "object",
+      "required": ["risk_level", "risk_score", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "risk_level": {
+          "type": "string",
+          "enum": ["low", "medium", "high", "critical"]
+        },
+        "risk_score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "rules_triggered": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["rule_id", "description", "severity"],
+        "additionalProperties": false,
+        "properties": {
+          "rule_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": {
+            "type": "string",
+            "minLength": 1
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["low", "medium", "high", "critical"]
+          }
+        }
+      }
+    },
+    "actions_taken": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["action"],
+        "additionalProperties": false,
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "set_status",
+              "penalize_confidence",
+              "emit_trace",
+              "require_review",
+              "block_output",
+              "log_trace_event",
+              "none"
+            ]
+          },
+          "value": {},
+          "message": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "governance_trace": {
+      "type": "object",
+      "required": ["trace_id"],
+      "additionalProperties": false,
+      "properties": {
+        "trace_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "manifest_ref": {
+          "type": "string"
+        },
+        "ruleset_version": {
+          "type": "string"
+        },
+        "decision_hash": {
+          "type": "string"
+        }
+      }
+    },
+    "loss_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "avg_loss_score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "loss_penalty": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      }
+    },
+    "compliance_notes": {
+      "type": "object",
+      "required": [
+        "autonomous_decision_making",
+        "self_learning_runtime",
+        "human_governance_required"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "autonomous_decision_making": {
+          "type": "boolean"
+        },
+        "self_learning_runtime": {
+          "type": "boolean"
+        },
+        "human_governance_required": {
+          "type": "boolean"
+        },
+        "remarks": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

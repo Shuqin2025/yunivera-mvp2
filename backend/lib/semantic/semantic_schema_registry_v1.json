@@ -1,0 +1,66 @@
+{
+  "schemaVersion": "1.0",
+  "description": "Canonical Semantic Schema Registry for Yunivera DEMO",
+  "fields": [
+    {
+      "field": "product_name",
+      "type": "string",
+      "labels": {
+        "zh": "产品名称",
+        "en": "Product Name",
+        "de": "Produktname"
+      },
+      "aliases": ["title", "name", "produktname"]
+    },
+    {
+      "field": "brand",
+      "type": "string",
+      "labels": {
+        "zh": "品牌",
+        "en": "Brand",
+        "de": "Marke"
+      },
+      "aliases": ["manufacturer", "brand_name"]
+    },
+    {
+      "field": "model",
+      "type": "string",
+      "labels": {
+        "zh": "型号",
+        "en": "Model",
+        "de": "Modell"
+      },
+      "aliases": ["model_number", "product_model"]
+    },
+    {
+      "field": "price",
+      "type": "number",
+      "labels": {
+        "zh": "价格",
+        "en": "Price",
+        "de": "Preis"
+      },
+      "aliases": ["cost", "amount"]
+    },
+    {
+      "field": "image",
+      "type": "string",
+      "labels": {
+        "zh": "图片",
+        "en": "Image",
+        "de": "Bild"
+      },
+      "aliases": ["image_url", "thumbnail"]
+    },
+    {
+      "field": "url",
+      "type": "string",
+      "labels": {
+        "zh": "链接",
+        "en": "URL",
+        "de": "URL"
+      },
+      "aliases": ["link", "product_url"]
+    }
+  ]
+}
