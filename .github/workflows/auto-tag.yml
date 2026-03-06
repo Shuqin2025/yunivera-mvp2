@@ -1,0 +1,79 @@
+name: Auto Tag (SemVer)
+
+on:
+  push:
+    branches: [ "main" ]
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (full history + tags)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute next version
+        id: ver
+        shell: bash
+        run: |
+          set -e
+
+          # latest tag like v1.2.3
+          last_tag="$(git tag --list 'v*' --sort=-v:refname | head -n 1)"
+          if [ -z "$last_tag" ]; then last_tag="v0.0.0"; fi
+          echo "Last tag: $last_tag"
+
+          # commits since last tag
+          range="$last_tag..HEAD"
+          log="$(git log --format=%B $range || true)"
+
+          bump="none"
+
+          # Major: BREAKING CHANGE or type!
+          if echo "$log" | grep -qiE 'BREAKING CHANGE|^[a-z]+(\([^)]+\))?!:'; then
+            bump="major"
+          # Minor: feat
+          elif echo "$log" | grep -qiE '^feat(\([^)]+\))?:'; then
+            bump="minor"
+          # Patch: fix
+          elif echo "$log" | grep -qiE '^fix(\([^)]+\))?:'; then
+            bump="patch"
+          fi
+
+          echo "Bump: $bump"
+          echo "bump=$bump" >> $GITHUB_OUTPUT
+          echo "last_tag=$last_tag" >> $GITHUB_OUTPUT
+
+          if [ "$bump" = "none" ]; then
+            echo "No version bump needed."
+            echo "next_tag=" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          ver="${last_tag#v}"
+          IFS='.' read -r major minor patch <<< "$ver"
+
+          case "$bump" in
+            major) major=$((major+1)); minor=0; patch=0 ;;
+            minor) minor=$((minor+1)); patch=0 ;;
+            patch) patch=$((patch+1)) ;;
+          esac
+
+          next_tag="v${major}.${minor}.${patch}"
+          echo "Next tag: $next_tag"
+          echo "next_tag=$next_tag" >> $GITHUB_OUTPUT
+
+      - name: Create and push tag
+        if: steps.ver.outputs.next_tag != ''
+        shell: bash
+        run: |
+          set -e
+          tag="${{ steps.ver.outputs.next_tag }}"
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git tag -a "$tag" -m "Release $tag"
+          git push origin "$tag"

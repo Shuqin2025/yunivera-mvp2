@@ -1,0 +1,99 @@
+{
+  "traceVersion": "1.0",
+  "eventId": "trace-20260321-00001",
+  "timestamp": "2026-03-21T10:22:31.441Z",
+  "requestId": "match-1771756908995",
+  "correlationId": "session-88f2d1",
+  "stage": "reason",
+
+  "actor": {
+    "type": "system",
+    "id": "reason-engine",
+    "role": "governance-evaluator"
+  },
+
+  "context": {
+    "domain": "ecommerce_basic",
+    "adapterId": "catalog",
+    "locale": "de-DE",
+    "sourceUrl": "https://example.com/product/sku123"
+  },
+
+  "versions": {
+    "engineVersion": "semanticCompressor@0.1.0",
+    "schemaVersion": "1.0",
+    "manifestSchemaVersion": "1.0",
+    "traceSchemaVersion": "1.0",
+    "ruleSetVersion": "v0.1.0"
+  },
+
+  "hashes": {
+    "inputBundleHash": "sha256:aa8821c4d1...",
+    "compressedBundleHash": "sha256:bb9012c55a...",
+    "manifestHash": "sha256:cc33129b8a...",
+    "decisionHash": "sha256:dd11992ff0..."
+  },
+
+  "semanticPath": [
+    { "step": "extract", "status": "ok" },
+    { "step": "normalize", "status": "ok" },
+    { "step": "map", "status": "ok" },
+    { "step": "compress", "status": "ok" },
+    { "step": "validate", "status": "ok" },
+    { "step": "reason", "status": "warn", "notes": "loss penalty applied" }
+  ],
+
+  "loss": {
+    "avgLossScore": 0.4,
+    "lossPenalty": 0.24,
+    "lossAlpha": 0.6,
+    "perItemLoss": [
+      { "itemId": "1", "loss": 0.4 }
+    ]
+  },
+
+  "ruleTriggers": [
+    {
+      "ruleId": "G-LOSS-PENALTY",
+      "fired": true,
+      "severity": "medium",
+      "score": 0.24,
+      "affectedFields": ["price.amount"],
+      "notes": {
+        "avgLossScore": 0.4,
+        "lossAlpha": 0.6
+      }
+    }
+  ],
+
+  "evidenceRefs": [
+    {
+      "field": "price.amount",
+      "locator": {
+        "type": "catalog_field",
+        "key": "price"
+      },
+      "confidence": 0.7
+    }
+  ],
+
+  "decision": {
+    "status": "needs_review",
+    "confidence": 0.76,
+    "decision": "partial",
+    "reasons": [
+      "Compression loss is non-trivial; review recommended."
+    ]
+  },
+
+  "metrics": {
+    "latencyMs": 12,
+    "itemsIn": 1,
+    "itemsOut": 1
+  },
+
+  "tags": [
+    "loss-governance",
+    "semantic-compression"
+  ]
+}
