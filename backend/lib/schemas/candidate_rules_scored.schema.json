@@ -1,0 +1,192 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "ssge://schemas/candidate_rules_scored.schema.json",
+  "title": "SSGE Candidate Rules Scored Schema v1",
+  "type": "object",
+  "required": ["schemaVersion", "generatedAt", "source", "candidates"],
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "pattern": "^1\\.0$"
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "source": {
+      "type": "object",
+      "required": ["traceDataset", "window"],
+      "additionalProperties": false,
+      "properties": {
+        "traceDataset": {
+          "type": "string",
+          "description": "Trace dataset identifier"
+        },
+        "window": {
+          "type": "object",
+          "required": ["start", "end"],
+          "properties": {
+            "start": { "type": "string", "format": "date-time" },
+            "end": { "type": "string", "format": "date-time" }
+          }
+        },
+        "ruleSetBaseline": {
+          "type": "string",
+          "description": "Baseline ruleset version used during mining"
+        }
+      }
+    },
+    "candidates": {
+      "type": "array",
+      "items": {
+        "$ref": "#/definitions/candidateRule"
+      }
+    }
+  },
+  "definitions": {
+    "candidateRule": {
+      "type": "object",
+      "required": [
+        "candidateId",
+        "title",
+        "when",
+        "then",
+        "metrics",
+        "examples"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "candidateId": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "proposedSeverity": {
+          "type": "string",
+          "enum": ["low", "medium", "high", "critical"]
+        },
+        "when": {
+          "$ref": "#/definitions/condition"
+        },
+        "then": {
+          "$ref": "#/definitions/actionSet"
+        },
+        "metrics": {
+          "type": "object",
+          "required": ["support", "precision", "lift"],
+          "additionalProperties": false,
+          "properties": {
+            "support": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "precision": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "lift": {
+              "type": "number",
+              "minimum": 0
+            },
+            "stabilityScore": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            }
+          }
+        },
+        "examples": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["requestId", "traceRef"],
+            "properties": {
+              "requestId": {
+                "type": "string"
+              },
+              "traceRef": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "proposed",
+            "approved",
+            "rejected"
+          ]
+        }
+      }
+    },
+    "condition": {
+      "type": "object",
+      "required": ["op"],
+      "properties": {
+        "op": {
+          "type": "string",
+          "enum": [
+            "all",
+            "any",
+            "not",
+            "gt",
+            "gte",
+            "lt",
+            "lte",
+            "eq",
+            "exists",
+            "missing"
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "value": {},
+        "conditions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/condition"
+          }
+        }
+      }
+    },
+    "actionSet": {
+      "type": "object",
+      "required": ["actions"],
+      "properties": {
+        "actions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/action"
+          }
+        }
+      }
+    },
+    "action": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "penalize_confidence",
+            "set_status",
+            "emit_trace",
+            "require_review"
+          ]
+        },
+        "value": {},
+        "message": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}

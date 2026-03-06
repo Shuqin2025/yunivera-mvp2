@@ -1,0 +1,24 @@
+{
+  "schemaRef": "semantic_schema_registry_v1",
+  "compressed_bundle": {
+    "requestId": "demo-governance-001",
+    "items": [
+      {
+        "itemId": "item-1",
+        "normalized": {
+          "product_name": "Wireless Headphones",
+          "brand": "AudioTech",
+          "model": "",
+          "price": 0,
+          "image": "https://example-shop.com/images/headphones.jpg",
+          "url": "https://example-shop.com/product/12345"
+        }
+      }
+    ]
+  },
+  "compression_manifest": {
+    "summary": {
+      "avgLossScore": 0.38
+    }
+  }
+}
