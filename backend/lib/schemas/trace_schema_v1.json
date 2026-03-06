@@ -1,0 +1,213 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "ssge://schemas/trace_schema_v1.json",
+  "title": "SSGE Trace Schema v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["traceVersion", "eventId", "timestamp", "requestId", "stage", "versions", "decision"],
+  "properties": {
+    "traceVersion": {
+      "type": "string",
+      "pattern": "^1\\.0$",
+      "description": "Trace schema version."
+    },
+    "eventId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Unique event id for this trace record."
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO-8601 timestamp of event creation."
+    },
+    "requestId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "End-to-end request id (correlates match/compress/reason/export)."
+    },
+    "correlationId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Optional correlation id across systems/services."
+    },
+    "stage": {
+      "type": "string",
+      "enum": ["ingest", "match", "compress", "reason", "export", "governance_update", "audit", "custom"],
+      "description": "Pipeline stage that produced this trace."
+    },
+    "actor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": { "type": "string", "enum": ["system", "human", "automation"] },
+        "id": { "type": "string" },
+        "role": { "type": "string" }
+      },
+      "description": "Who/what emitted this trace record."
+    },
+    "context": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "domain": { "type": "string", "description": "Domain or vertical (e.g., ecommerce_basic)." },
+        "adapterId": { "type": "string", "description": "Adapter/connector id." },
+        "tenantId": { "type": "string", "description": "Optional tenant id." },
+        "locale": { "type": "string", "description": "Locale like en-US, de-DE." },
+        "sourceUrl": { "type": "string" }
+      },
+      "description": "Lightweight routing context (no PII)."
+    },
+    "versions": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["engineVersion", "schemaVersion", "ruleSetVersion"],
+      "properties": {
+        "engineVersion": { "type": "string", "minLength": 1 },
+        "schemaVersion": { "type": "string", "minLength": 1 },
+        "manifestSchemaVersion": { "type": "string", "minLength": 1 },
+        "traceSchemaVersion": { "type": "string", "minLength": 1 },
+        "ruleSetVersion": { "type": "string", "minLength": 1 }
+      },
+      "description": "Pinned versions for replayability."
+    },
+    "hashes": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "inputBundleHash": { "type": "string" },
+        "compressedBundleHash": { "type": "string" },
+        "manifestHash": { "type": "string" },
+        "decisionHash": { "type": "string" }
+      },
+      "description": "Deterministic hashes to make trace auditable."
+    },
+    "refs": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "manifestPath": { "type": "string", "description": "Pointer to manifest archive object/path." },
+        "compressedBundlePath": { "type": "string", "description": "Pointer to compressed bundle archive object/path." },
+        "rawBundlePath": { "type": "string", "description": "Pointer to raw bundle archive object/path (optional)." }
+      },
+      "description": "Optional pointers to archived payloads."
+    },
+    "semanticPath": {
+      "type": "array",
+      "description": "High-level semantic steps taken (governance-oriented, model-agnostic).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["step", "status"],
+        "properties": {
+          "step": {
+            "type": "string",
+            "enum": ["extract", "normalize", "map", "compress", "validate", "reason", "export", "custom"]
+          },
+          "status": { "type": "string", "enum": ["ok", "warn", "fail"] },
+          "notes": { "type": "string" }
+        }
+      }
+    },
+    "loss": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "avgLossScore": { "type": "number", "minimum": 0, "maximum": 1 },
+        "lossPenalty": { "type": "number", "minimum": 0, "maximum": 1 },
+        "lossAlpha": { "type": "number", "minimum": 0, "maximum": 1 },
+        "perItemLoss": {
+          "type": ["array", "null"],
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["itemId", "loss"],
+            "properties": {
+              "itemId": { "type": "string" },
+              "loss": { "type": "number", "minimum": 0, "maximum": 1 }
+            }
+          }
+        }
+      },
+      "description": "Loss metrics used by governance reasoning."
+    },
+    "ruleTriggers": {
+      "type": "array",
+      "description": "Rules triggered in this stage (with traceable metadata).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["ruleId", "fired", "severity"],
+        "properties": {
+          "ruleId": { "type": "string", "minLength": 1 },
+          "fired": { "type": "boolean" },
+          "severity": { "type": "string", "enum": ["low", "medium", "high", "critical"] },
+          "score": { "type": "number", "minimum": 0, "maximum": 1 },
+          "affectedFields": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "notes": { "type": "object", "additionalProperties": true }
+        }
+      }
+    },
+    "evidenceRefs": {
+      "type": "array",
+      "description": "Pointers to evidence anchors recorded in manifest (no raw sensitive data).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["field", "locator"],
+        "properties": {
+          "field": { "type": "string" },
+          "locator": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["type"],
+            "properties": {
+              "type": { "type": "string" },
+              "key": { "type": "string" },
+              "path": { "type": "string" }
+            }
+          },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+      }
+    },
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "confidence", "decision"],
+      "properties": {
+        "status": { "type": "string", "enum": ["ok", "needs_review", "reject", "partial"] },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "decision": { "type": "string", "minLength": 1 },
+        "reasons": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "description": "Governance decision summary at this stage."
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "latencyMs": { "type": "integer", "minimum": 0 },
+        "itemsIn": { "type": "integer", "minimum": 0 },
+        "itemsOut": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "tags": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Optional labels for filtering/search."
+    },
+    "notes": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Free-form metadata (avoid PII)."
+    }
+  }
+}
