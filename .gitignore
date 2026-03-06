@@ -20,3 +20,4 @@ install-hooks.ps1
 sync.ps1
 sync-pro.ps1
 .idea/
+backend/demo/output/
