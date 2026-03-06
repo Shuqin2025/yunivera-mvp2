@@ -1,0 +1,18 @@
+{
+  "artifact_set": "SSGE Governance Demo",
+  "version": "v1",
+  "generated_by": "run_governance_demo.js",
+  "engine_version": "SSGE Demo 0.1.0",
+  "artifacts": [
+    {
+      "type": "decision",
+      "file": "decision_normal_example_v1.json",
+      "description": "Example governance decision generated in normal demo mode"
+    },
+    {
+      "type": "governance_report",
+      "file": "governance_report_normal_example_v1.json",
+      "description": "Example governance report generated in normal demo mode"
+    }
+  ]
+}

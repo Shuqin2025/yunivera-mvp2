@@ -1,0 +1,55 @@
+{
+  "report_version": "1.0",
+  "report_id": "gov-report-demo-normal-001",
+  "generated_at": "2026-03-06T19:51:30.363Z",
+  "input": {
+    "input_id": "demo-normal-001",
+    "source_url": "https://example-shop.com/product/12345",
+    "input_type": "url"
+  },
+  "system_context": {
+    "engine": "SSGE Demo",
+    "engine_version": "0.1.0",
+    "governance_mode": "active",
+    "ruleset_version": "v0.1.0",
+    "schema_version": "semantic_schema_registry_v1"
+  },
+  "risk_assessment": {
+    "risk_level": "medium",
+    "risk_score": 0.02,
+    "reason": "Governance rules triggered with avgLossScore=0.02."
+  },
+  "rules_triggered": [
+    {
+      "rule_id": "G-MISSING-SKU",
+      "description": "Triggered by Policy Engine (G-MISSING-SKU)",
+      "severity": "medium"
+    }
+  ],
+  "actions_taken": [
+    {
+      "action": "set_status",
+      "value": "needs_review",
+      "message": "Manual review required."
+    },
+    {
+      "action": "log_trace_event"
+    }
+  ],
+  "governance_trace": {
+    "trace_id": "trace_demo-normal-001",
+    "manifest_ref": "manifest_demo-normal-001",
+    "ruleset_version": "v0.1.0",
+    "decision_hash": "f41e772e"
+  },
+  "loss_summary": {
+    "avg_loss_score": 0.02,
+    "loss_penalty": 0
+  },
+  "compliance_notes": {
+    "autonomous_decision_making": false,
+    "self_learning_runtime": false,
+    "human_governance_required": true,
+    "remarks": "This DEMO runs in a controlled environment and uses versioned policy artifacts only."
+  }
+}
