@@ -1,0 +1,24 @@
+{
+  "schemaRef": "semantic_schema_registry_v1",
+  "compressed_bundle": {
+    "requestId": "demo-normal-001",
+    "items": [
+      {
+        "itemId": "item-1",
+        "normalized": {
+          "product_name": "Wireless Bluetooth Headphones",
+          "brand": "AudioTech",
+          "model": "ATH-BT500",
+          "price": 129.99,
+          "image": "https://example-shop.com/images/headphones.jpg",
+          "url": "https://example-shop.com/product/12345"
+        }
+      }
+    ]
+  },
+  "compression_manifest": {
+    "summary": {
+      "avgLossScore": 0.02
+    }
+  }
+}

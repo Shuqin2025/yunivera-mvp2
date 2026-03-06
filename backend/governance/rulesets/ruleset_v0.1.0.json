@@ -1,0 +1,116 @@
+{
+  "policyVersion": "1.0",
+  "ruleSetVersion": "v0.1.0",
+  "createdAt": "2026-03-21T09:00:00Z",
+  "status": "active",
+
+  "defaults": {
+    "baseConfidence": 1.0,
+    "lossAlpha": 0.6,
+
+    "thresholds": {
+      "warnLoss": 0.2,
+      "reviewLoss": 0.35,
+      "rejectLoss": 0.75
+    },
+
+    "actions": {
+      "onWarn": "penalize",
+      "onReview": "flag",
+      "onReject": "block"
+    }
+  },
+
+  "rules": [
+
+    {
+      "ruleId": "G-LOSS-PENALTY",
+      "title": "Apply confidence penalty when compression loss is high",
+      "description": "Reduce confidence based on avgLossScore.",
+      "severity": "medium",
+      "enabled": true,
+
+      "when": {
+        "op": "gt",
+        "path": "$.loss.avgLossScore",
+        "value": 0.3
+      },
+
+      "then": {
+        "actions": [
+          {
+            "type": "penalize_confidence",
+            "value": 0.2
+          },
+          {
+            "type": "set_status",
+            "value": "needs_review"
+          },
+          {
+            "type": "emit_trace",
+            "message": "Compression loss penalty applied."
+          }
+        ]
+      },
+
+      "metrics": {
+        "minSupport": 50,
+        "minPrecision": 0.8,
+        "minLift": 1.2
+      }
+    },
+
+    {
+      "ruleId": "G-MISSING-SKU",
+      "title": "SKU missing in normalized data",
+      "description": "SKU must exist for catalog items.",
+      "severity": "high",
+      "enabled": true,
+
+      "when": {
+        "op": "missing",
+        "path": "$.items[*].normalized.sku"
+      },
+
+      "then": {
+        "actions": [
+          {
+            "type": "require_review"
+          },
+          {
+            "type": "emit_trace",
+            "message": "SKU missing; manual review required."
+          }
+        ]
+      }
+    },
+
+    {
+      "ruleId": "G-PRICE-CONFLICT",
+      "title": "Conflicting price evidence",
+      "description": "Multiple evidence values for price field.",
+      "severity": "medium",
+      "enabled": true,
+
+      "when": {
+        "op": "gt",
+        "path": "$.manifest.summary.conflictsResolved",
+        "value": 0
+      },
+
+      "then": {
+        "actions": [
+          {
+            "type": "penalize_confidence",
+            "value": 0.1
+          },
+          {
+            "type": "emit_trace",
+            "message": "Price conflict detected in evidence."
+          }
+        ]
+      }
+    }
+
+  ]
+}
