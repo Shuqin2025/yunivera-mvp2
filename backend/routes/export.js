@@ -54,8 +54,8 @@ const LOCALES = {
 function pickLang(req) {
   const q = String(req.query.lang || "").toLowerCase();
   const h = String(req.header("X-Lang") || "").toLowerCase();
-  const lang = ["zh", "de", "en"].includes(q) ? q : (["zh","de","en"].includes(h) ? h : "de");
-  return LOCALES[lang] || LOCALES.de;
+  const lang = ["zh", "de", "en"].includes(q) ? q : (["zh","de","en"].includes(h) ? h : "en");
+return LOCALES[lang] || LOCALES.en;
 }
 
 /* ---------------- small helpers ---------------- */
