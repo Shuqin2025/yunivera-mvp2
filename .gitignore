@@ -21,3 +21,4 @@ sync.ps1
 sync-pro.ps1
 .idea/
 backend/demo/output/
+*.xlsx
