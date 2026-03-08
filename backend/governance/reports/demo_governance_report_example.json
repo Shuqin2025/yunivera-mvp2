@@ -1,0 +1,72 @@
+{
+  "report_version": "1.0",
+  "report_id": "gov-report-demo-001",
+  "generated_at": "2026-03-21T14:30:00Z",
+
+  "input": {
+    "input_id": "demo_case_01",
+    "source_url": "https://example-shop.com/product/12345",
+    "input_type": "url"
+  },
+
+  "system_context": {
+    "engine": "SSGE Demo",
+    "engine_version": "0.1.0",
+    "governance_mode": "active",
+    "ruleset_version": "v0.1.0",
+    "schema_version": "semantic_schema_registry_v1"
+  },
+
+  "risk_assessment": {
+    "risk_level": "high",
+    "risk_score": 0.82,
+    "reason": "High semantic compression loss combined with missing critical product fields"
+  },
+
+  "rules_triggered": [
+    {
+      "rule_id": "G-LOSS-PENALTY",
+      "description": "Semantic compression loss exceeds governance threshold",
+      "severity": "high"
+    },
+    {
+      "rule_id": "R-MODEL-MISSING",
+      "description": "Product model field missing",
+      "severity": "medium"
+    }
+  ],
+
+  "actions_taken": [
+    {
+      "action": "set_status",
+      "value": "needs_review",
+      "message": "Manual review recommended due to high loss score"
+    },
+    {
+      "action": "penalize_confidence",
+      "value": 0.2
+    },
+    {
+      "action": "log_trace_event"
+    }
+  ],
+
+  "governance_trace": {
+    "trace_id": "trace-1771756908995",
+    "manifest_ref": "compression_manifest_demo_001",
+    "ruleset_version": "v0.1.0",
+    "decision_hash": "3fa4c1b7c6e18a54f9c8a7d3b29e8b2d"
+  },
+
+  "loss_summary": {
+    "avg_loss_score": 0.38,
+    "loss_penalty": 0.22
+  },
+
+  "compliance_notes": {
+    "autonomous_decision_making": false,
+    "self_learning_runtime": false,
+    "human_governance_required": true,
+    "remarks": "This DEMO system performs deterministic parsing and rule-based governance checks only."
+  }
+}

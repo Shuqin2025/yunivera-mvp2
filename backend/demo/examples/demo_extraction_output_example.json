@@ -1,0 +1,14 @@
+{
+  "sourceUrl": "https://example-shop.com/product/12345",
+  "extractedAt": "2026-03-21T10:00:00Z",
+  "items": [
+    {
+      "product_name": "Wireless Bluetooth Headphones",
+      "brand": "AudioTech",
+      "model": "ATH-BT500",
+      "price": 129.99,
+      "image": "https://example-shop.com/images/headphones.jpg",
+      "url": "https://example-shop.com/product/12345"
+    }
+  ]
+}
