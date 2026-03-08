@@ -1,0 +1,54 @@
+{
+  "schemaVersion": "1.0",
+  "generatedAt": "2026-03-21T11:00:00Z",
+  "source": {
+    "traceDataset": "trace_events.jsonl",
+    "window": {
+      "start": "2026-03-01T00:00:00Z",
+      "end": "2026-03-21T00:00:00Z"
+    },
+    "ruleSetBaseline": "v0.1.0"
+  },
+  "candidates": [
+    {
+      "candidateId": "CAND-LOSS-001",
+      "title": "High compression loss correlates with manual review",
+      "description": "Requests with avgLossScore above 0.35 frequently end in manual review.",
+      "proposedSeverity": "medium",
+      "when": {
+        "op": "gt",
+        "path": "$.loss.avgLossScore",
+        "value": 0.35
+      },
+      "then": {
+        "actions": [
+          {
+            "type": "penalize_confidence",
+            "value": 0.2
+          },
+          {
+            "type": "set_status",
+            "value": "needs_review"
+          }
+        ]
+      },
+      "metrics": {
+        "support": 87,
+        "precision": 0.84,
+        "lift": 1.36,
+        "stabilityScore": 0.91
+      },
+      "examples": [
+        {
+          "requestId": "match-1771756908995",
+          "traceRef": "trace-20260321-00001"
+        },
+        {
+          "requestId": "match-1771756909012",
+          "traceRef": "trace-20260320-00077"
+        }
+      ],
+      "status": "proposed"
+    }
+  ]
+}
