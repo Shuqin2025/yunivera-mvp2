@@ -1,5 +1,5 @@
 // backend/routes/export.js — Final i18n build (zh/de/en)
-// Layout: Item No. | Picture | Description | MOQ | Unit Price | Link
+// Layout: # | Item No. | Picture | Description | MOQ | Unit Price | Link
 // Features: bigger images (180x135), price fallback, strong Item No. fallback,
 // compact layout, i18n headers + filename + price numFmt.
 
@@ -16,6 +16,7 @@ const UA =
 /* ---------------- i18n ---------------- */
 const LOCALES = {
   en: {
+    index: "#",
     itemNo: "Item No.",
     picture: "Picture",
     description: "Description",
@@ -23,11 +24,13 @@ const LOCALES = {
     unitPrice: "Unit Price",
     link: "Link",
     filename: "products",
+    sheetName: "Catalog",
     nf: "en-GB",
     // Excel numFmt per locale (optional fine-tune)
     numFmt: '€ #,##0.00'
   },
   de: {
+    index: "#",
     itemNo: "Artikel-Nr.",
     picture: "Bild",
     description: "Beschreibung",
@@ -35,10 +38,12 @@ const LOCALES = {
     unitPrice: "Stückpreis",
     link: "Link",
     filename: "produkte",
+    sheetName: "Katalog",
     nf: "de-DE",
     numFmt: '#,##0.00 "€"'
   },
   zh: {
+    index: "#",
     itemNo: "产品编号",
     picture: "图片",
     description: "描述",
@@ -46,6 +51,7 @@ const LOCALES = {
     unitPrice: "单价",
     link: "链接",
     filename: "产品清单",
+    sheetName: "目录",
     nf: "zh-CN",
     numFmt: '#,##0.00 "€"'
   }
@@ -272,38 +278,43 @@ async function buildWorkbookBuffer(rawBody = {}, i18n = LOCALES.de) {
   );
 
   const wb = new ExcelJS.Workbook();
-  const ws = wb.addWorksheet("Sheet1");
+  const ws = wb.addWorksheet(i18n.sheetName || "Catalog");
 
   // columns & styles (i18n headers)
   ws.columns = [
-    { header: i18n.itemNo,    key: "itemNo",    width: 18 },
-    { header: i18n.picture,   key: "picture",   width: 30 }, // fit 180px
-    { header: i18n.description, key: "description", width: 60 },
-    { header: i18n.moq,       key: "moq",       width: 10 },
-    { header: i18n.unitPrice, key: "unitPrice", width: 14 },
-    { header: i18n.link,      key: "link",      width: 60 }
+    { header: i18n.index || "#", key: "index", width: 6 },
+    { header: i18n.itemNo,       key: "itemNo", width: 18 },
+    { header: i18n.picture,      key: "picture", width: 30 }, // fit 180px
+    { header: i18n.description,  key: "description", width: 60 },
+    { header: i18n.moq,          key: "moq", width: 10 },
+    { header: i18n.unitPrice,    key: "unitPrice", width: 14 },
+    { header: i18n.link,         key: "link", width: 16 }
   ];
   ws.getRow(1).font = { bold: true };
+  ws.getColumn("index").alignment = { vertical: "middle", horizontal: "center" };
   ws.getColumn("picture").alignment = { vertical: "middle", horizontal: "center" };
   ws.getColumn("description").alignment = { wrapText: true, vertical: "top" };
-  ws.getColumn("link").alignment = { wrapText: true };
+  ws.getColumn("moq").alignment = { vertical: "middle", horizontal: "center" };
+  ws.getColumn("unitPrice").alignment = { vertical: "middle", horizontal: "right" };
+  ws.getColumn("link").alignment = { vertical: "middle", horizontal: "center" };
 
   const hasAnyImage = items.some((it) => it.imageUrl);
 
   // rows (text first)
-  items.forEach((it) => {
+  items.forEach((it, idx) => {
     const row = ws.addRow({
+      index: idx + 1,
       itemNo: it.itemNo || "",
       picture: "",
       description: it.description,
       moq: it.moq,
       unitPrice: it.unitPrice === "" ? "" : it.unitPrice,
-      link: it.link
+      link: it.link ? "Open" : ""
     });
 
     if (it.link) {
       const c = row.getCell("link");
-      c.value = { text: it.link, hyperlink: it.link };
+      c.value = { text: "Open", hyperlink: it.link };
       c.font = { color: { argb: "FF1B73E8" }, underline: true };
     }
     if (it.unitPrice !== "") {
@@ -316,6 +327,12 @@ async function buildWorkbookBuffer(rawBody = {}, i18n = LOCALES.de) {
 
   // images in column B (0-based col=1)
   const limitImg = pLimit(4);
+  ws.views = [{ state: "frozen", ySplit: 1 }];
+  ws.autoFilter = {
+    from: { row: 1, column: 1 },
+    to: { row: 1, column: 7 }
+  };
+
   await Promise.all(
     items.map((it, idx) =>
       limitImg(async () => {
@@ -325,7 +342,7 @@ async function buildWorkbookBuffer(rawBody = {}, i18n = LOCALES.de) {
           const id = wb.addImage({ buffer, extension });
           const rowIdx = idx + 2; // data starts at row 2
           ws.addImage(id, {
-            tl: { col: 1, row: rowIdx - 1 },
+            tl: { col: 2, row: rowIdx - 1 },
             ext: { width: 180, height: 135 },
             editAs: "oneCell"
           });
