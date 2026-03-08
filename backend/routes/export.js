@@ -1,7 +1,6 @@
-// backend/routes/export.js — Final i18n build (zh/de/en)
+// backend/routes/export.js
+// Final i18n build (zh/de/en)
 // Layout: # | Item No. | Picture | Description | MOQ | Unit Price | Link
-// Features: bigger images (180x135), price fallback, strong Item No. fallback,
-// compact layout, i18n headers + filename + price numFmt.
 
 import { Router } from "express";
 import ExcelJS from "exceljs";
@@ -10,10 +9,12 @@ import pLimit from "p-limit";
 import { fetchImagePreferJpeg } from "../lib/modules/crawler.js";
 
 const router = Router();
+
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36";
 
 /* ---------------- i18n ---------------- */
+
 const LOCALES = {
   en: {
     index: "#",
@@ -26,7 +27,6 @@ const LOCALES = {
     filename: "products",
     sheetName: "Catalog",
     nf: "en-GB",
-    // Excel numFmt per locale (optional fine-tune)
     numFmt: '€ #,##0.00'
   },
   de: {
@@ -60,14 +60,18 @@ const LOCALES = {
 function pickLang(req) {
   const q = String(req.query.lang || "").toLowerCase();
   const h = String(req.header("X-Lang") || "").toLowerCase();
-  const lang = ["zh", "de", "en"].includes(q) ? q : (["zh","de","en"].includes(h) ? h : "en");
-return LOCALES[lang] || LOCALES.en;
+  const lang = ["zh", "de", "en"].includes(q)
+    ? q
+    : (["zh", "de", "en"].includes(h) ? h : "en");
+  return LOCALES[lang] || LOCALES.en;
 }
 
 /* ---------------- small helpers ---------------- */
 
 const pickFirst = (obj, keys, fallback = "") => {
-  for (const k of keys) if (obj && obj[k] != null && obj[k] !== "") return obj[k];
+  for (const k of keys) {
+    if (obj && obj[k] != null && obj[k] !== "") return obj[k];
+  }
   return fallback;
 };
 
@@ -86,55 +90,79 @@ function normalizeItems(body = {}) {
     const imageUrl = pickFirst(r, ["imageUrl", "img", "image", "picture", "photo"]);
     const title = pickFirst(r, ["title", "description", "name", "productName"]);
     const rawSku = pickFirst(r, [
-      "sku", "code", "model", "mpn", "itemNo", "item_no", "id", "number",
-      "artikelnummer", "artikel_nr", "artnr", "art_no", "artno", "productCode"
+      "sku",
+      "code",
+      "model",
+      "mpn",
+      "itemNo",
+      "item_no",
+      "id",
+      "number",
+      "artikelnummer",
+      "artikel_nr",
+      "artnr",
+      "art_no",
+      "artno",
+      "productCode"
     ]);
     const price = pickFirst(r, ["price", "amount", "value"]);
     return { link, imageUrl, title, rawSku, price };
   });
 }
 
-// quick local guess (no placeholder if missing)
 function deriveItemNoLocal({ rawSku, link = "", title = "" }) {
   if (rawSku) return String(rawSku).trim();
-  const m1 = (link || "").match(/(\d{2}-\d{5})(?:\.\w+)?$/); // e.g. 02-22001
+
+  const m1 = (link || "").match(/(\d{2}-\d{5})(?:\.\w+)?$/);
   if (m1) return m1[1];
-  const m2 = (title || "").match(/\b[A-Z0-9]{2,8}-\d{3,8}\b/); // e.g. PV4-12345
+
+  const m2 = (title || "").match(/\b[A-Z0-9]{2,8}-\d{3,8}\b/);
   if (m2) return m2[0];
+
   return "";
 }
 
-// "9,00 EUR" / "€9.00" / "1.234,56" -> numeric
 function parsePriceNumeric(s) {
   if (s == null || s === "") return "";
+
   let str = String(s).replace(/[^\d.,-]/g, "").trim();
   if (!str) return "";
+
   const lastDot = str.lastIndexOf(".");
   const lastComma = str.lastIndexOf(",");
+
   if (lastComma > lastDot) {
     str = str.replace(/\./g, "").replace(",", ".");
   } else {
     str = str.replace(/,/g, "");
   }
+
   const num = Number(str);
   return Number.isFinite(num) ? num : "";
 }
 
-/* ---------------- price fallback: fetch product page ---------------- */
+/* ---------------- price fallback ---------------- */
 
 async function fetchPriceFromPage(url) {
   if (!url) return "";
+
   try {
     const { data: html } = await axios.get(url, {
-      headers: { "User-Agent": UA, "Referer": new URL(url).origin },
+      headers: {
+        "User-Agent": UA,
+        Referer: new URL(url).origin
+      },
       timeout: 12000
     });
 
-    let m = html.match(/<meta[^>]+property=["']product:price:amount["'][^>]+content=["']([^"']+)["']/i);
+    let m = html.match(
+      /<meta[^>]+property=["']product:price:amount["'][^>]+content=["']([^"']+)["']/i
+    );
     if (m) return parsePriceNumeric(m[1]);
 
     m = html.match(/itemprop=["']price["'][^>]+content=["']([^"']+)["']/i);
     if (m) return parsePriceNumeric(m[1]);
+
     m = html.match(/<span[^>]+itemprop=["']price["'][^>]*>([\s\S]*?)<\/span>/i);
     if (m) return parsePriceNumeric(m[1]);
 
@@ -152,13 +180,14 @@ async function fetchPriceFromPage(url) {
   }
 }
 
-/* ---------------- item no. fallback: fetch product page ---------------- */
+/* ---------------- item no. fallback ---------------- */
 
-// walk any JSON for sku/mpn
 function findSkuInJson(obj) {
   if (!obj || typeof obj !== "object") return "";
+
   if (typeof obj.sku === "string" && obj.sku.trim()) return obj.sku.trim();
   if (typeof obj.mpn === "string" && obj.mpn.trim()) return obj.mpn.trim();
+
   for (const k of Object.keys(obj)) {
     const v = obj[k];
     if (v && typeof v === "object") {
@@ -171,14 +200,22 @@ function findSkuInJson(obj) {
 
 async function fetchItemNoFromPage(url) {
   if (!url) return "";
+
   try {
     const { data: html } = await axios.get(url, {
-      headers: { "User-Agent": UA, "Referer": new URL(url).origin },
+      headers: {
+        "User-Agent": UA,
+        Referer: new URL(url).origin
+      },
       timeout: 12000
     });
 
-    // 1) JSON-LD blocks
-    const ldBlocks = [...html.matchAll(/<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)];
+    const ldBlocks = [
+      ...html.matchAll(
+        /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi
+      )
+    ];
+
     for (const m of ldBlocks) {
       try {
         const data = JSON.parse(m[1]);
@@ -187,15 +224,13 @@ async function fetchItemNoFromPage(url) {
       } catch {}
     }
 
-    // 2) microdata/meta: itemprop="sku"
     let m =
       html.match(/itemprop=["']sku["'][^>]+content=["']([^"']+)["']/i) ||
       html.match(/<[^>]+itemprop=["']sku["'][^>]*>([\s\S]*?)<\/[^>]+>/i);
     if (m && m[1]) return m[1].replace(/<[^>]+>/g, "").trim();
 
-    // 3) visible labels (multi-lingual)
     const labelPatterns = [
-      /Art\.?\s*[-\.]?\s*Nr\.?\s*[:#]?\s*([A-Za-z0-9\-_.\/]+)/i,
+      /Art\.?\s*[-.]?\s*Nr\.?\s*[:#]?\s*([A-Za-z0-9\-_.\/]+)/i,
       /Artikel(?:nummer|-?Nr\.?)\s*[:#]?\s*([A-Za-z0-9\-_.\/]+)/i,
       /Bestell(?:nummer|-?Nr\.?)\s*[:#]?\s*([A-Za-z0-9\-_.\/]+)/i,
       /Hersteller-?Nr\.?\s*[:#]?\s*([A-Za-z0-9\-_.\/]+)/i,
@@ -203,12 +238,12 @@ async function fetchItemNoFromPage(url) {
       /Product\s*code\s*[:#]?\s*([A-Za-z0-9\-_.\/]+)/i,
       /Model\s*[:#]?\s*([A-Za-z0-9\-_.\/]+)/i
     ];
+
     for (const re of labelPatterns) {
       const mm = html.match(re);
       if (mm && mm[1]) return mm[1].trim();
     }
 
-    // 4) last try: URL pattern
     m = url.match(/\b([A-Z0-9]{2,8}-\d{3,8})\b/i);
     if (m) return m[1];
 
@@ -218,40 +253,69 @@ async function fetchItemNoFromPage(url) {
   }
 }
 
-function extFromContentType(ct = "") {
-  ct = (ct || "").toLowerCase();
-  if (ct.includes("png")) return "png";
-  if (ct.includes("jpeg") || ct.includes("jpg")) return "jpeg";
-  if (ct.includes("webp")) return "webp";
-  if (ct.includes("gif")) return "gif";
-  return "png";
+/* ---------------- image helpers ---------------- */
+
+function normalizeImageExtension(ext = "") {
+  const x = String(ext).toLowerCase().trim();
+  if (x === "jpg") return "jpeg";
+  if (x === "jpeg") return "jpeg";
+  if (x === "png") return "png";
+  if (x === "gif") return "gif";
+  if (x === "webp") return "png";
+  return "jpeg";
 }
 
-async function fetchImageBuffer(imgUrl) {
+async function fetchImageBuffer(imgUrl, reqBase) {
   if (!imgUrl) return null;
+
+  // 1) 优先走 gateway 图片代理，最稳
   try {
-    const base = `${globalThis.thisReqProtocol || 'https'}://${globalThis.thisReqHost || ''}`;
-    const proxy = `${base}/v1/api/image?format=raw&url=${encodeURIComponent(imgUrl)}`;
-    const resp = await axios.get(proxy, { responseType: "arraybuffer", timeout: 15000, validateStatus: s => s>=200 && s<400 });
-    const ct = String(resp.headers["content-type"] || "");
-    if (/(jpeg|jpg|png|gif)/i.test(ct)) {
-      const extension = /png/i.test(ct) ? "png" : /gif/i.test(ct) ? "gif" : "jpeg";
-      return { buffer: Buffer.from(resp.data), extension };
+    const proxy = `${reqBase}/v1/api/image?format=raw&url=${encodeURIComponent(imgUrl)}`;
+    const resp = await axios.get(proxy, {
+      responseType: "arraybuffer",
+      timeout: 15000,
+      validateStatus: (s) => s >= 200 && s < 400
+    });
+
+    const ct = String(resp.headers["content-type"] || "").toLowerCase();
+    if (ct.includes("png") || ct.includes("jpeg") || ct.includes("jpg") || ct.includes("gif")) {
+      const extension = ct.includes("png")
+        ? "png"
+        : ct.includes("gif")
+          ? "gif"
+          : "jpeg";
+
+      const buffer = Buffer.from(resp.data);
+      if (buffer.length > 0) {
+        return { buffer, extension };
+      }
     }
-  } catch {}
+  } catch (e) {
+    console.warn("[excel image proxy failed]", imgUrl, e?.message || e);
+  }
+
+  // 2) fallback：直接抓
   try {
     const x = await fetchImagePreferJpeg(imgUrl, 15000);
-    if (x && /(jpeg|jpg|png|gif)/i.test(String(x.extension))) return { buffer: x.buffer, extension: x.extension };
-  } catch {}
+    if (x?.buffer?.length) {
+      return {
+        buffer: x.buffer,
+        extension: normalizeImageExtension(x.extension)
+      };
+    }
+  } catch (e) {
+    console.warn("[excel image direct failed]", imgUrl, e?.message || e);
+  }
+
   return null;
 }
 
 /* ---------------- workbook builder ---------------- */
 
-async function buildWorkbookBuffer(rawBody = {}, i18n = LOCALES.de) {
+async function buildWorkbookBuffer(rawBody = {}, i18n = LOCALES.en, reqBase = "") {
   const rawItems = normalizeItems(rawBody);
 
-  let items = rawItems.map((r) => ({
+  const items = rawItems.map((r) => ({
     itemNo: deriveItemNoLocal(r) || "",
     description: r.title || "",
     moq: "",
@@ -260,7 +324,6 @@ async function buildWorkbookBuffer(rawBody = {}, i18n = LOCALES.de) {
     imageUrl: r.imageUrl || ""
   }));
 
-  // fill missing price & itemNo via product page (concurrency 3)
   const limit = pLimit(3);
   await Promise.all(
     items.map((it, i) =>
@@ -280,73 +343,87 @@ async function buildWorkbookBuffer(rawBody = {}, i18n = LOCALES.de) {
   const wb = new ExcelJS.Workbook();
   const ws = wb.addWorksheet(i18n.sheetName || "Catalog");
 
-  // columns & styles (i18n headers)
   ws.columns = [
     { header: i18n.index || "#", key: "index", width: 6 },
-    { header: i18n.itemNo,       key: "itemNo", width: 18 },
-    { header: i18n.picture,      key: "picture", width: 30 }, // fit 180px
-    { header: i18n.description,  key: "description", width: 60 },
-    { header: i18n.moq,          key: "moq", width: 10 },
-    { header: i18n.unitPrice,    key: "unitPrice", width: 14 },
-    { header: i18n.link,         key: "link", width: 16 }
+    { header: i18n.itemNo, key: "itemNo", width: 18 },
+    { header: i18n.picture, key: "picture", width: 24 },
+    { header: i18n.description, key: "description", width: 60 },
+    { header: i18n.moq, key: "moq", width: 10 },
+    { header: i18n.unitPrice, key: "unitPrice", width: 14 },
+    { header: i18n.link, key: "link", width: 16 }
   ];
+
   ws.getRow(1).font = { bold: true };
+
   ws.getColumn("index").alignment = { vertical: "middle", horizontal: "center" };
+  ws.getColumn("itemNo").alignment = { vertical: "middle" };
   ws.getColumn("picture").alignment = { vertical: "middle", horizontal: "center" };
   ws.getColumn("description").alignment = { wrapText: true, vertical: "top" };
   ws.getColumn("moq").alignment = { vertical: "middle", horizontal: "center" };
   ws.getColumn("unitPrice").alignment = { vertical: "middle", horizontal: "right" };
   ws.getColumn("link").alignment = { vertical: "middle", horizontal: "center" };
 
-  const hasAnyImage = items.some((it) => it.imageUrl);
-
-  // rows (text first)
-  items.forEach((it, idx) => {
-    const row = ws.addRow({
-      index: idx + 1,
-      itemNo: it.itemNo || "",
-      picture: "",
-      description: it.description,
-      moq: it.moq,
-      unitPrice: it.unitPrice === "" ? "" : it.unitPrice,
-      link: it.link ? "Open" : ""
-    });
-
-    if (it.link) {
-      const c = row.getCell("link");
-      c.value = { text: "Open", hyperlink: it.link };
-      c.font = { color: { argb: "FF1B73E8" }, underline: true };
-    }
-    if (it.unitPrice !== "") {
-      // 显示用 Excel numFmt（按语言给不同样式）
-      row.getCell("unitPrice").numFmt = i18n.numFmt;
-      row.getCell("unitPrice").value = Number(it.unitPrice);
-    }
-    row.height = hasAnyImage ? 105 : 20; // fits 135px image height
-  });
-
-  // images in column B (0-based col=1)
-  const limitImg = pLimit(4);
   ws.views = [{ state: "frozen", ySplit: 1 }];
   ws.autoFilter = {
     from: { row: 1, column: 1 },
     to: { row: 1, column: 7 }
   };
 
+  items.forEach((it, idx) => {
+    const row = ws.addRow({
+      index: idx + 1,
+      itemNo: it.itemNo || "",
+      picture: "",
+      description: it.description || "",
+      moq: it.moq || "",
+      unitPrice: it.unitPrice === "" ? "" : Number(it.unitPrice),
+      link: it.link ? "Open" : ""
+    });
+
+    row.height = 110;
+
+    if (it.link) {
+      const c = row.getCell("link");
+      c.value = { text: "Open", hyperlink: it.link };
+      c.font = { color: { argb: "FF1B73E8" }, underline: true };
+    }
+
+    if (it.unitPrice !== "") {
+      row.getCell("unitPrice").numFmt = i18n.numFmt;
+      row.getCell("unitPrice").value = Number(it.unitPrice);
+    }
+  });
+
+  const limitImg = pLimit(4);
+
   await Promise.all(
     items.map((it, idx) =>
       limitImg(async () => {
         if (!it.imageUrl) return;
+
         try {
-          const { buffer, extension } = await fetchImageBuffer(it.imageUrl);
-          const id = wb.addImage({ buffer, extension });
-          const rowIdx = idx + 2; // data starts at row 2
-          ws.addImage(id, {
-            tl: { col: 2, row: rowIdx - 1 },
-            ext: { width: 180, height: 135 },
+          const img = await fetchImageBuffer(it.imageUrl, reqBase);
+          if (!img?.buffer?.length) {
+            console.warn("[excel image missing]", it.imageUrl);
+            return;
+          }
+
+          const imageId = wb.addImage({
+            buffer: img.buffer,
+            extension: normalizeImageExtension(img.extension)
+          });
+
+          const rowNumber = idx + 2;
+
+          // Picture 列是第 3 列 => 0-based col = 2
+          ws.addImage(imageId, {
+            tl: { col: 2 + 0.12, row: rowNumber - 1 + 0.12 },
+            ext: { width: 92, height: 92 },
             editAs: "oneCell"
           });
-        } catch {}
+        } catch (e) {
+          console.warn("[excel image insert failed]", it.imageUrl, e?.message || e);
+        }
       })
     )
   );
@@ -356,11 +433,14 @@ async function buildWorkbookBuffer(rawBody = {}, i18n = LOCALES.de) {
 
 /* ---------------- routes ---------------- */
 
-router.post("/excel", async (req, res) => {
+async function handleExport(req, res, tag) {
   try {
     const i18n = pickLang(req);
-    const buf = await buildWorkbookBuffer(req.body, i18n);
+    const reqBase = `${req.protocol}://${req.get("host")}`;
+
+    const buf = await buildWorkbookBuffer(req.body, i18n, reqBase);
     const filename = `${i18n.filename}.xlsx`;
+
     res.setHeader(
       "Content-Type",
       "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -369,31 +449,20 @@ router.post("/excel", async (req, res) => {
       "Content-Disposition",
       `attachment; filename="${filename}"; filename*=UTF-8''${encodeURIComponent(filename)}`
     );
+
     res.send(Buffer.from(buf));
   } catch (err) {
-    console.error("[/export/excel] error:", err);
+    console.error(`[${tag}] error:`, err);
     res.status(500).json({ ok: false, error: String(err?.message || err) });
   }
+}
+
+router.post("/excel", async (req, res) => {
+  await handleExport(req, res, "/export/excel");
 });
 
 router.post("/xlsx", async (req, res) => {
-  try {
-    const i18n = pickLang(req);
-    const buf = await buildWorkbookBuffer(req.body, i18n);
-    const filename = `${i18n.filename}.xlsx`;
-    res.setHeader(
-      "Content-Type",
-      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    );
-    res.setHeader(
-      "Content-Disposition",
-      `attachment; filename="${filename}"; filename*=UTF-8''${encodeURIComponent(filename)}`
-    );
-    res.send(Buffer.from(buf));
-  } catch (err) {
-    console.error("[/export/xlsx] error:", err);
-    res.status(500).json({ ok: false, error: String(err?.message || err) });
-  }
+  await handleExport(req, res, "/export/xlsx");
 });
 
 export { router };
