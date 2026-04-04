@@ -135,8 +135,6 @@ app.use("/v1/api", reasonRouter);
 // 统一挂载（见下方）
 // load router lazily to avoid cyclic/declaration issues
 // --- legacy aliases: must be registered BEFORE catalogRouter mounts ---
-const { default: catalogRouter } = await import("./routes/catalog.js");
-app.use("/v1/api/catalog", catalogRouter);
 // health check
 app.get("/v1/health", (_req, res) => res.status(200).json({ ok: true }));
 app.get("/v1/api/health", (_req, res) => res.status(200).json({ ok: true }));
@@ -1297,6 +1295,9 @@ app.get("/v1/catalog", __handleCatalogParse);
 app.get("/v1/catalog.json", __handleCatalogParse);
 
 // ====== end compat routes ======
+
+const { default: catalogRouter } = await import("./routes/catalog.js");
+app.use("/v1/api/catalog", catalogRouter);
 
 const PORT = Number(process.env.PORT || 10000);
 
