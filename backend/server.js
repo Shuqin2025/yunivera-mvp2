@@ -5,6 +5,10 @@ import axios from "axios";
 // --- UA: single source of truth ---
 import * as cheerio from "cheerio";
 import ExcelJS from "exceljs";
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+import { writeArtifacts } from "./lib/artifacts.js";
 import imageRouter from "./routes/image.js";
 import matchRouter from "./routes/match.js";
 import reasonRouter from "./routes/reason.js";
@@ -99,7 +103,9 @@ function toTablePayload({ url = "", items = [], adapter = "generic" } = {}) {
 globalThis.normalizeRow = normalizeRow;
 globalThis.toTablePayload = toTablePayload;
 // === end table normalizer helpers ===
-
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const DEMO_OUTPUT_DIR = path.join(__dirname, "demo", "output");
 
 // --- app init & middlewares ---
 const app = express();
@@ -120,6 +126,7 @@ app.use(express.urlencoded({ extended: true }));
 
 app.use('/v1/api/generic', genericLinksParser);
 app.use('/v1/generic', genericLinksParser);
+app.use("/v1/api/demo/artifacts", express.static(DEMO_OUTPUT_DIR));
 // 图片路由（只挂载一次，避免多层 /image 或重复 CORS）
 app.use("/v1/api/image", (req, res, next) => { try { res.removeHeader("Access-Control-Allow-Origin"); } catch {} next(); }, imageRouter);
 app.use("/v1/api", matchRouter);
@@ -1244,6 +1251,9 @@ async function __handleCatalogParse(req, res) {
     const limit = Math.min(parseInt(req.query.limit || "50", 10) || 50, 200);
     const debug = /^(1|true|yes)$/i.test(String(req.query.debug || ""));
     const detailSku = /^(1|true|yes)$/i.test(String(req.query.detail || ""));
+    const wantsArtifacts =
+      /^(1|true|yes)$/i.test(String(req.query.artifacts || "")) ||
+      /^(1|true|yes)$/i.test(String(req.query.demoArtifacts || ""));
 
     if (!url) return res.status(400).json({ ok: false, error: "missing url" });
 
@@ -1251,7 +1261,22 @@ async function __handleCatalogParse(req, res) {
       await parseUniversalCatalog(url, limit, { debug, detailSku });
 
     const payload = toTablePayload({ url, items, adapter });
-    return res.json(payload);
+
+    if (!wantsArtifacts) {
+      return res.json(payload);
+    }
+
+    const artifactInfo = writeArtifacts({
+      inputUrl: url,
+      items,
+      adapter,
+      baseUrl: `${req.protocol}://${req.get("host")}`
+    });
+
+    return res.json({
+      ...payload,
+      artifacts: artifactInfo
+    });
   } catch (e) {
     return res
       .status(500)
