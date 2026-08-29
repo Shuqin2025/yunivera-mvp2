@@ -266,7 +266,7 @@ function chooseAdapter({ url, $, html, hintType, host }) {
 function callTemplateParse(html, url, opts) {
   try {
     if (templateParser && typeof templateParser.parse === "function") {
-      return templateParser.parse(loadHtml(html), url, opts);
+     return templateParser.parse(html, url, opts);
     }
     if (typeof templateParser === "function") {
       return templateParser({ html, url, ...(opts || {}) });
