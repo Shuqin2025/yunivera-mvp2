@@ -139,7 +139,7 @@ const api={ id:'woocommerce', test:(_$, u)=>/woocommerce|\/product-category\//i.
 // ======= ADDON: deep anchor fallback for Shopware =======
 function shopwareDeepAnchorFallback($, base) {
   const deny = /konto|account|login|warenkorb|cart|agb|datenschutz|impressum|versand|zahlung|kontakt|sitemap|newsletter|hilfe|support|widerruf/i;
-  const allow = /detail|produkt|artikel|product|/i;
+  const allow = /detail|produkt|artikel|product/i;
 
   const urls = new Set();
   $('a[href]').each((_, a) => {
