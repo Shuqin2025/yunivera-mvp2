@@ -22,12 +22,29 @@ try {
 } catch {}
 
 // ---- platform parsers (lazy top-level import; support default or namespace) ----
-const shopware = (await import("./parsers/shopwareParser.js").catch(() => ({}))).default ?? (await import("./parsers/shopwareParser.js").catch(() => ({})));
-const woo      = (await import("./parsers/woocommerceParser.js").catch(() => ({}))).default ?? (await import("./parsers/woocommerceParser.js").catch(() => ({})));
-const magento  = (await import("./parsers/magentoParser.js").catch(() => ({}))).default ?? (await import("./parsers/magentoParser.js").catch(() => ({})));
-const shopify  = (await import("./parsers/shopifyParser.js").catch(() => ({}))).default ?? (await import("./parsers/shopifyParser.js").catch(() => ({})));
-const generic  = (await import("./parsers/genericLinksParser.js").catch(() => ({}))).default ?? (await import("./parsers/genericLinksParser.js").catch(() => ({})));
+async function loadParser(label, path) {
+  try {
+    const mod = await import(path);
+    const parser = mod.default ?? mod;
 
+    console.log(`[R1] ${label}: LOADED`, {
+      hasDefault: !!mod.default,
+      hasParse: typeof parser?.parse === "function",
+      keys: Object.keys(parser || {})
+    });
+
+    return parser;
+  } catch (e) {
+    console.error(`[R1] ${label}: FAILED`);
+    console.error(e);
+    return {};
+  }
+}
+
+const shopware = await loadParser("Shopware", "./parsers/shopwareParser.js");
+const woo      = await loadParser("WooCommerce", "./parsers/woocommerceParser.js");
+const magento  = await loadParser("Magento", "./parsers/magentoParser.js");
+const shopify  = await loadParser("Shopify", "./parsers/shopifyParser.js");
 // ---- helpers: artikel extractor & detail fetcher ----
 const artikelMod = await import("./modules/artikelExtractor.js").catch(() => ({}));
 const detailsMod = await import("./modules/detailFetcher.js").catch(() => ({}));
