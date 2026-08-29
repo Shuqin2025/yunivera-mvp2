@@ -157,4 +157,4 @@ function shopwareDeepAnchorFallback($, base) {
   return [...urls];
 }
 // ======= /ADDON =======
-module.exports=api; module.exports.default=api;
+export default api;
