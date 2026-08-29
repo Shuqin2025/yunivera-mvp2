@@ -45,6 +45,7 @@ const shopware = await loadParser("Shopware", "./parsers/shopwareParser.js");
 const woo      = await loadParser("WooCommerce", "./parsers/woocommerceParser.js");
 const magento  = await loadParser("Magento", "./parsers/magentoParser.js");
 const shopify  = await loadParser("Shopify", "./parsers/shopifyParser.js");
+const generic = (await import("./parsers/genericLinksParser.js").catch(() => ({}))).default ?? (await import("./parsers/genericLinksParser.js").catch(() => ({})));
 // ---- helpers: artikel extractor & detail fetcher ----
 const artikelMod = await import("./modules/artikelExtractor.js").catch(() => ({}));
 const detailsMod = await import("./modules/detailFetcher.js").catch(() => ({}));
