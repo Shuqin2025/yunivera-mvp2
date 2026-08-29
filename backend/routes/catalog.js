@@ -578,7 +578,13 @@ logger.debug(`[route/catalog.parse] url=${url} size=${qp.size ?? ""}`);
         adapter_used = "detail-skip";
         items = [];
       } else {
-        const ret = await runExtractListPage({ url, html, limit, debug: wantDebug, hintType });
+       const ret = await runExtractListPage({
+  url,
+  html,
+  limit,
+  debug: wantDebug,
+  hintType: hintType || structDebug?.platform || ""
+});
         items = ret.items || [];
         adapter_used = ret.adapter_used || "auto";
         debugPart = ret.debugPart;
