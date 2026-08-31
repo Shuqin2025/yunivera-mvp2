@@ -79,25 +79,51 @@ function pickDescription($) {
 }
 
 function heuristicsSku($) {
-  const metaSku = $('meta[itemprop="sku"]').attr('content') || $('meta[name="sku"]').attr('content');
-  if (metaSku && artikel.extract?.(metaSku)) return txt(metaSku);
-  const labelLike = [
-    '*:contains("Artikel-Nr")','*:contains("Artikelnummer")','*:contains("SKU")',
-    '*:contains("Bestellnummer")','*:contains("Part Number")','*[itemprop="sku"]'
-  ];
-  for (const sel of labelLike) {
-    const node = $(sel).first();
-    if (!node.length) continue;
-    const t = txt(node.text());
-    const fromLabel = artikel.extract?.(t);
-    if (fromLabel) return fromLabel;
-  }
-  const page = txt($('body').text());
-  const fromPage = artikel.extract?.(page);
-  if (fromPage) return fromPage;
-  return '';
-}
+  // 1) Strong structured SKU metadata.
+  const metaSku =
+    $('meta[itemprop="sku"]').attr('content') ||
+    $('meta[name="sku"]').attr('content');
 
+  if (metaSku) {
+    const v = txt(metaSku);
+    if (v && artikel.extract(v)) return v;
+  }
+
+  // 2) Direct schema.org SKU element.
+  // Example:
+  // <span class="product-detail-ordernumber" itemprop="sku">
+  //   C05.01003.A019
+  // </span>
+  const itempropSku = txt($('[itemprop="sku"]').first().text());
+
+  if (itempropSku) {
+    const v = artikel.extract(itempropSku);
+    if (v) return v;
+  }
+
+  // 3) Product metadata may contain the SKU.
+  const metaCandidates = [
+    $('meta[property="og:title"]').attr('content'),
+    $('meta[property="og:url"]').attr('content'),
+    $('meta[property="og:image"]').attr('content')
+  ].filter(Boolean);
+
+  for (const raw of metaCandidates) {
+    const candidate = artikel.extract(raw);
+    if (candidate) return candidate;
+  }
+
+  // 4) Last resort: generic whole-page extraction.
+  const page = txt($('body').text());
+  const fromPage = artikel.extract(page);
+
+  if (!fromPage) return '';
+
+  // Unlabelled fallback must at least contain a digit.
+  if (!/\d/.test(fromPage)) return '';
+
+  return fromPage;
+}
 export function shouldFetch(items, { key = 'sku', threshold = 0.5 } = {}) {
   if (!Array.isArray(items) || !items.length) return false;
   const missing = items.filter(x => !x || !txt(x[key])).length;
@@ -106,9 +132,13 @@ export function shouldFetch(items, { key = 'sku', threshold = 0.5 } = {}) {
 
 // ---------- 抓取单个详情页并解析 ----------
 async function fetchOne(url, { timeout = 15000, fetchHtml } = {}) {
-  const html = fetchHtml
+  const fetched = fetchHtml
     ? await fetchHtml(url, { timeout })
-    : await http.get(url, { timeout });
+    : await http.fetchHtml(url, { timeout });
+
+  const html = typeof fetched === 'string'
+    ? fetched
+    : (fetched?.html || '');
   const $ = load(html);
   const title = txt(pickTitle($));
   const price = txt(pickPrice($));
@@ -151,7 +181,18 @@ export async function fetch(
     const u = normalizeUrl(base, it.link || it.url);
     const r = byUrl.get(u);
     if (!r) continue;
-    const badSku = !txt(it.sku) || /^\d{1,3}$/.test(it.sku);
+    const currentSku = txt(it.sku);
+    const detailSku = txt(r.sku);
+
+    const badSku =
+      !currentSku ||
+      /^\d{1,3}$/.test(currentSku) ||
+      (
+        detailSku &&
+        detailSku !== currentSku &&
+        detailSku.length > currentSku.length &&
+        detailSku.includes(currentSku)
+      );
     merge(it, {
       sku: (badSku && txt(r.sku)) ? r.sku : it.sku,
       title: it.title || r.title,
